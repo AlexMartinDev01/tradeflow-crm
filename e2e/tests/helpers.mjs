@@ -1,10 +1,17 @@
 import {expect} from '@playwright/test';
+import fs from 'node:fs';
 
 export const DEMO_PASSWORD='Demo@TradeFlow2026!';
 const sessionCache=new Map();
+let seededSessions={};
+try{seededSessions=JSON.parse(fs.readFileSync(process.env.E2E_AUTH_FILE||'.auth/sessions.json','utf8'))}catch{}
 
 export async function loginApi(request,username='demo.manager'){
   if(sessionCache.has(username))return sessionCache.get(username);
+  if(seededSessions[username]){
+    const session={...seededSessions[username],headers:{Authorization:`Bearer ${seededSessions[username].token}`}};
+    sessionCache.set(username,session);return session;
+  }
   const response=await request.post('/api/auth/login',{data:{username,password:DEMO_PASSWORD}});
   expect(response.ok(),`login failed for ${username}: ${response.status()} ${await response.text()}`).toBeTruthy();
   const data=await response.json();

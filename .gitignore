@@ -12,3 +12,5 @@ uploads/*
 coverage/
 .data/
 *.log
+
+e2e/.auth/
