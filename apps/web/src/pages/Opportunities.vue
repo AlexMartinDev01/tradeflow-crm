@@ -16,6 +16,7 @@ async function save(){
   if(!form.customer_id||!form.name)return ElMessage.warning('客户和商机名称必填');
   await api.post('/opportunities',form);dialog.value=false;await load();ElMessage.success('商机已创建')
 }
+function stageChanged(r:any,value:any){requestStage(r,String(value))}
 async function requestStage(r:any,value:string){
   if(value==='lost'){
     selected.value=r;pendingStage.value=value;lossForm.loss_reason=r.loss_reason||'';lossDialog.value=true;return;
@@ -42,7 +43,7 @@ onMounted(load);
 <div class="card"><el-table :data="rows">
 <el-table-column label="客户" min-width="180"><template #default="s">{{customerMap[s.row.customer_id]||s.row.customer_id}}</template></el-table-column>
 <el-table-column prop="name" label="商机" min-width="220"/>
-<el-table-column label="阶段" width="150"><template #default="s"><el-select :model-value="s.row.stage" size="small" @change="(v:string)=>requestStage(s.row,v)"><el-option v-for="x in stages" :key="x" :label="x" :value="x"/></el-select></template></el-table-column>
+<el-table-column label="阶段" width="150"><template #default="s"><el-select :model-value="s.row.stage" size="small" @change="stageChanged(s.row,$event)"><el-option v-for="x in stages" :key="x" :label="x" :value="x"/></el-select></template></el-table-column>
 <el-table-column label="预计金额" width="150"><template #default="s">{{s.row.currency}} {{Number(s.row.expected_amount||0).toLocaleString()}}</template></el-table-column>
 <el-table-column prop="probability" label="概率%" width="80"/><el-table-column prop="expected_close_date" label="预计成交日" width="130"/><el-table-column prop="competitor" label="竞争对手"/>
 <el-table-column prop="loss_reason" label="输单原因" min-width="180"><template #default="s">{{s.row.stage==='lost'?(s.row.loss_reason||'-'):'-'}}</template></el-table-column>
