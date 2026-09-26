@@ -122,4 +122,92 @@ test.describe('TradeFlow resilience and failure-path safety',()=>{
     const orders=await getJson(request,'/api/orders?size=200',manager.headers);
     expect(orders.data.filter(x=>x.quotation_id===quotation.id)).toHaveLength(1);
   });
+
+
+  test('disabled user immediately loses an already-issued session token',async({request})=>{
+    const admin=await loginApi(request,'demo.admin');
+    const suffix=Date.now().toString().slice(-8);
+    const username='e2e.disabled.'+suffix;
+    const created=await postJson(request,'/api/users',{
+      username,
+      display_name:'Disabled Session E2E '+suffix,
+      role:'sales',
+      password:'DisableTest#2026A',
+      data_scope:'self',
+      enabled:1
+    },admin.headers);
+    expect(created.id).toBeTruthy();
+
+    const login=await request.post('/api/auth/login',{data:{username,password:'DisableTest#2026A'}});
+    expect(login.status()).toBe(200);
+    const loginData=await login.json();
+    expect(loginData.token).toBeTruthy();
+    const oldHeaders={Authorization:'Bearer '+loginData.token};
+
+    const before=await request.get('/api/auth/me',{headers:oldHeaders});
+    expect(before.status()).toBe(200);
+
+    const disabled=await request.patch('/api/users/'+created.id,{headers:admin.headers,data:{enabled:0}});
+    expect(disabled.status()).toBe(200);
+
+    const after=await request.get('/api/auth/me',{headers:oldHeaders});
+    expect(after.status()).toBe(401);
+
+    const relogin=await request.post('/api/auth/login',{data:{username,password:'DisableTest#2026A'}});
+    expect(relogin.status()).toBe(401);
+  });
+
+  test('malformed JSON is rejected as an explicit 400 invalid_json error',async({request})=>{
+    const manager=await loginApi(request,'demo.manager');
+    const response=await request.fetch('/api/customers',{
+      method:'POST',
+      headers:{...manager.headers,'content-type':'application/json'},
+      data:'{"name":"broken-json"'
+    });
+    expect(response.status()).toBe(400);
+    const payload=await response.json();
+    expect(payload.error).toBe('invalid_json');
+    expect(payload.request_id).toBeTruthy();
+  });
+
+  test('oversized attachment returns 413 and leaves no document metadata',async({request})=>{
+    const manager=await loginApi(request,'demo.manager');
+    const suffix=Date.now().toString().slice(-8);
+    const customer=await postJson(request,'/api/customers',{
+      name:'Oversized Attachment E2E '+suffix,customer_types:['Importer'],status:'potential',grade:'B',country:'Germany',source:'E2E'
+    },manager.headers);
+
+    const raw=Buffer.alloc(15*1024*1024+1,65);
+    const response=await request.post('/api/files/upload',{headers:manager.headers,data:{
+      entity_type:'customer',entity_id:customer.id,category:'limit',file_name:'too-large.bin',mime_type:'application/octet-stream',
+      content_base64:raw.toString('base64')
+    }});
+    expect(response.status()).toBe(413);
+    const payload=await response.json();
+    expect(payload.error).toBe('file_too_large');
+    expect(Number(payload.max_bytes)).toBe(15*1024*1024);
+
+    const files=await getJson(request,'/api/files?entity_type=customer&entity_id='+customer.id,manager.headers);
+    expect(files).toHaveLength(0);
+  });
+
+  test('path-like attachment filename is normalized and cannot escape upload root',async({request})=>{
+    const manager=await loginApi(request,'demo.manager');
+    const suffix=Date.now().toString().slice(-8);
+    const customer=await postJson(request,'/api/customers',{
+      name:'Path Safety E2E '+suffix,customer_types:['Importer'],status:'potential',grade:'B',country:'Germany',source:'E2E'
+    },manager.headers);
+
+    const uploaded=await postJson(request,'/api/files/upload',{
+      entity_type:'customer',entity_id:customer.id,category:'path-safety',
+      file_name:'../../nested/../safe-note.txt',mime_type:'text/plain',
+      content_base64:Buffer.from('path-safe '+suffix).toString('base64')
+    },manager.headers);
+    expect(uploaded.original_name).toBe('safe-note.txt');
+    expect(uploaded.name).toBe('safe-note.txt');
+
+    const download=await request.get('/api/documents/'+uploaded.id+'/download',{headers:manager.headers});
+    expect(download.status()).toBe(200);
+    expect(await download.text()).toBe('path-safe '+suffix);
+  });
 });

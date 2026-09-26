@@ -695,7 +695,23 @@ function json(res, status, data, extraHeaders={}) {
   res.writeHead(status, {'content-type':'application/json; charset=utf-8','access-control-allow-origin':CORS_ORIGIN,'access-control-allow-headers':'content-type, authorization','access-control-allow-methods':'GET,POST,PUT,PATCH,DELETE,OPTIONS',...extraHeaders});
   res.end(JSON.stringify(data));
 }
-function body(req) { return new Promise((resolve,reject)=>{ let raw=''; req.on('data',c=>{ raw+=c; if(raw.length>25_000_000){reject(new Error('payload too large'));req.destroy();}}); req.on('end',()=>{ if(!raw)return resolve({}); try{resolve(JSON.parse(raw));}catch{reject(new Error('invalid json'));}}); req.on('error',reject);}); }
+function requestBodyError(code,message,statusCode=400){const e=new Error(message);e.code=code;e.statusCode=statusCode;return e;}
+function body(req) {
+  return new Promise((resolve,reject)=>{
+    let raw='',bytes=0,tooLarge=false;
+    req.on('data',chunk=>{
+      bytes+=Buffer.byteLength(chunk);
+      if(bytes>25_000_000){tooLarge=true;return;}
+      if(!tooLarge)raw+=chunk;
+    });
+    req.on('end',()=>{
+      if(tooLarge)return reject(requestBodyError('payload_too_large','请求体超过 25MB 限制',413));
+      if(!raw)return resolve({});
+      try{resolve(JSON.parse(raw));}catch{return reject(requestBodyError('invalid_json','请求体不是合法 JSON',400));}
+    });
+    req.on('error',reject);
+  });
+}
 function columns(table) { return db.prepare(`PRAGMA table_info(${table})`).all().map(x=>x.name); }
 const colCache = new Map();
 function tableCols(table){ if(!colCache.has(table)) colCache.set(table,columns(table)); return colCache.get(table); }
@@ -3911,6 +3927,6 @@ const server = http.createServer(async (req,res)=>{
     }
 
     return json(res,404,{error:'not_found',path:p});
-  } catch(e){ console.error(req.requestId,e); const known=['custom_field_validation_failed','weak_password','currency_filter_required','invalid_report_entity','invalid_report_dimension','invalid_report_metric','invalid_automation_entity','automation_conditions_required','automation_actions_required','invalid_automation_condition','invalid_automation_condition_value','invalid_automation_action','automation_task_title_required','invalid_automation_tag','invalid_automation_action_value','title_content_required','ticket_not_resolved','ticket_solution_required','knowledge_already_exists']; const code=known.includes(e.message)?e.message:'request_failed'; return json(res,400,{error:code,message:e.message,details:e.details||undefined,request_id:req.requestId}); }
+  } catch(e){ console.error(req.requestId,e); const known=['custom_field_validation_failed','weak_password','currency_filter_required','invalid_report_entity','invalid_report_dimension','invalid_report_metric','invalid_automation_entity','automation_conditions_required','automation_actions_required','invalid_automation_condition','invalid_automation_condition_value','invalid_automation_action','automation_task_title_required','invalid_automation_tag','invalid_automation_action_value','title_content_required','ticket_not_resolved','ticket_solution_required','knowledge_already_exists']; const code=e.code|| (known.includes(e.message)?e.message:'request_failed'); const status=Number(e.statusCode||400); return json(res,status,{error:code,message:e.message,details:e.details||undefined,request_id:req.requestId}); }
 });
 server.listen(PORT,HOST,()=>console.log(`TradeFlow API listening on http://${HOST}:${PORT}/api`));
