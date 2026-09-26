@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS marketing_consents(id TEXT PRIMARY KEY, customer_id T
 CREATE TABLE IF NOT EXISTS campaign_recipients(id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, customer_id TEXT NOT NULL, contact_id TEXT, address TEXT, status TEXT NOT NULL DEFAULT 'prepared', reason TEXT, personalized_subject TEXT, personalized_body TEXT, sent_at TEXT, converted_at TEXT, created_at TEXT NOT NULL, UNIQUE(campaign_id,customer_id,contact_id,address));
 CREATE TABLE IF NOT EXISTS integrations(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, provider TEXT, base_url TEXT, enabled INTEGER NOT NULL DEFAULT 0, config TEXT NOT NULL DEFAULT '{}', secret_env TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS integration_deliveries(id TEXT PRIMARY KEY, integration_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, status_code INTEGER, response_excerpt TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS attachment_backup_state(integration_id TEXT NOT NULL, document_id TEXT NOT NULL, checksum TEXT, status TEXT NOT NULL, synced_at TEXT, message TEXT, PRIMARY KEY(integration_id,document_id));
 CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, role TEXT NOT NULL DEFAULT 'readonly', enabled INTEGER NOT NULL DEFAULT 1, expires_at TEXT, last_used_at TEXT, created_at TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, entity_type TEXT, entity_id TEXT, ip TEXT, request_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
@@ -1039,6 +1040,109 @@ function removeStoredDocumentFile(d){
   if(file!==root&&file.startsWith(root+path.sep)&&fs.existsSync(file))fs.unlinkSync(file);
 }
 
+const ATTACHMENT_SNAPSHOT_DIR=path.join(BACKUP_DIR,'attachment-snapshots');
+fs.mkdirSync(ATTACHMENT_SNAPSHOT_DIR,{recursive:true});
+function storedDocumentPath(d){
+  if(!d?.storage_path)return null;
+  const root=path.resolve(UPLOAD_DIR),file=path.resolve(root,d.storage_path);
+  if(file===root||!file.startsWith(root+path.sep))return null;
+  return file;
+}
+function attachmentIntegrityScan(fullChecksum=false){
+  const rows=db.prepare("SELECT id,entity_type,entity_id,original_name,name,storage_path,size_bytes,checksum,mime_type,created_at FROM documents WHERE storage_path IS NOT NULL ORDER BY created_at").all();
+  const issues=[];let checked=0,totalBytes=0;
+  for(const d of rows){
+    checked++;const file=storedDocumentPath(d);
+    if(!file||!fs.existsSync(file)){issues.push({document_id:d.id,type:'missing',storage_path:d.storage_path,name:d.original_name||d.name});continue;}
+    const st=fs.statSync(file);totalBytes+=st.size;
+    if(d.size_bytes!=null&&Number(d.size_bytes)!==Number(st.size)){issues.push({document_id:d.id,type:'size_mismatch',expected:Number(d.size_bytes),actual:st.size,storage_path:d.storage_path,name:d.original_name||d.name});continue;}
+    if(fullChecksum&&d.checksum){
+      const actual=createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+      if(actual!==d.checksum)issues.push({document_id:d.id,type:'checksum_mismatch',expected:d.checksum,actual,storage_path:d.storage_path,name:d.original_name||d.name});
+    }
+  }
+  const result={checked,total_bytes:totalBytes,full_checksum:!!fullChecksum,issues,missing:issues.filter(x=>x.type==='missing').length,size_mismatch:issues.filter(x=>x.type==='size_mismatch').length,checksum_mismatch:issues.filter(x=>x.type==='checksum_mismatch').length,ok:issues.length===0,checked_at:now()};
+  db.prepare("INSERT INTO settings(key,value,updated_at) VALUES('attachment_integrity_last',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(result),now());
+  setSystemAlert('attachment_integrity',!result.ok,'critical','附件完整性异常',result.ok?'附件完整性正常':`发现 ${issues.length} 个附件文件异常`,{missing:result.missing,size_mismatch:result.size_mismatch,checksum_mismatch:result.checksum_mismatch});
+  return result;
+}
+function listAttachmentSnapshots(){
+  if(!fs.existsSync(ATTACHMENT_SNAPSHOT_DIR))return [];
+  return fs.readdirSync(ATTACHMENT_SNAPSHOT_DIR,{withFileTypes:true}).filter(x=>x.isDirectory()&&/^snapshot-[A-Za-z0-9_-]+$/.test(x.name)).map(x=>{
+    const dir=path.join(ATTACHMENT_SNAPSHOT_DIR,x.name),manifest=path.join(dir,'manifest.json');
+    try{const data=JSON.parse(fs.readFileSync(manifest,'utf8'));return {name:x.name,created_at:data.created_at||fs.statSync(dir).mtime.toISOString(),files:data.files?.length||0,total_bytes:data.total_bytes||0,ok:data.ok!==false};}
+    catch{return {name:x.name,created_at:fs.statSync(dir).mtime.toISOString(),files:null,total_bytes:null,ok:false};}
+  }).sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at)));
+}
+function pruneAttachmentSnapshots(maxFiles=5){
+  const rows=listAttachmentSnapshots();for(const x of rows.slice(maxFiles)){try{fs.rmSync(path.join(ATTACHMENT_SNAPSHOT_DIR,x.name),{recursive:true,force:true})}catch{}}
+}
+function createAttachmentSnapshot(){
+  const integrity=attachmentIntegrityScan(true);if(!integrity.ok){const e=new Error('attachment_integrity_failed');e.details=integrity;throw e;}
+  const stamp=now().replace(/[:.]/g,'-'),name=`snapshot-${stamp}`,root=path.join(ATTACHMENT_SNAPSHOT_DIR,name),filesDir=path.join(root,'files');fs.mkdirSync(filesDir,{recursive:true});
+  const docs=db.prepare("SELECT id,entity_type,entity_id,original_name,name,storage_path,size_bytes,checksum,mime_type,created_at FROM documents WHERE storage_path IS NOT NULL ORDER BY created_at").all();
+  const manifestFiles=[];
+  try{
+    for(const d of docs){
+      const source=storedDocumentPath(d);if(!source||!fs.existsSync(source))throw new Error(`missing attachment ${d.id}`);
+      const relative=String(d.storage_path).replace(/\\/g,'/'),target=path.resolve(filesDir,relative),base=path.resolve(filesDir);
+      if(!target.startsWith(base+path.sep))throw new Error('invalid attachment path');
+      fs.mkdirSync(path.dirname(target),{recursive:true});fs.copyFileSync(source,target);
+      manifestFiles.push({...d,storage_path:relative});
+    }
+    const manifest={version:1,created_at:now(),upload_root:UPLOAD_DIR,files:manifestFiles,total_bytes:manifestFiles.reduce((a,x)=>a+Number(x.size_bytes||0),0),ok:true};
+    fs.writeFileSync(path.join(root,'manifest.json'),JSON.stringify(manifest,null,2),'utf8');
+    pruneAttachmentSnapshots(5);return {name,created_at:manifest.created_at,files:manifestFiles.length,total_bytes:manifest.total_bytes,ok:true};
+  }catch(e){fs.rmSync(root,{recursive:true,force:true});throw e;}
+}
+function safeAttachmentSnapshot(name=''){
+  const n=String(name||'');if(!/^snapshot-[A-Za-z0-9_-]+$/.test(n))return null;
+  const root=path.resolve(ATTACHMENT_SNAPSHOT_DIR),dir=path.resolve(root,n);if(!dir.startsWith(root+path.sep))return null;return dir;
+}
+function attachmentBackupIntegration(){
+  return db.prepare("SELECT * FROM integrations WHERE enabled=1 AND type='storage_backup' ORDER BY updated_at DESC LIMIT 1").get();
+}
+async function syncAttachmentsOffsite(limit=20){
+  const integration=attachmentBackupIntegration();if(!integration)return {configured:false,synced:0,skipped:0,failed:0,message:'offsite backup not configured'};
+  const cfg=parseJSON(integration.config,{})||{},base=String(integration.base_url||cfg.url||'').replace(/\/$/,'');if(!base)throw new Error('backup_endpoint_missing');
+  const secret=integration.secret_env?process.env[integration.secret_env]||'':'';
+  const docs=db.prepare("SELECT id,entity_type,entity_id,original_name,name,storage_path,size_bytes,checksum,mime_type FROM documents WHERE storage_path IS NOT NULL ORDER BY created_at").all();
+  const result={configured:true,integration_id:integration.id,integration_name:integration.name,synced:0,skipped:0,failed:0,processed:0,errors:[]};
+  for(const d of docs){
+    if(result.processed>=Math.max(1,Math.min(100,Number(limit||20))))break;
+    const state=db.prepare('SELECT * FROM attachment_backup_state WHERE integration_id=? AND document_id=?').get(integration.id,d.id);
+    if(state?.status==='success'&&state.checksum===d.checksum){result.skipped++;continue;}
+    result.processed++;const file=storedDocumentPath(d);
+    if(!file||!fs.existsSync(file)){result.failed++;result.errors.push({document_id:d.id,error:'missing_file'});continue;}
+    const headers={'content-type':d.mime_type||'application/octet-stream','x-tradeflow-document-id':d.id,'x-tradeflow-storage-path':String(d.storage_path).replace(/\\/g,'/'),'x-tradeflow-checksum':d.checksum||'','x-tradeflow-original-name':encodeURIComponent(d.original_name||d.name||'file')};
+    if(secret){const h=String(cfg.auth_header||'authorization').toLowerCase(),prefix=cfg.auth_prefix===undefined?'Bearer':String(cfg.auth_prefix||'');headers[h]=prefix?`${prefix} ${secret}`:secret;}
+    const method=String(cfg.method||'PUT').toUpperCase(),target=cfg.path_mode==='single_endpoint'?base:`${base}/${String(d.storage_path).split(/[\\/]+/).map(encodeURIComponent).join('/')}`;
+    try{
+      const resp=await fetch(target,{method,headers,body:fs.readFileSync(file),signal:AbortSignal.timeout(Number(cfg.timeout_ms||30000))}),txt=(await resp.text()).slice(0,500);
+      const ok=resp.ok;db.prepare(`INSERT INTO attachment_backup_state(integration_id,document_id,checksum,status,synced_at,message) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(integration_id,document_id) DO UPDATE SET checksum=excluded.checksum,status=excluded.status,synced_at=excluded.synced_at,message=excluded.message`)
+        .run(integration.id,d.id,d.checksum||null,ok?'success':'failed',ok?now():null,txt||`HTTP ${resp.status}`);
+      db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),integration.id,'storage_backup.attachment',ok?'success':'failed',resp.status,txt,now());
+      if(ok)result.synced++;else{result.failed++;result.errors.push({document_id:d.id,status:resp.status,error:txt});}
+    }catch(e){
+      const msg=String(e?.message||e).slice(0,500);db.prepare(`INSERT INTO attachment_backup_state(integration_id,document_id,checksum,status,synced_at,message) VALUES(?,?,?,?,?,?)
+        ON CONFLICT(integration_id,document_id) DO UPDATE SET checksum=excluded.checksum,status=excluded.status,synced_at=excluded.synced_at,message=excluded.message`)
+        .run(integration.id,d.id,d.checksum||null,'failed',null,msg);
+      result.failed++;result.errors.push({document_id:d.id,error:msg});
+    }
+  }
+  db.prepare("INSERT INTO settings(key,value,updated_at) VALUES('attachment_offsite_last',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(result),now());
+  setSystemAlert('attachment_offsite_failures',result.failed>0,'warning','附件异地备份存在失败',`本次附件异地同步失败 ${result.failed} 个文件`,{failed:result.failed,integration:integration.name});
+  return result;
+}
+function attachmentBackupStatus(){
+  const docs=Number(db.prepare("SELECT COUNT(*) c FROM documents WHERE storage_path IS NOT NULL").get()?.c||0),bytes=Number(db.prepare("SELECT COALESCE(SUM(size_bytes),0) v FROM documents WHERE storage_path IS NOT NULL").get()?.v||0);
+  const integrityRow=db.prepare("SELECT value,updated_at FROM settings WHERE key='attachment_integrity_last'").get(),offsiteRow=db.prepare("SELECT value,updated_at FROM settings WHERE key='attachment_offsite_last'").get(),integration=attachmentBackupIntegration();
+  const synced=integration?Number(db.prepare("SELECT COUNT(*) c FROM attachment_backup_state WHERE integration_id=? AND status='success'").get(integration.id)?.c||0):0;
+  return {documents:docs,total_bytes:bytes,integrity:integrityRow?{...(parseJSON(integrityRow.value,{})||{}),updated_at:integrityRow.updated_at}:null,snapshots:listAttachmentSnapshots(),offsite:{configured:!!integration,integration:integration?{id:integration.id,name:integration.name,provider:integration.provider,base_url:integration.base_url}:null,synced_documents:synced,last_run:offsiteRow?{...(parseJSON(offsiteRow.value,{})||{}),updated_at:offsiteRow.updated_at}:null}};
+}
+
+
 const APP_STARTED_AT=Date.now();
 const opsMetrics={requests:0,responses4xx:0,responses5xx:0,total_latency_ms:0,statuses:{}};
 
@@ -1962,6 +2066,38 @@ const server = http.createServer(async (req,res)=>{
         const b=await body(req),score=Math.min(5,Math.max(1,Number(b.satisfaction||0)));if(!score)return json(res,400,{error:'invalid_score'});
         db.prepare('UPDATE aftersales SET satisfaction=?,satisfaction_note=?,updated_at=? WHERE id=?').run(score,b.note||null,now(),a.id);
         audit(user,'rate','aftersales',a.id,req,{satisfaction:score});return json(res,200,db.prepare('SELECT * FROM aftersales WHERE id=?').get(a.id));
+      }
+    }
+
+    // ---- Attachment integrity and backup ----
+    if(p==='/api/attachment-backup/status' && req.method==='GET'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      return json(res,200,attachmentBackupStatus());
+    }
+    if(p==='/api/attachment-backup/manifest' && req.method==='GET'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      const rows=db.prepare("SELECT id,entity_type,entity_id,original_name,name,storage_path,size_bytes,checksum,mime_type,created_at FROM documents WHERE storage_path IS NOT NULL ORDER BY created_at").all();
+      return json(res,200,{generated_at:now(),files:rows,total_bytes:rows.reduce((a,x)=>a+Number(x.size_bytes||0),0)});
+    }
+    if(p==='/api/attachment-backup/verify' && req.method==='POST'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      const b=await body(req),result=attachmentIntegrityScan(!!b.full_checksum);audit(user,'verify','attachment_backup',null,req,{full_checksum:!!b.full_checksum,...result});return json(res,result.ok?200:409,result);
+    }
+    if(p==='/api/attachment-backup/snapshot' && req.method==='POST'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      try{const result=createAttachmentSnapshot();audit(user,'snapshot','attachment_backup',result.name,req,result);return json(res,201,result);}
+      catch(e){if(e.message==='attachment_integrity_failed')return json(res,409,{error:e.message,details:e.details});throw e;}
+    }
+    if(p==='/api/attachment-backup/sync' && req.method==='POST'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      const b=await body(req),result=await syncAttachmentsOffsite(b.limit||20);audit(user,'sync','attachment_backup',result.integration_id||null,req,result);return json(res,result.failed?207:200,result);
+    }
+    {
+      const snap=p.match(/^\/api\/attachment-backup\/snapshots\/([^/]+)$/);
+      if(snap&&req.method==='DELETE'){
+        if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+        const dir=safeAttachmentSnapshot(decodeURIComponent(snap[1]));if(!dir||!fs.existsSync(dir))return json(res,404,{error:'not_found'});
+        const name=path.basename(dir);fs.rmSync(dir,{recursive:true,force:true});audit(user,'delete_snapshot','attachment_backup',name,req);return json(res,200,{ok:true});
       }
     }
 
