@@ -3,7 +3,7 @@ import {computed} from 'vue';
 import {modules} from '../config/modules';
 import {useAuth} from '../stores/auth';
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
-const dedicated=['brands','inquiries','opportunities','quotations','samples','products','contracts','orders','payments','creditProfiles','shipments','aftersales','campaigns','customFields'];
+const dedicated=['brands','inquiries','opportunities','quotations','samples','products','contracts','orders','payments','creditProfiles','shipments','aftersales','campaigns','users','customFields'];
 const allowedByRole:any={
   admin:'*',manager:'*',
   sales:['brands','products','contracts','tasks','activities','documents'],
@@ -46,7 +46,7 @@ const showAdmin=computed(()=>['admin','manager'].includes(role.value));
   <div v-if="businessModules.length" class="nav-group">其他业务</div>
   <router-link v-for="m in businessModules" :key="m.key" class="nav" :to="`/module/${m.key}`"><span class="label">{{m.title}}</span></router-link>
 
-  <div class="nav-group">系统配置</div>
+  <div class="nav-group">系统配置</div><router-link v-if="auth.user?.role==='admin'" class="nav" to="/settings/team"><span class="label">组织与账号</span></router-link>
   <router-link v-if="showAdmin" class="nav" to="/settings/custom-fields"><span class="label">自定义字段</span></router-link>
   <router-link v-if="showAdmin" class="nav" to="/automation"><span class="label">自动化规则</span></router-link>
   <router-link v-if="showAdmin" class="nav" to="/integrations"><span class="label">系统集成</span></router-link><router-link v-if="showAdmin" class="nav" to="/audit"><span class="label">审计日志</span></router-link>
