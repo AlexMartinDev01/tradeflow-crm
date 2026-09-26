@@ -10,3 +10,18 @@
 .el-tag--primary.el-tag--light .el-tag__content{color:#1d4ed8}
 .el-tag--info.el-tag--light{--el-tag-text-color:#475569;--el-tag-bg-color:#f1f5f9;--el-tag-border-color:#cbd5e1}
 .el-tag--info.el-tag--light .el-tag__content,.el-tag--info.el-tag--light .el-select__tags-text{color:#475569}
+
+
+/* Hard AA override for default closable primary tags.
+   Element Plus may compute primary-light tag text from theme light variants;
+   keep 12px saved-view/tag text above WCAG AA 4.5:1. */
+.el-tag.el-tag--primary.el-tag--light{
+  --el-tag-text-color:#1e40af!important;
+  --el-tag-bg-color:#eff6ff!important;
+  --el-tag-border-color:#93c5fd!important;
+  color:#1e40af!important;
+}
+.el-tag.el-tag--primary.el-tag--light .el-tag__content,
+.el-tag.el-tag--primary.el-tag--light .el-tag__close{
+  color:#1e40af!important;
+}

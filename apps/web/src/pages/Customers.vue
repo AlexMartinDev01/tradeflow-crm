@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import {ElMessage,ElMessageBox} from 'element-plus';
-import {ref,reactive,onMounted,computed} from 'vue';
+import {ref,reactive,onMounted,computed,nextTick} from 'vue';
 import {useRouter} from 'vue-router';
 import AppLayout from '../layouts/AppLayout.vue';
 import {api} from '../api/client';
 
-const rows=ref<any[]>([]),total=ref(0),dialog=ref(false),loading=ref(false),saveViewDialog=ref(false),bulkDialog=ref(false),bulkLoading=ref(false),router=useRouter();
+const rows=ref<any[]>([]),total=ref(0),dialog=ref(false),loading=ref(false),saveViewDialog=ref(false),bulkDialog=ref(false),bulkLoading=ref(false),router=useRouter(),customerNameInput=ref<any>(null);
 const owners=ref<any[]>([]),tags=ref<any[]>([]),views=ref<any[]>([]),me=ref<any>(null),viewName=ref(''),selectedRows=ref<any[]>([]),bulkPreview=ref<any>(null);
 const filters=reactive<any>({keyword:'',country:'',status:'',grade:'',owner_id:'',tag_id:'',source:'',industry:'',customer_type:''});
 const form=reactive<any>({name:'',english_name:'',country:'',city:'',website:'',industry:'',customer_types:['Importer'],status:'potential',grade:'B',source:'',language:'English',timezone:'',business_scope:'',tax_no:'',registration_no:'',owner_id:''});
@@ -18,6 +18,7 @@ const ownerMap=computed(()=>Object.fromEntries(owners.value.map(x=>[x.id,x.displ
 const canBulk=computed(()=>['admin','manager','sales','followup'].includes(me.value?.role));
 const canChangeOwner=computed(()=>['admin','manager'].includes(me.value?.role));
 
+function focusCustomerDialog(){nextTick(()=>customerNameInput.value?.focus?.())}
 function queryParams(){
   const p:any={size:200};
   for(const k of ['keyword','country','status','grade','owner_id','tag_id','source','industry','customer_type']) if(filters[k])p[k]=filters[k];
@@ -161,8 +162,8 @@ onMounted(async()=>{await loadRefs();await load()});
 
 <el-dialog v-model="saveViewDialog" title="保存筛选视图" width="480"><el-form label-position="top"><el-form-item label="视图名称"><el-input v-model="viewName" placeholder="例如：德国A类重点客户"/></el-form-item></el-form><template #footer><el-button @click="saveViewDialog=false">取消</el-button><el-button type="primary" @click="saveView">保存</el-button></template></el-dialog>
 
-<el-dialog v-model="dialog" title="新增客户" width="820"><el-form label-position="top"><div class="grid" style="grid-template-columns:1fr 1fr">
-  <el-form-item label="客户名称"><el-input v-model="form.name"/></el-form-item><el-form-item label="英文名称"><el-input v-model="form.english_name"/></el-form-item>
+<el-dialog v-model="dialog" title="新增客户" width="820" @opened="focusCustomerDialog"><el-form label-position="top"><div class="grid" style="grid-template-columns:1fr 1fr">
+  <el-form-item label="客户名称"><el-input ref="customerNameInput" v-model="form.name"/></el-form-item><el-form-item label="英文名称"><el-input v-model="form.english_name"/></el-form-item>
   <el-form-item label="国家"><el-input v-model="form.country"/></el-form-item><el-form-item label="城市"><el-input v-model="form.city"/></el-form-item>
   <el-form-item label="官网"><el-input v-model="form.website"/></el-form-item><el-form-item label="行业"><el-input v-model="form.industry"/></el-form-item>
   <el-form-item label="税号 / VAT"><el-input v-model="form.tax_no"/></el-form-item><el-form-item label="注册号"><el-input v-model="form.registration_no"/></el-form-item>
