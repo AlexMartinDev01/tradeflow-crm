@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {DEMO_PASSWORD} from './helpers.mjs';
+import {DEMO_PASSWORD,authenticatePage} from './helpers.mjs';
 
 async function login(page){
   await page.goto('/#/login');
@@ -42,12 +42,12 @@ test.describe('TradeFlow manager UI smoke',()=>{
   });
 
   for(const [route,heading] of criticalRoutes){
-    test(`${heading} lazy route renders independently`,async({page})=>{
+    test(`${heading} lazy route renders independently`,async({page,request})=>{
       const serverErrors=[],pageErrors=[];
       page.on('response',response=>{if(response.url().includes('/api/')&&response.status()>=500)serverErrors.push(`${response.status()} ${response.url()}`)});
       page.on('pageerror',error=>pageErrors.push(String(error)));
 
-      await login(page);
+      await authenticatePage(page,request,'demo.manager');
       await page.goto(route,{waitUntil:'domcontentloaded'});
       await expect(page.getByRole('heading',{name:heading})).toBeVisible({timeout:15000});
 
@@ -56,8 +56,8 @@ test.describe('TradeFlow manager UI smoke',()=>{
     });
   }
 
-  test('seeded business data is visible from customer, order and knowledge UI',async({page})=>{
-    await login(page);
+  test('seeded business data is visible from customer, order and knowledge UI',async({page,request})=>{
+    await authenticatePage(page,request,'demo.manager');
 
     await page.goto('/#/customers');
     await expect(page.getByRole('row',{name:/Nordstern Technik GmbH/})).toBeVisible();

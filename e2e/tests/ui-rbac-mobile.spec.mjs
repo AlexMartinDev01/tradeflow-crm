@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {DEMO_PASSWORD,loginApi} from './helpers.mjs';
+import {DEMO_PASSWORD,loginApi,authenticatePage} from './helpers.mjs';
 
 async function login(page,username){
   await page.goto('/#/login');
@@ -29,8 +29,8 @@ test.describe('TradeFlow UI write permissions',()=>{
     await expect(page.getByRole('row',{name:new RegExp(name)})).toBeVisible();
   });
 
-  test('readonly sees business data but no misleading write controls',async({page})=>{
-    await login(page,'demo.readonly');
+  test('readonly sees business data but no misleading write controls',async({page,request})=>{
+    await authenticatePage(page,request,'demo.readonly');
 
     await page.goto('/#/customers');
     await expect(page.getByRole('heading',{name:'客户360°'})).toBeVisible();
@@ -57,8 +57,9 @@ test.describe('TradeFlow UI write permissions',()=>{
     await expect(page.getByRole('button',{name:'新建售后工单'})).toHaveCount(0);
   });
 
-  test('sales navigation does not expose management-only modules and direct URL access is redirected',async({page})=>{
-    await login(page,'demo.sales01');
+  test('sales navigation does not expose management-only modules and direct URL access is redirected',async({page,request})=>{
+    await authenticatePage(page,request,'demo.sales01');
+    await page.goto('/#/');
     await expect(page.getByText('询盘管理',{exact:true})).toBeVisible();
     await expect(page.getByText('客户360°',{exact:true})).toBeVisible();
 
@@ -74,8 +75,8 @@ test.describe('TradeFlow UI write permissions',()=>{
     await expect(page.getByRole('heading',{name:'经营概览'})).toBeVisible();
   });
 
-  test('readonly customer detail does not show attachment write controls',async({page})=>{
-    await login(page,'demo.readonly');
+  test('readonly customer detail does not show attachment write controls',async({page,request})=>{
+    await authenticatePage(page,request,'demo.readonly');
     await page.goto('/#/customers');
     const row=page.getByRole('row',{name:/Nordstern Technik GmbH/});
     await expect(row).toBeVisible();
@@ -110,8 +111,7 @@ test.describe('TradeFlow mobile layout',()=>{
   });
 
   test('mobile customer dialog fits inside the viewport',async({page,request})=>{
-    const session=await loginApi(request,'demo.manager');
-    await page.addInitScript(token=>localStorage.setItem('token',token),session.token);
+    await authenticatePage(page,request,'demo.manager');
     await page.goto('/#/customers',{waitUntil:'domcontentloaded'});
     await expect(page.getByRole('heading',{name:'客户360°'})).toBeVisible({timeout:15000});
     await expect(page.getByRole('button',{name:'新增客户'})).toBeVisible({timeout:15000});
