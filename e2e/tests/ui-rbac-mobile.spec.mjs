@@ -16,12 +16,13 @@ test.describe('TradeFlow UI write permissions',()=>{
     const name='UI E2E Customer '+Date.now().toString().slice(-8);
 
     await page.getByRole('button',{name:'新增客户'}).click();
-    await page.getByLabel('客户名称').fill(name);
-    await page.getByLabel('英文名称').fill(name);
-    await page.getByLabel('国家').fill('Germany');
-    await page.getByLabel('城市').fill('Hamburg');
-    await page.getByLabel('行业').fill('Industrial Automation');
-    await page.getByLabel('来源').fill('Playwright UI');
+    const dialog=page.getByRole('dialog',{name:'新增客户'});
+    await dialog.getByLabel('客户名称',{exact:true}).fill(name);
+    await dialog.getByLabel('英文名称',{exact:true}).fill(name);
+    await dialog.getByLabel('国家',{exact:true}).fill('Germany');
+    await dialog.getByLabel('城市',{exact:true}).fill('Hamburg');
+    await dialog.getByLabel('行业',{exact:true}).fill('Industrial Automation');
+    await dialog.getByLabel('来源',{exact:true}).fill('Playwright UI');
     await page.getByLabel('主营业务').fill('Automated browser acceptance customer');
     await page.getByRole('button',{name:'查重并保存'}).click();
 
