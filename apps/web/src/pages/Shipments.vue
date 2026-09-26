@@ -3,7 +3,10 @@ import {ref,reactive,onMounted,computed} from 'vue';
 import {ElMessage} from 'element-plus';
 import AppLayout from '../layouts/AppLayout.vue';
 import {api} from '../api/client';
+import {useAuth} from '../stores/auth';
 
+const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
+const canEdit=computed(()=>['admin','manager','sales'].includes(auth.user?.role));
 const shipments=ref<any[]>([]),orders=ref<any[]>([]),customers=ref<any[]>([]),detail=ref<any>(null),drawer=ref(false),createDialog=ref(false),selectedOrder=ref<any>(null),orderFull=ref<any>(null);
 const form=reactive<any>({order_id:'',booking_no:'',carrier:'',forwarder:'',vessel_voyage:'',bl_no:'',port_of_loading:'',destination_port:'',etd:'',eta:'',status:'booking',tracking_url:'',notes:'',items:[],containers:[{container_type:'40HQ',container_no:'',seal_no:''}]});
 const orderMap=computed(()=>Object.fromEntries(orders.value.map(x=>[x.id,x.order_no])));
@@ -31,7 +34,7 @@ onMounted(load);
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">出运执行</h2><span class="muted">分批出货、多货柜、ETD/ETA、BL 和物流状态</span></div><el-button type="primary" @click="createDialog=true">新建出运批次</el-button></div>
+<div class="toolbar"><div><h2 style="margin:0">出运执行</h2><span class="muted">分批出货、多货柜、ETD/ETA、BL 和物流状态</span></div><el-button v-if="canEdit" type="primary" @click="createDialog=true">新建出运批次</el-button></div>
 <div class="card"><el-table :data="shipments" @row-dblclick="open">
 <el-table-column label="订单" width="180"><template #default="s">{{orderMap[s.row.order_id]||s.row.order_id}}</template></el-table-column>
 <el-table-column prop="booking_no" label="订舱号"/><el-table-column prop="carrier" label="船公司"/><el-table-column prop="forwarder" label="货代"/><el-table-column prop="vessel_voyage" label="船名/航次"/>
@@ -53,7 +56,7 @@ onMounted(load);
 </el-form><template #footer><el-button @click="createDialog=false">取消</el-button><el-button type="primary" @click="createShipment">创建出运批次</el-button></template></el-dialog>
 
 <el-drawer v-model="drawer" size="72%" title="出运批次详情"><template v-if="detail">
-<div class="toolbar"><div><h3>{{detail.booking_no||detail.id}}</h3><span class="muted">{{detail.order_no}} · {{detail.carrier}} {{detail.vessel_voyage}}</span></div><el-select v-model="detail.status" style="width:170px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select></div>
+<div class="toolbar"><div><h3>{{detail.booking_no||detail.id}}</h3><span class="muted">{{detail.order_no}} · {{detail.carrier}} {{detail.vessel_voyage}}</span></div><el-select v-if="canEdit" v-model="detail.status" style="width:170px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-else>{{detail.status}}</el-tag></div>
 <el-descriptions :column="3" border><el-descriptions-item label="提单号">{{detail.bl_no||'-'}}</el-descriptions-item><el-descriptions-item label="起运港">{{detail.port_of_loading||'-'}}</el-descriptions-item><el-descriptions-item label="目的港">{{detail.destination_port||'-'}}</el-descriptions-item><el-descriptions-item label="ETD">{{detail.etd||'-'}}</el-descriptions-item><el-descriptions-item label="ETA">{{detail.eta||'-'}}</el-descriptions-item><el-descriptions-item label="货代">{{detail.forwarder||'-'}}</el-descriptions-item></el-descriptions>
 <h4>本批次产品</h4><el-table :data="detail.items"><el-table-column prop="product_name" label="产品"/><el-table-column prop="quantity" label="数量"/><el-table-column prop="unit" label="单位"/></el-table>
 <h4>货柜</h4><el-table :data="detail.containers"><el-table-column prop="container_type" label="柜型"/><el-table-column prop="container_no" label="柜号"/><el-table-column prop="seal_no" label="封条号"/></el-table>

@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import {computed} from 'vue';
+import {computed,ref} from 'vue';
 import {modules} from '../config/modules';
 import {useAuth} from '../stores/auth';
-const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
+const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});const mobileOpen=ref(false);
 const dedicated=['brands','inquiries','opportunities','quotations','samples','products','contracts','orders','payments','creditProfiles','shipments','aftersales','campaigns','users','customFields'];
 const allowedByRole:any={
   admin:'*',manager:'*',
@@ -21,7 +21,7 @@ const showFinance=computed(()=>['admin','manager','finance','readonly'].includes
 const showExcel=computed(()=>['admin','manager'].includes(role.value));
 const showAdmin=computed(()=>['admin','manager'].includes(role.value));
 </script>
-<template><div class="app"><aside class="sidebar">
+<template><div class="app"><div v-if="mobileOpen" class="mobile-overlay" @click="mobileOpen=false"></div><aside class="sidebar" :class="{open:mobileOpen}" @click="mobileOpen=false">
   <div class="brand">TF <span class="label">TradeFlow</span></div>
   <router-link class="nav" to="/"><span class="label">仪表盘</span></router-link>
   <router-link class="nav" to="/analytics"><span class="label">统计分析</span></router-link><router-link class="nav" to="/reports"><span class="label">自定义报表</span></router-link>
@@ -51,5 +51,5 @@ const showAdmin=computed(()=>['admin','manager'].includes(role.value));
   <router-link v-if="showAdmin" class="nav" to="/automation"><span class="label">自动化规则</span></router-link>
   <router-link v-if="showAdmin" class="nav" to="/integrations"><span class="label">系统集成</span></router-link><router-link v-if="showAdmin" class="nav" to="/audit"><span class="label">审计日志</span></router-link>
 </aside>
-<main class="main"><header class="top"><b>外贸客户管理系统</b><div><span class="muted">{{auth.user?.display_name}} · {{auth.user?.role}}</span>　<el-button size="small" @click="auth.logout">退出</el-button></div></header><div class="content"><el-alert v-if="auth.user?.must_change_password" type="error" :closable="false" title="当前账号必须先修改初始/重置密码。" style="margin-bottom:14px"/><slot/></div></main>
+<main class="main"><header class="top"><div class="top-left"><el-button class="mobile-menu-button" circle aria-label="打开导航" @click.stop="mobileOpen=!mobileOpen">☰</el-button><b>外贸客户管理系统</b></div><div><span class="muted">{{auth.user?.display_name}} · {{auth.user?.role}}</span>　<el-button size="small" @click="auth.logout">退出</el-button></div></header><div class="content"><el-alert v-if="auth.user?.must_change_password" type="error" :closable="false" title="当前账号必须先修改初始/重置密码。" style="margin-bottom:14px"/><slot/></div></main>
 </div></template>

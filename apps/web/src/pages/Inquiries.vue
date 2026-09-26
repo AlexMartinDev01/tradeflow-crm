@@ -3,7 +3,10 @@ import {ref,reactive,onMounted,computed} from 'vue';
 import {ElMessage} from 'element-plus';
 import AppLayout from '../layouts/AppLayout.vue';
 import {api} from '../api/client';
+import {useAuth} from '../stores/auth';
 
+const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
+const canWrite=computed(()=>['admin','manager','sales','followup'].includes(auth.user?.role));
 const rows=ref<any[]>([]),customers=ref<any[]>([]),contacts=ref<any[]>([]),summary=ref<any>({}),slaHours=ref(4);
 const dialog=ref(false),convertDialog=ref(false),selected=ref<any>(null),loading=ref(false);
 const form=reactive<any>({customer_id:'',contact_id:'',source:'Website',status:'new',products:[],quantity:'',target_price:'',incoterm:'FOB',destination_port:'',requested_delivery:'',received_at:new Date().toISOString().slice(0,16),notes:''});
@@ -53,7 +56,7 @@ onMounted(load);
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">询盘管理</h2><span class="muted">自动分配负责人 · 首次响应 SLA {{slaHours}} 小时 · 询盘转商机</span></div><el-button type="primary" @click="dialog=true">新增询盘</el-button></div>
+<div class="toolbar"><div><h2 style="margin:0">询盘管理</h2><span class="muted">自动分配负责人 · 首次响应 SLA {{slaHours}} 小时 · 询盘转商机</span></div><el-button v-if="canWrite" type="primary" @click="dialog=true">新增询盘</el-button></div>
 
 <div class="grid stats" style="margin-bottom:16px">
   <div class="stat"><span class="muted">询盘总数</span><b>{{summary.total||0}}</b></div>
@@ -71,8 +74,8 @@ onMounted(load);
   <el-table-column label="首次响应 SLA" width="160"><template #default="s"><el-tag :type="slaType(s.row)">{{slaText(s.row)}}</el-tag></template></el-table-column>
   <el-table-column prop="status" label="状态" width="105"><template #default="s"><el-tag :type="s.row.status==='converted'?'success':'info'">{{s.row.status}}</el-tag></template></el-table-column>
   <el-table-column label="操作" width="190" fixed="right"><template #default="s">
-    <el-button v-if="!s.row.first_response_at&&s.row.status!=='converted'" link type="success" @click="markResponded(s.row)">记录响应</el-button>
-    <el-button v-if="s.row.status!=='converted'" link type="primary" @click="openConvert(s.row)">转商机</el-button>
+    <el-button v-if="canWrite&&!s.row.first_response_at&&s.row.status!=='converted'" link type="success" @click="markResponded(s.row)">记录响应</el-button>
+    <el-button v-if="canWrite&&s.row.status!=='converted'" link type="primary" @click="openConvert(s.row)">转商机</el-button>
   </template></el-table-column>
 </el-table></div>
 

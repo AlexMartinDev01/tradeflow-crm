@@ -2921,6 +2921,7 @@ const server = http.createServer(async (req,res)=>{
     {
       const genDoc=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/generate-document$/);
       if(genDoc&&req.method==='POST'){
+        if(!canWriteResource(user.role,'documents'))return json(res,403,{error:'forbidden'});
         const o=db.prepare('SELECT * FROM orders WHERE id=?').get(genDoc[1]);if(!o)return json(res,404,{error:'order_not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,o.customer_id))return json(res,403,{error:'forbidden'});
         const b=await body(req),type=String(b.type||'').toUpperCase();if(!['PI','CI','PL','BL','CO'].includes(type))return json(res,400,{error:'unsupported_document_type'});

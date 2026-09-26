@@ -100,7 +100,7 @@ onMounted(async()=>{await loadRefs();await load()});
     <el-button @click="router.push('/data-quality')">数据质量</el-button>
     <el-button v-if="canBulk" @click="openBulk">批量操作<span v-if="selectedRows.length">（已选 {{selectedRows.length}}）</span></el-button>
     <el-button v-if="['admin','manager'].includes(me?.role)" @click="router.push('/recycle-bin/customers')">回收站</el-button>
-    <el-button type="primary" @click="dialog=true">新增客户</el-button>
+    <el-button v-if="canBulk" type="primary" @click="dialog=true">新增客户</el-button>
   </div>
 </div>
 

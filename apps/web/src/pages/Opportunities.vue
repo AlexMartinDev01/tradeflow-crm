@@ -3,7 +3,10 @@ import {ref,reactive,onMounted,computed} from 'vue';
 import {ElMessage} from 'element-plus';
 import AppLayout from '../layouts/AppLayout.vue';
 import {api} from '../api/client';
+import {useAuth} from '../stores/auth';
 
+const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
+const canWrite=computed(()=>['admin','manager','sales'].includes(auth.user?.role));
 const rows=ref<any[]>([]),customers=ref<any[]>([]),dialog=ref(false),quoteDialog=ref(false),lossDialog=ref(false),selected=ref<any>(null),pendingStage=ref('');
 const form=reactive<any>({customer_id:'',name:'',stage:'qualification',expected_amount:0,currency:'USD',expected_close_date:'',probability:20,competitor:'',notes:''});
 const qform=reactive<any>({currency:'USD',incoterm:'FOB',payment_terms:'30% T/T deposit, 70% before shipment',moq:'',packaging:'',lead_time:'',valid_until:'',notes:''});
@@ -39,15 +42,15 @@ onMounted(load);
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">商机管理</h2><span class="muted">阶段、金额、概率、竞争对手与输单原因闭环</span></div><el-button type="primary" @click="dialog=true">新增商机</el-button></div>
+<div class="toolbar"><div><h2 style="margin:0">商机管理</h2><span class="muted">阶段、金额、概率、竞争对手与输单原因闭环</span></div><el-button v-if="canWrite" type="primary" @click="dialog=true">新增商机</el-button></div>
 <div class="card"><el-table :data="rows">
 <el-table-column label="客户" min-width="180"><template #default="s">{{customerMap[s.row.customer_id]||s.row.customer_id}}</template></el-table-column>
 <el-table-column prop="name" label="商机" min-width="220"/>
-<el-table-column label="阶段" width="150"><template #default="s"><el-select :model-value="s.row.stage" size="small" @change="stageChanged(s.row,$event)"><el-option v-for="x in stages" :key="x" :label="x" :value="x"/></el-select></template></el-table-column>
+<el-table-column label="阶段" width="150"><template #default="s"><el-select v-if="canWrite" :model-value="s.row.stage" size="small" @change="stageChanged(s.row,$event)"><el-option v-for="x in stages" :key="x" :label="x" :value="x"/></el-select><el-tag v-else>{{s.row.stage}}</el-tag></template></el-table-column>
 <el-table-column label="预计金额" width="150"><template #default="s">{{s.row.currency}} {{Number(s.row.expected_amount||0).toLocaleString()}}</template></el-table-column>
 <el-table-column prop="probability" label="概率%" width="80"/><el-table-column prop="expected_close_date" label="预计成交日" width="130"/><el-table-column prop="competitor" label="竞争对手"/>
 <el-table-column prop="loss_reason" label="输单原因" min-width="180"><template #default="s">{{s.row.stage==='lost'?(s.row.loss_reason||'-'):'-'}}</template></el-table-column>
-<el-table-column label="操作" width="120"><template #default="s"><el-button v-if="!['won','lost'].includes(s.row.stage)" link type="primary" @click="openQuote(s.row)">生成报价</el-button></template></el-table-column>
+<el-table-column label="操作" width="120"><template #default="s"><el-button v-if="canWrite&&!['won','lost'].includes(s.row.stage)" link type="primary" @click="openQuote(s.row)">生成报价</el-button></template></el-table-column>
 </el-table></div>
 
 <el-dialog v-model="dialog" title="新增商机" width="700"><el-form label-position="top"><el-form-item label="客户"><el-select v-model="form.customer_id" filterable style="width:100%"><el-option v-for="c in customers" :key="c.id" :label="c.name" :value="c.id"/></el-select></el-form-item><el-form-item label="商机名称"><el-input v-model="form.name"/></el-form-item><div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="阶段"><el-select v-model="form.stage" style="width:100%"><el-option v-for="x in stages.filter(x=>x!=='lost')" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="概率 %"><el-input v-model.number="form.probability" type="number"/></el-form-item><el-form-item label="预计金额"><el-input v-model.number="form.expected_amount" type="number"/></el-form-item><el-form-item label="币种"><el-select v-model="form.currency" style="width:100%"><el-option v-for="x in ['USD','EUR','GBP','CNY']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="预计成交日"><el-input v-model="form.expected_close_date" type="date"/></el-form-item><el-form-item label="竞争对手"><el-input v-model="form.competitor"/></el-form-item></div><el-form-item label="备注"><el-input v-model="form.notes" type="textarea"/></el-form-item></el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" @click="save">保存</el-button></template></el-dialog>

@@ -5,7 +5,10 @@ import {ElMessage} from 'element-plus';
 import AppLayout from '../layouts/AppLayout.vue';
 import AttachmentsPanel from '../components/AttachmentsPanel.vue';
 import {api} from '../api/client';
+import {useAuth} from '../stores/auth';
 
+const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
+const canEdit=computed(()=>['admin','manager','sales','followup'].includes(auth.user?.role));
 const rows=ref<any[]>([]),customers=ref<any[]>([]),orders=ref<any[]>([]),summary=ref<any>({}),detail=ref<any>(null),drawer=ref(false),dialog=ref(false),ratingDialog=ref(false),knowledgeDialog=ref(false),knowledgeRecommendations=ref<any[]>([]),router=useRouter();
 const filters=reactive({status:'',severity:'',category:''});
 const form=reactive<any>({customer_id:'',order_id:'',category:'quality',severity:'normal',subject:'',description:'',responsible_team:'Quality',solution:'',status:'open'});
@@ -72,7 +75,7 @@ onMounted(load);
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">售后与投诉</h2><span class="muted">工单、SLA、解决方案、满意度与知识复用闭环</span></div><div style="display:flex;gap:8px"><el-button @click="router.push('/knowledge')">售后知识库</el-button><el-button type="primary" @click="dialog=true">新建售后工单</el-button></div></div>
+<div class="toolbar"><div><h2 style="margin:0">售后与投诉</h2><span class="muted">工单、SLA、解决方案、满意度与知识复用闭环</span></div><div style="display:flex;gap:8px"><el-button @click="router.push('/knowledge')">售后知识库</el-button><el-button v-if="canEdit" type="primary" @click="dialog=true">新建售后工单</el-button></div></div>
 
 <div class="grid stats" style="margin-bottom:16px">
   <div class="stat"><span class="muted">全部工单</span><b>{{summary.total||0}}</b></div>
@@ -111,13 +114,13 @@ onMounted(load);
 </el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" @click="save">创建工单</el-button></template></el-dialog>
 
 <el-drawer v-model="drawer" size="76%" title="售后工单详情"><template v-if="detail">
-<div class="toolbar"><div><h3 style="margin:0">{{detail.ticket_no}} · {{detail.subject}}</h3><span class="muted">{{detail.customer_name}} · SLA {{detail.sla_due_at||'-'}}</span></div><div style="display:flex;gap:8px"><el-tag :type="detail.sla_status==='overdue'?'danger':detail.sla_status==='completed'?'success':'info'">{{detail.sla_status}}</el-tag><el-select v-model="detail.status" style="width:170px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select></div></div>
+<div class="toolbar"><div><h3 style="margin:0">{{detail.ticket_no}} · {{detail.subject}}</h3><span class="muted">{{detail.customer_name}} · SLA {{detail.sla_due_at||'-'}}</span></div><div style="display:flex;gap:8px"><el-tag :type="detail.sla_status==='overdue'?'danger':detail.sla_status==='completed'?'success':'info'">{{detail.sla_status}}</el-tag><el-select v-if="canEdit" v-model="detail.status" style="width:170px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-else>{{detail.status}}</el-tag></div></div>
 
 <div class="grid" style="grid-template-columns:1fr 1fr;align-items:start">
 <div class="card"><h3 class="section-title">问题与处理</h3><el-form label-position="top">
 <div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="分类"><el-input v-model="detail.category"/></el-form-item><el-form-item label="严重度"><el-select v-model="detail.severity" style="width:100%"><el-option v-for="x in severities" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="责任部门"><el-input v-model="detail.responsible_team"/></el-form-item><el-form-item label="关联订单"><el-input :model-value="detail.order_no||'-'" disabled/></el-form-item></div>
 <el-form-item label="问题描述"><el-input :model-value="detail.description" type="textarea" :rows="4" disabled/></el-form-item><el-form-item label="解决方案"><el-input v-model="detail.solution" type="textarea" :rows="5"/></el-form-item>
-<el-button type="primary" plain @click="saveDetail">保存处理信息</el-button><el-button v-if="['resolved','closed'].includes(detail.status)" @click="openRating">记录满意度</el-button><el-button v-if="['resolved','closed'].includes(detail.status)&&detail.solution" type="success" plain @click="openKnowledgeCreate">沉淀为知识</el-button>
+<el-button v-if="canEdit" type="primary" plain @click="saveDetail">保存处理信息</el-button><el-button v-if="canEdit&&['resolved','closed'].includes(detail.status)" @click="openRating">记录满意度</el-button><el-button v-if="canEdit&&['resolved','closed'].includes(detail.status)&&detail.solution" type="success" plain @click="openKnowledgeCreate">沉淀为知识</el-button>
 </el-form></div>
 <div class="card"><h3 class="section-title">服务结果</h3><el-descriptions :column="1" border><el-descriptions-item label="打开时间">{{detail.opened_at}}</el-descriptions-item><el-descriptions-item label="SLA截止">{{detail.sla_due_at||'-'}}</el-descriptions-item><el-descriptions-item label="解决时间">{{detail.resolved_at||'-'}}</el-descriptions-item><el-descriptions-item label="关闭时间">{{detail.closed_at||'-'}}</el-descriptions-item><el-descriptions-item label="满意度">{{detail.satisfaction?detail.satisfaction+'/5':'-'}}</el-descriptions-item><el-descriptions-item label="满意度备注">{{detail.satisfaction_note||'-'}}</el-descriptions-item></el-descriptions></div>
 </div>
@@ -129,7 +132,7 @@ onMounted(load);
     <el-table-column prop="title" label="知识标题" min-width="220"/><el-table-column prop="category" label="分类" width="110"/>
     <el-table-column label="相关度" width="90"><template #default="s">{{Number(s.row.relevance||0).toFixed(1)}}</template></el-table-column>
     <el-table-column prop="use_count" label="已使用" width="80"/><el-table-column prop="summary" label="摘要" min-width="260" show-overflow-tooltip/>
-    <el-table-column label="操作" width="110"><template #default="s"><el-button link type="primary" @click="applyKnowledge(s.row)">应用方案</el-button></template></el-table-column>
+    <el-table-column label="操作" width="110"><template #default="s"><el-button v-if="canEdit" link type="primary" @click="applyKnowledge(s.row)">应用方案</el-button></template></el-table-column>
   </el-table>
   <el-alert type="info" :closable="false" title="知识方案用于复用历史经验；应用后仍应结合当前客户、订单和证据核对，不会自动关闭工单。" style="margin-top:10px"/>
 </div>

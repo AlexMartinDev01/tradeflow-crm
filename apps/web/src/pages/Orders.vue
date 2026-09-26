@@ -4,7 +4,12 @@ import {ElMessage,ElMessageBox} from 'element-plus';
 import AppLayout from '../layouts/AppLayout.vue';
 import AttachmentsPanel from '../components/AttachmentsPanel.vue';
 import {api} from '../api/client';
+import {useAuth} from '../stores/auth';
 
+const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
+const canEdit=computed(()=>['admin','manager','sales'].includes(auth.user?.role));
+const canPlanPayments=computed(()=>['admin','manager','sales','finance'].includes(auth.user?.role));
+const canGenerateDocs=computed(()=>['admin','manager','sales','followup'].includes(auth.user?.role));
 const rows=ref<any[]>([]),customers=ref<any[]>([]),detail=ref<any>(null),drawer=ref(false),itemDialog=ref(false),paymentPlanDialog=ref(false),loading=ref(false);
 const paymentPlan=reactive<any>({deposit_percent:30,deposit_due:new Date().toISOString().slice(0,10),balance_due:''});
 const item=reactive<any>({product_id:'',product_name:'',quantity:1,unit:'pcs',unit_price:0,amount:0,delivery_date:''});
@@ -35,21 +40,21 @@ onMounted(load);
 
 <el-drawer v-model="drawer" size="82%" title="订单执行详情">
 <template v-if="detail">
-<div class="toolbar"><div><h3 style="margin:0">{{detail.order_no}}</h3><span class="muted">{{detail.customer_name}} · {{detail.currency}} {{Number(detail.total||0).toLocaleString()}}</span></div><div style="display:flex;gap:8px"><el-button @click="paymentPlanDialog=true">生成收款计划</el-button><el-select v-model="detail.status" style="width:180px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select></div></div>
+<div class="toolbar"><div><h3 style="margin:0">{{detail.order_no}}</h3><span class="muted">{{detail.customer_name}} · {{detail.currency}} {{Number(detail.total||0).toLocaleString()}}</span></div><div style="display:flex;gap:8px"><el-button v-if="canPlanPayments" @click="paymentPlanDialog=true">生成收款计划</el-button><el-select v-if="canEdit" v-model="detail.status" style="width:180px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-if="!canEdit">{{detail.status}}</el-tag></div></div>
 
 <div class="card" style="margin-bottom:16px"><div class="grid" style="grid-template-columns:repeat(4,1fr)">
 <el-form-item label="客户PO"><el-input v-model="detail.customer_po"/></el-form-item><el-form-item label="Incoterm"><el-input v-model="detail.incoterm"/></el-form-item>
 <el-form-item label="付款条件"><el-input v-model="detail.payment_terms"/></el-form-item><el-form-item label="要求交期"><el-input v-model="detail.requested_delivery" type="date"/></el-form-item>
-</div><el-form-item label="备注"><el-input v-model="detail.notes" type="textarea"/></el-form-item><el-button type="primary" plain @click="saveHeader">保存订单头</el-button></div>
+</div><el-form-item label="备注"><el-input v-model="detail.notes" type="textarea"/></el-form-item><el-button v-if="canEdit" type="primary" plain @click="saveHeader">保存订单头</el-button></div>
 
 <el-tabs>
 <el-tab-pane label="产品明细">
-<div class="toolbar"><b>订单产品</b><el-button type="primary" size="small" @click="itemDialog=true">添加产品</el-button></div>
-<el-table :data="detail.items"><el-table-column prop="product_name" label="产品" min-width="180"/><el-table-column prop="quantity" label="数量"/><el-table-column prop="unit" label="单位"/><el-table-column prop="unit_price" label="单价"/><el-table-column prop="amount" label="金额"/><el-table-column prop="delivery_date" label="计划交期"/><el-table-column label="操作" width="80"><template #default="s"><el-button link type="danger" @click="removeItem(s.row)">删除</el-button></template></el-table-column></el-table>
+<div class="toolbar"><b>订单产品</b><el-button v-if="canEdit" type="primary" size="small" @click="itemDialog=true">添加产品</el-button></div>
+<el-table :data="detail.items"><el-table-column prop="product_name" label="产品" min-width="180"/><el-table-column prop="quantity" label="数量"/><el-table-column prop="unit" label="单位"/><el-table-column prop="unit_price" label="单价"/><el-table-column prop="amount" label="金额"/><el-table-column prop="delivery_date" label="计划交期"/><el-table-column label="操作" width="80"><template #default="s"><el-button v-if="canEdit" link type="danger" @click="removeItem(s.row)">删除</el-button></template></el-table-column></el-table>
 </el-tab-pane>
 <el-tab-pane label="回款"><el-table :data="detail.payments"><el-table-column prop="type" label="类型"/><el-table-column prop="amount" label="金额"/><el-table-column prop="currency" label="币种"/><el-table-column prop="due_at" label="应付日期"/><el-table-column prop="paid_at" label="到账日期"/><el-table-column prop="status" label="状态"/></el-table></el-tab-pane>
 <el-tab-pane label="出运"><el-table :data="detail.shipments"><el-table-column prop="booking_no" label="订舱号"/><el-table-column prop="carrier" label="船公司"/><el-table-column prop="container_no" label="柜号"/><el-table-column prop="bl_no" label="提单号"/><el-table-column prop="etd" label="ETD"/><el-table-column prop="eta" label="ETA"/><el-table-column prop="status" label="状态"/></el-table></el-tab-pane>
-<el-tab-pane label="单证"><div class="toolbar"><b>订单单证</b><div style="display:flex;gap:6px"><el-button size="small" @click="generateDoc('PI')">生成 PI</el-button><el-button size="small" @click="generateDoc('CI')">生成 CI</el-button><el-button size="small" @click="generateDoc('PL')">生成 PL</el-button><el-button size="small" @click="generateDoc('BL')">Draft BL</el-button><el-button size="small" @click="generateDoc('CO')">Draft CO</el-button></div></div><el-table :data="detail.documents"><el-table-column prop="category" label="类别"/><el-table-column prop="name" label="名称" min-width="220"/><el-table-column prop="version" label="版本"/><el-table-column prop="created_at" label="时间"/><el-table-column label="操作" width="140"><template #default="s"><el-button link type="primary" @click="previewDoc(s.row)">预览</el-button><el-button link @click="downloadDoc(s.row)">下载</el-button></template></el-table-column></el-table><div style="margin-top:18px"><AttachmentsPanel entity-type="order" :entity-id="detail.id" title="订单附件"/></div></el-tab-pane>
+<el-tab-pane label="单证"><div class="toolbar"><b>订单单证</b><div v-if="canGenerateDocs" style="display:flex;gap:6px"><el-button size="small" @click="generateDoc('PI')">生成 PI</el-button><el-button size="small" @click="generateDoc('CI')">生成 CI</el-button><el-button size="small" @click="generateDoc('PL')">生成 PL</el-button><el-button size="small" @click="generateDoc('BL')">Draft BL</el-button><el-button size="small" @click="generateDoc('CO')">Draft CO</el-button></div></div><el-table :data="detail.documents"><el-table-column prop="category" label="类别"/><el-table-column prop="name" label="名称" min-width="220"/><el-table-column prop="version" label="版本"/><el-table-column prop="created_at" label="时间"/><el-table-column label="操作" width="140"><template #default="s"><el-button link type="primary" @click="previewDoc(s.row)">预览</el-button><el-button link @click="downloadDoc(s.row)">下载</el-button></template></el-table-column></el-table><div style="margin-top:18px"><AttachmentsPanel entity-type="order" :entity-id="detail.id" title="订单附件"/></div></el-tab-pane>
 <el-tab-pane label="变更记录"><el-table :data="detail.changes"><el-table-column prop="created_at" label="时间" width="190"/><el-table-column prop="field_name" label="字段"/><el-table-column prop="old_value" label="原值"/><el-table-column prop="new_value" label="新值"/><el-table-column prop="changed_by_name" label="操作人"/><el-table-column prop="note" label="备注"/></el-table></el-tab-pane>
 </el-tabs>
 </template>
