@@ -109,8 +109,9 @@ test.describe('TradeFlow aftersales knowledge UI loop',()=>{
     const solution=drawer.getByLabel('解决方案');
     await expect(solution).toHaveValue(/Firmware parameter mismatch/);
 
-    const statusSelect=drawer.getByLabel('工单状态');
-    await expect(statusSelect).toBeVisible();
+    const statusInput=drawer.getByLabel('工单状态');
+    await expect(statusInput).toBeVisible();
+    const statusSelect=drawer.locator('.el-select').filter({has:statusInput});
     await statusSelect.click();
     await page.getByRole('option',{name:'resolved',exact:true}).click();
     await expect(drawer.getByRole('button',{name:'更新状态'})).toBeEnabled();
