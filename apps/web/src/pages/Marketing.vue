@@ -61,7 +61,7 @@ onMounted(load);
 </el-tab-pane>
 
 <el-tab-pane label="邮件模板">
-  <div class="toolbar"><span class="muted">支持变量：{{'{{customer_name}}'}}、{{'{{contact_name}}'}}、{{'{{country}}'}}、{{'{{company_name}}'}}。</span><el-button type="primary" @click="templateDialog=true">新建模板</el-button></div>
+  <div class="toolbar"><span class="muted" v-pre>支持变量：{{customer_name}}、{{contact_name}}、{{country}}、{{company_name}}。</span><el-button type="primary" @click="templateDialog=true">新建模板</el-button></div>
   <div class="card"><el-table :data="templates"><el-table-column prop="name" label="模板" min-width="160"/><el-table-column prop="subject" label="主题" min-width="240"/><el-table-column prop="body" label="正文" show-overflow-tooltip/><el-table-column label="操作" width="80"><template #default="s"><el-button link type="danger" @click="deleteTemplate(s.row)">删除</el-button></template></el-table-column></el-table></div>
 </el-tab-pane>
 </el-tabs>
