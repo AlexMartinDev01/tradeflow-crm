@@ -44,6 +44,9 @@ if [ ! -f "$DATA_DIR/app.secret" ]; then
   chmod 600 "$DATA_DIR/app.secret"
 fi
 
+echo "[TradeFlow] Installing/updating backend dependencies..."
+npm --prefix "$ROOT/apps/api" install
+
 echo "[TradeFlow] Installing/updating frontend dependencies..."
 npm --prefix "$ROOT/apps/web" install
 
