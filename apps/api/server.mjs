@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS inquiries(id TEXT PRIMARY KEY, inquiry_no TEXT UNIQUE
 CREATE TABLE IF NOT EXISTS opportunities(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, inquiry_id TEXT, name TEXT NOT NULL, stage TEXT NOT NULL DEFAULT 'qualification', expected_amount REAL, currency TEXT DEFAULT 'USD', expected_close_date TEXT, probability REAL, competitor TEXT, loss_reason TEXT, owner_id TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS quotations(id TEXT PRIMARY KEY, quote_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, contact_id TEXT, opportunity_id TEXT, version INTEGER NOT NULL DEFAULT 1, currency TEXT NOT NULL DEFAULT 'USD', incoterm TEXT, payment_terms TEXT, moq TEXT, packaging TEXT, lead_time TEXT, valid_until TEXT, subtotal REAL NOT NULL DEFAULT 0, discount REAL NOT NULL DEFAULT 0, total REAL NOT NULL DEFAULT 0, margin_rate REAL, status TEXT NOT NULL DEFAULT 'draft', notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS quotation_items(id TEXT PRIMARY KEY, quotation_id TEXT NOT NULL, product_code TEXT, product_name TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 1, unit TEXT, unit_price REAL NOT NULL DEFAULT 0, amount REAL NOT NULL DEFAULT 0, cost REAL, spec TEXT, FOREIGN KEY(quotation_id) REFERENCES quotations(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS quotation_approvals(id TEXT PRIMARY KEY, quotation_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending', reasons TEXT NOT NULL DEFAULT '[]', submitted_by TEXT, decided_by TEXT, comment TEXT, submitted_at TEXT NOT NULL, decided_at TEXT, FOREIGN KEY(quotation_id) REFERENCES quotations(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS samples(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, opportunity_id TEXT, product TEXT NOT NULL, quantity TEXT, fee REAL, currency TEXT DEFAULT 'USD', courier TEXT, tracking_no TEXT, sent_at TEXT, delivered_at TEXT, feedback TEXT, status TEXT NOT NULL DEFAULT 'requested', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY, sku TEXT UNIQUE, name TEXT NOT NULL, category TEXT, description TEXT, certifications TEXT NOT NULL DEFAULT '[]', base_price REAL, currency TEXT DEFAULT 'USD', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS customer_product_preferences(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, product_id TEXT NOT NULL, preference_type TEXT NOT NULL, interest_level TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(customer_id,product_id,preference_type), FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
@@ -81,6 +82,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("ALTER TABLE products ADD COLUMN floor_price REAL");}catch{}
 try{db.exec("ALTER TABLE contacts ADD COLUMN anniversary TEXT");}catch{}
 try{db.exec("ALTER TABLE tasks ADD COLUMN automation_key TEXT");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_automation_key ON tasks(automation_key)");}catch{}
@@ -201,6 +203,30 @@ function inquirySlaInfo(row,hours){
   const end=responded||Date.now();
   const minutes=Math.max(0,Math.round((end-received)/60000));
   return {...row,response_minutes:responded?minutes:null,sla_deadline:new Date(deadline).toISOString(),sla_status:responded?(responded<=deadline?'within_sla':'breached'):(Date.now()>deadline?'overdue':'pending')};
+}
+
+function getQuotationApprovalPolicy(){
+  const row=db.prepare("SELECT value FROM settings WHERE key='quotation_approval_policy'").get();
+  return row?parseJSON(row.value,{}):{min_margin_rate:20,max_discount_percent:10,special_payment_keywords:['OA','D/P','D/A'],block_below_floor_price:true};
+}
+function evaluateQuotationApproval(quotationId){
+  const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(quotationId); if(!q)return null;
+  const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=?').all(quotationId);
+  const policy=getQuotationApprovalPolicy(),reasons=[],belowFloor=[];
+  const discountPct=Number(q.subtotal||0)>0?Number(q.discount||0)/Number(q.subtotal||0)*100:0;
+  if(q.margin_rate!=null && Number(q.margin_rate)<Number(policy.min_margin_rate??20)) reasons.push({code:'low_margin',label:`毛利率 ${Number(q.margin_rate).toFixed(2)}% 低于阈值 ${Number(policy.min_margin_rate??20)}%`});
+  if(discountPct>Number(policy.max_discount_percent??10)) reasons.push({code:'high_discount',label:`折扣 ${discountPct.toFixed(2)}% 超过阈值 ${Number(policy.max_discount_percent??10)}%`});
+  const terms=String(q.payment_terms||'').toUpperCase();
+  const matched=(policy.special_payment_keywords||[]).filter(x=>terms.includes(String(x).toUpperCase()));
+  if(matched.length)reasons.push({code:'special_payment_terms',label:`特殊付款条件：${matched.join(' / ')}`});
+  for(const item of items){
+    const product=db.prepare('SELECT id,sku,name,floor_price FROM products WHERE (sku=? AND ?<>"") OR name=? LIMIT 1').get(item.product_code||'',item.product_code||'',item.product_name);
+    if(product?.floor_price!=null && Number(product.floor_price)>0 && Number(item.unit_price)<Number(product.floor_price)){
+      belowFloor.push({item_id:item.id,product_id:product.id,product_name:item.product_name,unit_price:Number(item.unit_price),floor_price:Number(product.floor_price)});
+    }
+  }
+  if(belowFloor.length)reasons.push({code:'below_floor_price',label:`${belowFloor.length} 个产品低于底价`});
+  return {quotation:q,policy,reasons,below_floor_items:belowFloor,discount_percent:Number(discountPct.toFixed(2)),requires_approval:reasons.some(x=>x.code!=='below_floor_price')||belowFloor.length>0,blocked:!!policy.block_below_floor_price&&belowFloor.length>0};
 }
 
 seed();
@@ -1709,6 +1735,39 @@ const server = http.createServer(async (req,res)=>{
       }
     }
 
+    // ---- Quotation conditional approval policy ----
+    if(p==='/api/quotations/approval-policy' && req.method==='GET'){
+      return json(res,200,getQuotationApprovalPolicy());
+    }
+    if(p==='/api/quotations/approval-policy' && req.method==='PUT'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req),policy={
+        min_margin_rate:Math.max(0,Number(b.min_margin_rate??20)),
+        max_discount_percent:Math.max(0,Number(b.max_discount_percent??10)),
+        special_payment_keywords:Array.isArray(b.special_payment_keywords)?b.special_payment_keywords.map(String).filter(Boolean):['OA','D/P','D/A'],
+        block_below_floor_price:b.block_below_floor_price!==false
+      };
+      db.prepare("INSERT INTO settings(key,value,updated_at) VALUES('quotation_approval_policy',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(policy),now());
+      audit(user,'update','quotation_approval_policy','quotation_approval_policy',req,policy);return json(res,200,policy);
+    }
+    {
+      const ev=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/evaluation$/);
+      if(ev&&req.method==='GET'){
+        const result=evaluateQuotationApproval(ev[1]);if(!result)return json(res,404,{error:'quotation_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,result.quotation.customer_id))return json(res,403,{error:'forbidden'});
+        const history=db.prepare('SELECT qa.*,u1.display_name submitted_by_name,u2.display_name decided_by_name FROM quotation_approvals qa LEFT JOIN users u1 ON u1.id=qa.submitted_by LEFT JOIN users u2 ON u2.id=qa.decided_by WHERE qa.quotation_id=? ORDER BY qa.submitted_at DESC').all(ev[1]).map(x=>({...x,reasons:parseJSON(x.reasons,[])}));
+        return json(res,200,{...result,history});
+      }
+      const reject=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/reject$/);
+      if(reject&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(reject[1]);if(!q)return json(res,404,{error:'quotation_not_found'});
+        const b=await body(req);db.prepare("UPDATE quotations SET status='rejected',updated_at=? WHERE id=?").run(now(),q.id);
+        db.prepare("UPDATE quotation_approvals SET status='rejected',decided_by=?,comment=?,decided_at=? WHERE quotation_id=? AND status='pending'").run(user.user_id,b.comment||null,now(),q.id);
+        audit(user,'reject','quotations',q.id,req,{comment:b.comment||null});return json(res,200,db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id));
+      }
+    }
+
     // ---- Sales workflow actions: inquiry -> opportunity -> quotation -> order / sample follow-up ----
     {
       const wm=p.match(/^\/api\/workflows\/inquiries\/([0-9a-f-]+)\/to-opportunity$/);
@@ -1778,19 +1837,31 @@ const server = http.createServer(async (req,res)=>{
       const qsubmit=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/submit$/);
       if(qsubmit && req.method==='POST'){
         const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qsubmit[1]);
-        if(!q) return json(res,404,{error:'quotation_not_found'});
-        db.prepare("UPDATE quotations SET status='pending_approval',updated_at=? WHERE id=?").run(now(),q.id);
-        audit(user,'submit_approval','quotations',q.id,req);
-        return json(res,200,db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id));
+        if(!q)return json(res,404,{error:'quotation_not_found'});
+        if(q.status!=='draft'&&q.status!=='rejected')return json(res,409,{error:'quotation_not_draft'});
+        if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
+        const evaluation=evaluateQuotationApproval(q.id);
+        if(evaluation.blocked)return json(res,409,{error:'below_floor_price',evaluation});
+        if(evaluation.requires_approval){
+          db.prepare("UPDATE quotations SET status='pending_approval',updated_at=? WHERE id=?").run(now(),q.id);
+          db.prepare('INSERT INTO quotation_approvals(id,quotation_id,status,reasons,submitted_by,submitted_at) VALUES(?,?,?,?,?,?)').run(randomUUID(),q.id,'pending',JSON.stringify(evaluation.reasons),user.user_id,now());
+          audit(user,'submit_approval','quotations',q.id,req,{reasons:evaluation.reasons});
+          return json(res,200,{quotation:db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id),evaluation,auto_approved:false});
+        }
+        db.prepare("UPDATE quotations SET status='approved',updated_at=? WHERE id=?").run(now(),q.id);
+        audit(user,'auto_approve','quotations',q.id,req,{reason:'no_approval_rule_triggered'});
+        return json(res,200,{quotation:db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id),evaluation,auto_approved:true});
       }
 
       const qapprove=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/approve$/);
       if(qapprove && req.method==='POST'){
-        if(!['admin','manager'].includes(user.role)) return json(res,403,{error:'forbidden'});
-        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qapprove[1]);
-        if(!q) return json(res,404,{error:'quotation_not_found'});
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qapprove[1]);if(!q)return json(res,404,{error:'quotation_not_found'});
+        if(q.status!=='pending_approval')return json(res,409,{error:'quotation_not_pending'});
+        const b=await body(req);
         db.prepare("UPDATE quotations SET status='approved',updated_at=? WHERE id=?").run(now(),q.id);
-        audit(user,'approve','quotations',q.id,req);
+        db.prepare("UPDATE quotation_approvals SET status='approved',decided_by=?,comment=?,decided_at=? WHERE quotation_id=? AND status='pending'").run(user.user_id,b.comment||null,now(),q.id);
+        audit(user,'approve','quotations',q.id,req,{comment:b.comment||null});
         return json(res,200,db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id));
       }
 
