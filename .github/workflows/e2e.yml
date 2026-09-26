@@ -71,6 +71,41 @@ jobs:
           E2E_BASE_URL: http://127.0.0.1:18080
         run: npm test
 
+      - name: Verify offline SQLite restore workflow
+        if: success()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f /tmp/tradeflow-e2e/server.pid ]; then
+            kill "$(cat /tmp/tradeflow-e2e/server.pid)" 2>/dev/null || true
+            sleep 1
+          fi
+          node --input-type=module <<'NODE'
+          import {DatabaseSync} from 'node:sqlite';
+          const file='/tmp/tradeflow-e2e/tradeflow.db';
+          const backup='/tmp/tradeflow-e2e/restore-source.sqlite';
+          const db=new DatabaseSync(file);
+          db.exec('PRAGMA wal_checkpoint(FULL)');
+          db.exec(`VACUUM INTO '${backup}'`);
+          const before=Number(db.prepare('SELECT COUNT(*) c FROM customers WHERE deleted_at IS NULL').get().c||0);
+          db.prepare("INSERT INTO settings(key,value,updated_at) VALUES('e2e_restore_probe','\"polluted\"',datetime('now')) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run();
+          db.close();
+          console.log('restore baseline customers:',before);
+          NODE
+          DB_FILE=/tmp/tradeflow-e2e/tradeflow.db node scripts/restore-backup.mjs /tmp/tradeflow-e2e/restore-source.sqlite
+          node --input-type=module <<'NODE'
+          import {DatabaseSync} from 'node:sqlite';
+          const db=new DatabaseSync('/tmp/tradeflow-e2e/tradeflow.db',{readOnly:true});
+          const integrity=db.prepare('PRAGMA integrity_check').get().integrity_check;
+          const probe=db.prepare("SELECT value FROM settings WHERE key='e2e_restore_probe'").get();
+          const customers=Number(db.prepare('SELECT COUNT(*) c FROM customers WHERE deleted_at IS NULL').get().c||0);
+          if(integrity!=='ok')throw new Error('restored database integrity check failed: '+integrity);
+          if(probe)throw new Error('restore did not replace polluted target database');
+          if(customers<18)throw new Error('restored database lost seeded customer data: '+customers);
+          console.log('restore verified; customers:',customers);
+          db.close();
+          NODE
+
       - name: Upload Playwright report and server log
         if: always()
         uses: actions/upload-artifact@v4
