@@ -5,7 +5,7 @@ import AppLayout from '../layouts/AppLayout.vue';
 import {api} from '../api/client';
 
 const integrations=ref<any[]>([]),tokens=ref<any[]>([]),dialog=ref(false),tokenDialog=ref(false),deliveriesDialog=ref(false),deliveries=ref<any[]>([]),newToken=ref('');
-const form=reactive<any>({name:'',type:'webhook',provider:'custom',base_url:'',enabled:0,secret_env:'',config:{events:['*'],host:'',port:587,secure:false,username:'',from_name:'',from_email:'',reply_to:'',reject_unauthorized:true}});
+const form=reactive<any>({name:'',type:'webhook',provider:'custom',base_url:'',enabled:0,secret_env:'',config:{events:['*'],host:'',port:587,secure:false,username:'',from_name:'',from_email:'',reply_to:'',public_base_url:'',tracking_enabled:true,reject_unauthorized:true}});
 const tokenForm=reactive<any>({name:'',role:'readonly',expires_at:''});
 
 async function load(){
@@ -14,7 +14,7 @@ async function load(){
 }
 async function save(){
   if(!form.name||!form.type)return ElMessage.warning('名称和类型必填');
-  await api.post('/integrations',{...form,config:{...form.config}});dialog.value=false;Object.assign(form,{name:'',type:'webhook',provider:'custom',base_url:'',enabled:0,secret_env:'',config:{events:['*'],host:'',port:587,secure:false,username:'',from_name:'',from_email:'',reply_to:'',reject_unauthorized:true}});await load();ElMessage.success('集成配置已保存')
+  await api.post('/integrations',{...form,config:{...form.config}});dialog.value=false;Object.assign(form,{name:'',type:'webhook',provider:'custom',base_url:'',enabled:0,secret_env:'',config:{events:['*'],host:'',port:587,secure:false,username:'',from_name:'',from_email:'',reply_to:'',public_base_url:'',tracking_enabled:true,reject_unauthorized:true}});await load();ElMessage.success('集成配置已保存')
 }
 async function toggle(r:any){await api.patch(`/integrations/${r.id}`,{enabled:!!r.enabled});await load()}
 async function test(r:any){
@@ -72,8 +72,10 @@ onMounted(load);
     <el-form-item label="发件人名称"><el-input v-model="form.config.from_name" placeholder="Your Company"/></el-form-item>
     <el-form-item label="Reply-To"><el-input v-model="form.config.reply_to"/></el-form-item>
   </div>
-  <el-form-item><el-checkbox v-model="form.config.secure">SSL/TLS 直连（常见 465）</el-checkbox><el-checkbox v-model="form.config.reject_unauthorized">校验 TLS 证书</el-checkbox></el-form-item>
-  <el-alert type="warning" :closable="false" title="SMTP 密码不会保存到数据库。请把密码放到上面填写的环境变量中；Gmail/Outlook 如使用应用密码，也同样放环境变量。" />
+  <el-form-item label="公网访问地址（邮件追踪 / 一键退订）"><el-input v-model="form.config.public_base_url" placeholder="https://crm.example.com"/></el-form-item>
+  <el-form-item><el-checkbox v-model="form.config.secure">SSL/TLS 直连（常见 465）</el-checkbox><el-checkbox v-model="form.config.reject_unauthorized">校验 TLS 证书</el-checkbox><el-checkbox v-model="form.config.tracking_enabled">启用营销邮件打开/点击追踪与一键退订</el-checkbox></el-form-item>
+  <el-alert type="warning" :closable="false" title="SMTP 密码不会保存到数据库，请放在环境变量中。营销追踪只有在公网访问地址能被邮件客户端访问时才会生效；Codespaces 休眠后追踪链接也会失效。" />
+  <el-alert type="info" :closable="false" title="打开/点击统计可能受到 Gmail/Outlook 图片代理和安全扫描器影响，应视为互动信号，不应视为精确真人行为。" style="margin-top:8px"/>
 </div>
 <el-alert v-if="form.type==='ocr'" type="info" :closable="false" title="OCR Endpoint 需接受 JSON：{ mode: business_card, image_base64, mime_type }，并返回 JSON 字段 company_name/contact_name/title/email/phone/whatsapp/website/country/city/address；也可包在 data 或 result 下。" style="margin-bottom:12px"/>
 <el-alert v-if="form.type==='storage_backup'" type="info" :closable="false" title="备份端默认以 PUT 请求接收原始文件；系统会附带 X-TradeFlow-Document-Id、X-TradeFlow-Storage-Path、X-TradeFlow-Checksum。可通过 config.method/path_mode/auth_header/auth_prefix 调整。" style="margin-bottom:12px"/><el-form-item><el-checkbox v-model="form.enabled" :true-value="1" :false-value="0">立即启用</el-checkbox></el-form-item>

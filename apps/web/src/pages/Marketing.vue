@@ -61,8 +61,10 @@ onMounted(load);
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">客户营销</h2><span class="muted">动态分群、模板、营销名单、退订控制、SMTP 实际发送和活动转化</span></div></div>
+<div class="toolbar"><div><h2 style="margin:0">客户营销</h2><span class="muted">动态分群、模板、SMTP 实际发送、打开/点击追踪、一键退订和活动转化</span></div></div>
 <el-alert v-if="emailStatus.configured" type="success" :closable="false" :title="`SMTP 已启用：${emailStatus.integration?.name||'SMTP'} · ${emailStatus.config?.from_email||''}`" style="margin-bottom:14px"/>
+<el-alert v-if="emailStatus.configured&&!emailStatus.config?.tracking_ready" type="warning" :closable="false" title="SMTP 已可发送，但邮件追踪/一键退订尚未就绪：请在“系统集成 → SMTP”填写可公网访问的 Public Base URL。" style="margin-bottom:12px"/>
+<el-alert v-else-if="emailStatus.configured&&emailStatus.config?.tracking_ready" type="info" :closable="false" :title="`互动追踪已启用：${emailStatus.config.public_base_url}。打开/点击可能受邮箱代理或安全扫描器影响。`" style="margin-bottom:12px"/>
 <el-alert v-else type="warning" :closable="false" title="尚未启用 SMTP。可以先准备名单和模板，也可以在外部发送后手工标记；系统不会伪装成已实际发送。" style="margin-bottom:14px"/>
 <el-tabs>
 <el-tab-pane label="营销活动">
@@ -109,11 +111,20 @@ onMounted(load);
 
 <el-dialog v-model="previewDialog" title="分群预览" width="820"><el-table :data="previewRows" max-height="520"><el-table-column prop="name" label="客户" min-width="180"/><el-table-column prop="country" label="国家"/><el-table-column prop="contact_name" label="联系人"/><el-table-column prop="email" label="邮箱" min-width="200"/><el-table-column prop="consent" label="营销许可"/></el-table></el-dialog>
 
-<el-dialog v-model="recipientsDialog" title="营销收件人" width="1180"><el-table :data="recipients" max-height="560">
+<el-dialog v-model="recipientsDialog" title="营销收件人" width="94%"><el-table :data="recipients" max-height="560">
 <el-table-column prop="customer_name" label="客户" min-width="150"/><el-table-column prop="contact_name" label="联系人" width="120"/><el-table-column prop="address" label="邮箱" min-width="190"/><el-table-column prop="status" label="状态" width="100"/>
-<el-table-column prop="attempt_count" label="尝试" width="70"/><el-table-column prop="provider_message_id" label="Message-ID" min-width="190" show-overflow-tooltip/><el-table-column prop="send_error" label="发送错误" min-width="180" show-overflow-tooltip/><el-table-column prop="reason" label="跳过原因" width="120"/>
+<el-table-column prop="attempt_count" label="尝试" width="70"/><el-table-column label="打开" width="90"><template #default="s"><span v-if="s.row.open_count">{{s.row.open_count}} 次</span><span v-else>-</span></template></el-table-column><el-table-column label="点击" width="90"><template #default="s"><span v-if="s.row.click_count">{{s.row.click_count}} 次</span><span v-else>-</span></template></el-table-column><el-table-column label="退订" width="90"><template #default="s"><el-tag v-if="s.row.unsubscribed_at" type="warning">已退订</el-tag><span v-else>-</span></template></el-table-column><el-table-column prop="first_opened_at" label="首次打开" width="170"/><el-table-column prop="first_clicked_at" label="首次点击" width="170"/><el-table-column prop="provider_message_id" label="Message-ID" min-width="190" show-overflow-tooltip/><el-table-column prop="send_error" label="发送错误" min-width="180" show-overflow-tooltip/><el-table-column prop="reason" label="跳过原因" width="120"/>
 <el-table-column label="操作" width="210" fixed="right"><template #default="s"><el-button v-if="emailStatus.configured&&['prepared','failed'].includes(s.row.status)" link type="success" :loading="sendingRecipient===s.row.id" @click="sendRecipient(s.row)">{{s.row.status==='failed'?'重试':'实际发送'}}</el-button><el-button v-else-if="!emailStatus.configured&&s.row.status==='prepared'" link @click="markSent(s.row)">标记外部已发送</el-button><el-button link type="danger" @click="optOut(s.row)">退订</el-button></template></el-table-column>
 </el-table></el-dialog>
 
-<el-dialog v-model="statsDialog" title="活动转化统计" width="620"><el-descriptions :column="2" border><el-descriptions-item label="总名单">{{stats.total||0}}</el-descriptions-item><el-descriptions-item label="已发送">{{stats.sent||0}}</el-descriptions-item><el-descriptions-item label="发送失败">{{stats.failed||0}}</el-descriptions-item><el-descriptions-item label="跳过">{{stats.skipped||0}}</el-descriptions-item><el-descriptions-item label="转化客户">{{stats.converted||0}}</el-descriptions-item><el-descriptions-item label="转化率">{{Number(stats.conversion_rate||0).toFixed(1)}}%</el-descriptions-item><el-descriptions-item label="归因订单收入">{{Number(stats.revenue||0).toLocaleString()}}</el-descriptions-item></el-descriptions></el-dialog>
+<el-dialog v-model="statsDialog" title="营销活动统计" width="760">
+<el-descriptions :column="3" border>
+  <el-descriptions-item label="总名单">{{stats.total||0}}</el-descriptions-item><el-descriptions-item label="已发送">{{stats.sent||0}}</el-descriptions-item><el-descriptions-item label="发送失败">{{stats.failed||0}}</el-descriptions-item>
+  <el-descriptions-item label="有打开信号">{{stats.opened||0}}</el-descriptions-item><el-descriptions-item label="打开率">{{Number(stats.open_rate||0).toFixed(1)}}%</el-descriptions-item><el-descriptions-item label="总打开事件">{{stats.total_opens||0}}</el-descriptions-item>
+  <el-descriptions-item label="有点击信号">{{stats.clicked||0}}</el-descriptions-item><el-descriptions-item label="点击率">{{Number(stats.click_rate||0).toFixed(1)}}%</el-descriptions-item><el-descriptions-item label="点击/打开率">{{Number(stats.click_to_open_rate||0).toFixed(1)}}%</el-descriptions-item>
+  <el-descriptions-item label="退订">{{stats.unsubscribed||0}}</el-descriptions-item><el-descriptions-item label="退订率">{{Number(stats.unsubscribe_rate||0).toFixed(2)}}%</el-descriptions-item><el-descriptions-item label="跳过">{{stats.skipped||0}}</el-descriptions-item>
+  <el-descriptions-item label="转化客户">{{stats.converted||0}}</el-descriptions-item><el-descriptions-item label="转化率">{{Number(stats.conversion_rate||0).toFixed(1)}}%</el-descriptions-item><el-descriptions-item label="归因订单收入">{{Number(stats.revenue||0).toLocaleString()}}</el-descriptions-item>
+</el-descriptions>
+<el-alert type="info" :closable="false" title="打开/点击属于互动信号：邮箱图片代理、安全扫描器、隐私保护功能可能产生自动请求，因此不能当作精确的真人阅读证明。" style="margin-top:14px"/>
+</el-dialog>
 </AppLayout></template>
