@@ -1,0 +1,84 @@
+name: TradeFlow E2E acceptance
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install application dependencies
+        run: |
+          npm --prefix apps/api install
+          npm --prefix apps/web install
+          npm --prefix e2e install
+
+      - name: Install Playwright Chromium
+        working-directory: e2e
+        run: npx playwright install --with-deps chromium
+
+      - name: Build Vue frontend
+        run: npm --prefix apps/web run build
+
+      - name: Initialize temporary database schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf /tmp/tradeflow-e2e
+          mkdir -p /tmp/tradeflow-e2e/uploads /tmp/tradeflow-e2e/backups
+          env             NODE_ENV=development             HOST=127.0.0.1             PORT=18080             DB_FILE=/tmp/tradeflow-e2e/tradeflow.db             WEB_DIST="$GITHUB_WORKSPACE/apps/web/dist"             UPLOAD_DIR=/tmp/tradeflow-e2e/uploads             BACKUP_DIR=/tmp/tradeflow-e2e/backups             APP_SECRET=tradeflow-e2e-secret-2026             CORS_ORIGIN='*'             node apps/api/server.mjs > /tmp/tradeflow-e2e/bootstrap.log 2>&1 &
+          pid=$!
+          for i in {1..30}; do
+            if curl -fsS http://127.0.0.1:18080/api/health >/dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:18080/api/health >/dev/null || { cat /tmp/tradeflow-e2e/bootstrap.log; exit 1; }
+          kill "$pid"
+          wait "$pid" || true
+
+      - name: Seed complete realistic business data
+        run: DB_FILE=/tmp/tradeflow-e2e/tradeflow.db node scripts/seed-full-demo.mjs
+
+      - name: Start TradeFlow for browser acceptance
+        shell: bash
+        run: |
+          env             NODE_ENV=development             HOST=127.0.0.1             PORT=18080             DB_FILE=/tmp/tradeflow-e2e/tradeflow.db             WEB_DIST="$GITHUB_WORKSPACE/apps/web/dist"             UPLOAD_DIR=/tmp/tradeflow-e2e/uploads             BACKUP_DIR=/tmp/tradeflow-e2e/backups             APP_SECRET=tradeflow-e2e-secret-2026             CORS_ORIGIN='*'             node apps/api/server.mjs > /tmp/tradeflow-e2e/server.log 2>&1 &
+          echo $! > /tmp/tradeflow-e2e/server.pid
+          for i in {1..45}; do
+            if curl -fsS http://127.0.0.1:18080/api/ready >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          cat /tmp/tradeflow-e2e/server.log
+          exit 1
+
+      - name: Run Playwright acceptance suite
+        working-directory: e2e
+        env:
+          E2E_BASE_URL: http://127.0.0.1:18080
+        run: npm test
+
+      - name: Upload Playwright report and server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tradeflow-e2e-artifacts
+          path: |
+            e2e/playwright-report
+            e2e/test-results
+            /tmp/tradeflow-e2e/server.log
+          if-no-files-found: ignore
+          retention-days: 14
