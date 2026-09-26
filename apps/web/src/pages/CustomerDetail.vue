@@ -6,7 +6,7 @@ import AppLayout from '../layouts/AppLayout.vue';
 import {api} from '../api/client';
 
 const route=useRoute(),id=String(route.params.id);
-const customer=ref<any>({}),contacts=ref<any[]>([]),activities=ref<any[]>([]),tasks=ref<any[]>([]),brands=ref<any[]>([]),brandLinks=ref<any[]>([]),fieldDefs=ref<any[]>([]),tags=ref<any[]>([]),owners=ref<any[]>([]),me=ref<any>(null);
+const customer=ref<any>({}),contacts=ref<any[]>([]),activities=ref<any[]>([]),timeline=ref<any[]>([]),tasks=ref<any[]>([]),brands=ref<any[]>([]),brandLinks=ref<any[]>([]),fieldDefs=ref<any[]>([]),tags=ref<any[]>([]),owners=ref<any[]>([]),me=ref<any>(null);
 const cDialog=ref(false),aDialog=ref(false),channelDialog=ref(false),editDialog=ref(false),brandDialog=ref(false),taskDialog=ref(false),fieldDialog=ref(false),tagDialog=ref(false),transferDialog=ref(false);
 const selectedContact=ref<any>(null),newTag=reactive<any>({name:'',category:''}),transfer=reactive<any>({owner_id:''});
 const contact=reactive<any>({name:'',title:'',department:'',role:'',language:'English',timezone:'',is_primary:0});
@@ -33,6 +33,7 @@ async function load(){
   const cs=(await api.get('/contacts',{params:{customer_id:id,size:100}})).data.data;
   contacts.value=await Promise.all(cs.map(async(c:any)=>({...c,channels:(await api.get('/channels',{params:{contact_id:c.id,size:100}})).data.data})));
   activities.value=(await api.get('/activities',{params:{customer_id:id,size:100}})).data.data;
+  timeline.value=(await api.get(`/customers/${id}/timeline`)).data;
   tasks.value=(await api.get('/tasks',{params:{customer_id:id,size:100}})).data.data;
   brands.value=(await api.get('/brands',{params:{size:200}})).data.data;
   brandLinks.value=(await api.get('/customerBrands',{params:{customer_id:id,size:200}})).data.data;
@@ -96,7 +97,7 @@ onMounted(load);
 <div class="card"><div class="toolbar"><h3 class="section-title">客户任务</h3><el-button size="small" type="primary" plain @click="taskDialog=true">新增任务</el-button></div><el-table :data="tasks" empty-text="暂无任务"><el-table-column label="完成" width="65"><template #default="s"><el-checkbox :model-value="s.row.status==='done'" @change="completeTask(s.row)"/></template></el-table-column><el-table-column prop="title" label="任务"/><el-table-column prop="priority" label="优先级" width="85"/><el-table-column prop="due_at" label="截止时间" width="180"/></el-table></div>
 </div>
 
-<div class="card" style="margin-top:16px"><div class="toolbar"><h3 class="section-title">跟进时间线</h3><el-button size="small" @click="aDialog=true">记录沟通</el-button></div><el-timeline><el-timeline-item v-for="x in activities" :key="x.id" :timestamp="x.occurred_at" placement="top"><b>{{x.type}} · {{x.subject||'沟通记录'}}</b><div style="margin:5px 0">{{x.content}}</div><small class="muted">结果：{{x.result||'-'}}　下一步：{{x.next_action||'-'}}</small></el-timeline-item></el-timeline><el-empty v-if="!activities.length" description="暂无跟进记录"/></div>
+<div class="card" style="margin-top:16px"><div class="toolbar"><div><h3 class="section-title">客户360°业务时间线</h3><span class="muted">客户创建、跟进、询盘、报价、订单、回款、出运、售后统一展示</span></div><el-button size="small" @click="aDialog=true">记录沟通</el-button></div><el-timeline><el-timeline-item v-for="x in timeline" :key="x.type+'-'+x.entity_id+'-'+x.time" :timestamp="x.time" placement="top"><div style="display:flex;gap:8px;align-items:center"><el-tag size="small">{{x.type}}</el-tag><b>{{x.title}}</b><el-tag v-if="x.status" size="small" type="info">{{x.status}}</el-tag></div><div v-if="x.summary" style="margin:5px 0">{{x.summary}}</div></el-timeline-item></el-timeline><el-empty v-if="!timeline.length" description="暂无业务事件"/></div>
 
 <el-dialog v-model="tagDialog" title="添加客户标签" width="480"><el-form label-position="top"><el-form-item label="标签名称"><el-input v-model="newTag.name" placeholder="例如：重点客户 / 德国市场 / 高潜"/></el-form-item><el-form-item label="标签分类"><el-input v-model="newTag.category" placeholder="例如：客户价值 / 市场 / 产品偏好"/></el-form-item></el-form><template #footer><el-button @click="tagDialog=false">取消</el-button><el-button type="primary" @click="addTag">添加</el-button></template></el-dialog>
 <el-dialog v-model="transferDialog" title="转移客户负责人" width="480"><el-form label-position="top"><el-form-item label="新负责人"><el-select v-model="transfer.owner_id" filterable style="width:100%"><el-option v-for="x in owners" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item></el-form><template #footer><el-button @click="transferDialog=false">取消</el-button><el-button type="primary" @click="transferOwner">确认转移</el-button></template></el-dialog>
