@@ -474,6 +474,7 @@ function runAutomationSweep(){
     }
   }
 
+  db.prepare("INSERT INTO settings(key,value,updated_at) VALUES('automation_last_run',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(result),now());
   return result;
 }
 let automationRunning=false;
