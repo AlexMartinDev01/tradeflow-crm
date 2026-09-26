@@ -81,6 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("ALTER TABLE contacts ADD COLUMN anniversary TEXT");}catch{}
 try{db.exec("ALTER TABLE tasks ADD COLUMN automation_key TEXT");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_automation_key ON tasks(automation_key)");}catch{}
 try{db.exec("ALTER TABLE documents ADD COLUMN storage_path TEXT");}catch{}
@@ -127,12 +128,68 @@ function seed() {
   }
 }
 
+
+function nextAnnualOccurrence(dateValue, fromDate=new Date()){
+  if(!dateValue)return null;
+  const m=String(dateValue).match(/(?:\d{4}-)?(\d{2})-(\d{2})/); if(!m)return null;
+  const month=Number(m[1]),day=Number(m[2]); if(month<1||month>12||day<1||day>31)return null;
+  let year=fromDate.getFullYear();
+  let d=new Date(Date.UTC(year,month-1,day,9,0,0));
+  const today=new Date(Date.UTC(fromDate.getFullYear(),fromDate.getMonth(),fromDate.getDate(),0,0,0));
+  if(d<today)d=new Date(Date.UTC(year+1,month-1,day,9,0,0));
+  return d;
+}
+function customerInsights(customerId){
+  const c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(customerId); if(!c)return null;
+  const primaryContact=db.prepare('SELECT * FROM contacts WHERE customer_id=? AND is_departed=0 ORDER BY is_primary DESC,created_at LIMIT 1').get(customerId);
+  const channelCount=Number(db.prepare('SELECT COUNT(*) c FROM contact_channels cc JOIN contacts ct ON ct.id=cc.contact_id WHERE ct.customer_id=? AND ct.is_departed=0').get(customerId).c||0);
+  const brandCount=Number(db.prepare('SELECT COUNT(*) c FROM customer_brands WHERE customer_id=?').get(customerId).c||0);
+  const tagCount=Number(db.prepare('SELECT COUNT(*) c FROM customer_tags WHERE customer_id=?').get(customerId).c||0);
+  const customFields=parseJSON(c.custom_fields,{})||{};
+  const checks=[
+    ['客户名称',c.name,8],['英文名称',c.english_name,4],['国家/地区',c.country,6],['城市',c.city,4],['官网',c.website,6],['行业',c.industry,5],
+    ['客户类型',parseJSON(c.customer_types,[]).length,6],['状态',c.status,4],['等级',c.grade,5],['来源',c.source,5],['时区',c.timezone,4],['语言',c.language,4],
+    ['税号/注册号',c.tax_no||c.registration_no,6],['主营业务',c.business_scope,6],['主要联系人',primaryContact?.id,10],['联系方式',channelCount,8],
+    ['品牌关系',brandCount,6],['客户标签',tagCount,4],['自定义属性',Object.keys(customFields).length,4]
+  ];
+  const totalWeight=checks.reduce((a,x)=>a+Number(x[2]),0);
+  const earned=checks.reduce((a,x)=>a+(x[1]?Number(x[2]):0),0);
+  const completeness=Math.round(earned/totalWeight*100);
+  const missing=checks.filter(x=>!x[1]).map(x=>String(x[0]));
+
+  const orderRows=db.prepare("SELECT currency,COUNT(*) order_count,COALESCE(SUM(total),0) revenue,COALESCE(AVG(total),0) avg_order_value,MAX(created_at) last_order_at FROM orders WHERE customer_id=? AND status!='cancelled' GROUP BY currency ORDER BY revenue DESC").all(customerId);
+  const orderCount=Number(db.prepare("SELECT COUNT(*) c FROM orders WHERE customer_id=? AND status!='cancelled'").get(customerId).c||0);
+  const lastActivity=db.prepare('SELECT MAX(occurred_at) t FROM activities WHERE customer_id=?').get(customerId)?.t||null;
+  const openOpp=db.prepare("SELECT COUNT(*) c,COALESCE(MAX(probability),0) max_probability FROM opportunities WHERE customer_id=? AND stage NOT IN ('won','lost')").get(customerId);
+  const contactCount=Number(db.prepare('SELECT COUNT(*) c FROM contacts WHERE customer_id=? AND is_departed=0').get(customerId).c||0);
+
+  let recencyPoints=0,daysSinceActivity=null;
+  if(lastActivity){
+    daysSinceActivity=Math.max(0,Math.floor((Date.now()-new Date(lastActivity).getTime())/86400000));
+    recencyPoints=daysSinceActivity<=7?20:daysSinceActivity<=30?15:daysSinceActivity<=60?10:daysSinceActivity<=120?5:0;
+  }
+  const completenessPoints=completeness*0.25;
+  const opportunityPoints=Math.min(15,Number(openOpp?.max_probability||0)*0.15);
+  const orderPoints=orderCount>=2?15:orderCount===1?8:0;
+  const gradePoints=({A:15,B:10,C:5,D:0}[String(c.grade||'').toUpperCase()]??0);
+  const contactPoints=Math.min(10,contactCount*5);
+  const potentialScore=Math.max(0,Math.min(100,Math.round(completenessPoints+recencyPoints+opportunityPoints+orderPoints+gradePoints+contactPoints)));
+
+  return {
+    completeness:{score:completeness,missing,completed:checks.length-missing.length,total:checks.length},
+    value:{lifetime_value_by_currency:orderRows,order_count:orderCount,last_order_at:orderRows.map(x=>x.last_order_at).filter(Boolean).sort().reverse()[0]||null},
+    engagement:{last_activity_at:lastActivity,days_since_activity:daysSinceActivity,active_contacts:contactCount,open_opportunities:Number(openOpp?.c||0),max_opportunity_probability:Number(openOpp?.max_probability||0)},
+    potential:{score:potentialScore,method:'rule_based_v1',components:{completeness:Math.round(completenessPoints),recency:recencyPoints,opportunity:Math.round(opportunityPoints),orders:orderPoints,grade:gradePoints,contacts:contactPoints}}
+  };
+}
+
 seed();
 const automationDefaults=[
   ['overdue_payment','逾期回款提醒',1,{priority:'urgent'}],
   ['quotation_expiry','报价到期提醒',1,{days:3,priority:'high'}],
   ['brand_expiry','品牌授权到期提醒',1,{days:30,priority:'high'}],
-  ['dormant_customer','沉默客户识别',1,{days:60,priority:'normal'}]
+  ['dormant_customer','沉默客户识别',1,{days:60,priority:'normal'}],
+  ['contact_anniversary','联系人生日/纪念日提醒',1,{days:7,priority:'normal'}]
 ];
 for(const [key,name,enabled,config] of automationDefaults){
   db.prepare('INSERT OR IGNORE INTO automation_rules(key,name,enabled,config,updated_at) VALUES(?,?,?,?,?)').run(key,name,enabled,JSON.stringify(config),now());
@@ -184,6 +241,23 @@ function runAutomationSweep(){
       const key=`customer-dormant:${x.id}`;if(autoTask(key,x.id,`沉默客户需要重新激活：${x.name}`,`超过 ${days} 天没有有效跟进，请评估是否重新联系或转入公海。`,now(),dr.config.priority||'normal',x.owner_id)){result.created++;automationLog('dormant_customer','客户自动标记为沉默并生成任务','customer',x.id);}
     }
   }
+
+  const ar=getRule('contact_anniversary');
+  if(ar?.enabled){
+    const days=Number(ar.config.days||7),today=new Date(),limitMs=days*86400000;
+    const rows=db.prepare(`SELECT ct.*,c.name customer_name,c.owner_id FROM contacts ct JOIN customers c ON c.id=ct.customer_id WHERE ct.is_departed=0 AND c.deleted_at IS NULL AND (ct.birthday IS NOT NULL OR ct.anniversary IS NOT NULL)`).all();
+    for(const x of rows){
+      for(const kind of ['birthday','anniversary']){
+        const value=x[kind]; if(!value)continue;
+        const occurrence=nextAnnualOccurrence(value,today); if(!occurrence)continue;
+        const diff=occurrence.getTime()-Date.now(); if(diff<0||diff>limitMs)continue;
+        const label=kind==='birthday'?'生日':'纪念日',year=occurrence.getUTCFullYear(),key=`contact-${kind}:${x.id}:${year}`;
+        const due=occurrence.toISOString();
+        if(autoTask(key,x.customer_id,`${x.name} ${label}提醒`,`${x.customer_name} 的联系人 ${x.name} 将在 ${due.slice(0,10)} 迎来${label}，请提前准备问候或客户维护动作。`,due,ar.config.priority||'normal',x.owner_id)){result.created++;automationLog('contact_anniversary',`生成联系人${label}任务`,'contact',x.id);}
+      }
+    }
+  }
+
   return result;
 }
 let automationRunning=false;
@@ -1342,6 +1416,18 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,rows);
     }
 
+
+
+    // ---- Customer profile completeness / value / potential insights ----
+    {
+      const im=p.match(/^\/api\/customers\/([0-9a-f-]+)\/insights$/);
+      if(im && req.method==='GET'){
+        const customerId=im[1];
+        const c=db.prepare('SELECT id FROM customers WHERE id=? AND deleted_at IS NULL').get(customerId); if(!c)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,customerId))return json(res,403,{error:'forbidden'});
+        return json(res,200,customerInsights(customerId));
+      }
+    }
 
     // ---- Unified customer 360 timeline ----
     {
