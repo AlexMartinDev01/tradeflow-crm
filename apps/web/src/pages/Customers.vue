@@ -56,7 +56,7 @@ onMounted(async()=>{await loadRefs();await load()});
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">客户360°</h2><span class="muted">高级筛选、查重、防撞单和客户归属 · 共 {{total}} 个客户</span></div><el-button type="primary" @click="dialog=true">新增客户</el-button></div>
+<div class="toolbar"><div><h2 style="margin:0">客户360°</h2><span class="muted">高级筛选、查重、防撞单和客户归属 · 共 {{total}} 个客户</span></div><div style="display:flex;gap:8px"><el-button v-if="['admin','manager'].includes(me?.role)" @click="router.push('/recycle-bin/customers')">回收站</el-button><el-button type="primary" @click="dialog=true">新增客户</el-button></div></div>
 
 <div class="card" style="margin-bottom:16px">
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
