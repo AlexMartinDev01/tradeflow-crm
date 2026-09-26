@@ -1386,6 +1386,19 @@ const server = http.createServer(async (req,res)=>{
 
     // ---- Contract workbench / versioning ----
     {
+      if(p==='/api/workflows/contracts' && req.method==='POST'){
+        const b=await body(req),customerId=String(b.customer_id||'');if(!customerId)return json(res,400,{error:'customer_required'});
+        const customer=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(customerId);if(!customer)return json(res,404,{error:'customer_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,customerId))return json(res,403,{error:'forbidden'});
+        if(!canWriteResource(user.role,'contracts'))return json(res,403,{error:'forbidden'});
+        const id=randomUUID(),no=makeNo('CT'),amount=Number(b.amount||0),currency=b.currency||'USD',terms=b.terms||'';
+        db.prepare('INSERT INTO contracts(id,contract_no,customer_id,quotation_id,amount,currency,effective_from,effective_to,status,terms,attachments,current_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(id,no,customerId,b.quotation_id||null,amount,currency,b.effective_from||null,b.effective_to||null,'draft',terms,'[]',1,now(),now());
+        db.prepare('INSERT INTO contract_versions(id,contract_id,version,amount,currency,effective_from,effective_to,terms,snapshot,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+          .run(randomUUID(),id,1,amount,currency,b.effective_from||null,b.effective_to||null,terms,JSON.stringify({manual:true}),user.user_id,now());
+        audit(user,'create','contracts',id,req,{manual:true});return json(res,201,db.prepare('SELECT * FROM contracts WHERE id=?').get(id));
+      }
+
       const qcontract=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/to-contract$/);
       if(qcontract&&req.method==='POST'){
         const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qcontract[1]);if(!q)return json(res,404,{error:'quotation_not_found'});
