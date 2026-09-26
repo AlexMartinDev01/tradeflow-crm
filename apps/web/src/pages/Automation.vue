@@ -16,7 +16,7 @@ onMounted(load);
   <el-table-column prop="name" label="规则" min-width="180"/><el-table-column prop="key" label="Key" width="170"/>
   <el-table-column label="启用" width="90"><template #default="s"><el-switch v-model="s.row.enabled" :active-value="1" :inactive-value="0"/></template></el-table-column>
   <el-table-column label="阈值/配置" min-width="260"><template #default="s"><div style="display:flex;gap:8px;align-items:center">
-    <template v-if="['quotation_expiry','brand_expiry','dormant_customer'].includes(s.row.key)"><span>天数</span><el-input-number v-model="s.row.config.days" :min="1" :max="365"/></template>
+    <template v-if="['quotation_expiry','brand_expiry','dormant_customer','contact_anniversary'].includes(s.row.key)"><span>天数</span><el-input-number v-model="s.row.config.days" :min="1" :max="365"/></template>
     <span>优先级</span><el-select v-model="s.row.config.priority" style="width:120px"><el-option v-for="x in ['low','normal','high','urgent']" :key="x" :label="x" :value="x"/></el-select>
   </div></template></el-table-column>
   <el-table-column label="操作" width="100"><template #default="s"><el-button link type="primary" @click="saveRule(s.row)">保存</el-button></template></el-table-column>
