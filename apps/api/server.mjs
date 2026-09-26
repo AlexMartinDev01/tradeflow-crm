@@ -99,6 +99,12 @@ try{db.exec("ALTER TABLE customers ADD COLUMN pool_entered_at TEXT");}catch{}
 try{db.exec("ALTER TABLE customers ADD COLUMN pool_reason TEXT");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_customers_pool ON customers(pool_status,pool_entered_at)");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_customer_collaborators_user ON customer_collaborators(user_id,customer_id)");}catch{}
+try{db.exec("ALTER TABLE customers ADD COLUMN parent_customer_id TEXT");}catch{}
+try{db.exec("ALTER TABLE customers ADD COLUMN organization_role TEXT");}catch{}
+try{db.exec("ALTER TABLE customers ADD COLUMN merged_into_id TEXT");}catch{}
+try{db.exec("ALTER TABLE contacts ADD COLUMN departed_at TEXT");}catch{}
+try{db.exec("ALTER TABLE contacts ADD COLUMN successor_contact_id TEXT");}catch{}
+try{db.exec("CREATE INDEX IF NOT EXISTS idx_customers_parent ON customers(parent_customer_id)");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_campaign_recipients_campaign ON campaign_recipients(campaign_id,status)");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_marketing_consents_lookup ON marketing_consents(customer_id,contact_id,channel,updated_at)");}catch{}
 
@@ -403,6 +409,63 @@ function moveCustomerToPool(customerId,reason,operatorId=null){
     .run(randomUUID(),customerId,'release',c.owner_id||null,null,reason||'manual',operatorId||null,now());
   return db.prepare('SELECT * FROM customers WHERE id=?').get(customerId);
 }
+
+function mergeCustomers(sourceId,targetId,operatorId){
+  if(!sourceId||!targetId||sourceId===targetId)throw new Error('invalid_merge');
+  const source=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(sourceId);
+  const target=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(targetId);
+  if(!source||!target)throw new Error('customer_not_found');
+  db.exec('BEGIN IMMEDIATE');
+  try{
+    const directTables=['contacts','activities','tasks','inquiries','opportunities','quotations','samples','contracts','orders','payments','aftersales','customer_product_preferences'];
+    for(const table of directTables){
+      if(table==='customer_product_preferences')continue;
+      if(tableCols(table).includes('customer_id'))db.prepare(`UPDATE ${table} SET customer_id=? WHERE customer_id=?`).run(targetId,sourceId);
+    }
+
+    db.prepare(`INSERT OR IGNORE INTO customer_tags(customer_id,tag_id)
+      SELECT ?,tag_id FROM customer_tags WHERE customer_id=?`).run(targetId,sourceId);
+    db.prepare('DELETE FROM customer_tags WHERE customer_id=?').run(sourceId);
+
+    db.prepare(`INSERT OR IGNORE INTO customer_collaborators(customer_id,user_id,added_by,created_at)
+      SELECT ?,user_id,added_by,created_at FROM customer_collaborators WHERE customer_id=?`).run(targetId,sourceId);
+    db.prepare('DELETE FROM customer_collaborators WHERE customer_id=?').run(sourceId);
+
+    db.prepare(`INSERT OR IGNORE INTO customer_brands(id,customer_id,brand_id,relation_type,authorized_regions,exclusive,start_date,end_date,sales_share,price_band,notes,created_at)
+      SELECT id,?,brand_id,relation_type,authorized_regions,exclusive,start_date,end_date,sales_share,price_band,notes,created_at FROM customer_brands WHERE customer_id=?`).run(targetId,sourceId);
+    db.prepare('DELETE FROM customer_brands WHERE customer_id=?').run(sourceId);
+
+    db.prepare(`INSERT OR IGNORE INTO customer_product_preferences(id,customer_id,product_id,preference_type,interest_level,notes,created_at,updated_at)
+      SELECT id,?,product_id,preference_type,interest_level,notes,created_at,updated_at FROM customer_product_preferences WHERE customer_id=?`).run(targetId,sourceId);
+    db.prepare('DELETE FROM customer_product_preferences WHERE customer_id=?').run(sourceId);
+
+    const sourceCredit=db.prepare('SELECT * FROM credit_profiles WHERE customer_id=?').get(sourceId);
+    const targetCredit=db.prepare('SELECT * FROM credit_profiles WHERE customer_id=?').get(targetId);
+    if(sourceCredit&&!targetCredit)db.prepare('UPDATE credit_profiles SET customer_id=? WHERE customer_id=?').run(targetId,sourceId);
+    else if(sourceCredit)db.prepare('DELETE FROM credit_profiles WHERE customer_id=?').run(sourceId);
+
+    db.prepare("UPDATE documents SET entity_id=? WHERE entity_type='customer' AND entity_id=?").run(targetId,sourceId);
+    db.prepare('UPDATE marketing_consents SET customer_id=? WHERE customer_id=?').run(targetId,sourceId);
+    try{db.prepare('UPDATE OR IGNORE campaign_recipients SET customer_id=? WHERE customer_id=?').run(targetId,sourceId);}catch{}
+    db.prepare('DELETE FROM campaign_recipients WHERE customer_id=?').run(sourceId);
+    db.prepare('UPDATE public_pool_events SET customer_id=? WHERE customer_id=?').run(targetId,sourceId);
+    db.prepare('UPDATE customers SET parent_customer_id=? WHERE parent_customer_id=?').run(targetId,sourceId);
+
+    const sourceTypes=parseJSON(source.customer_types,[])||[],targetTypes=parseJSON(target.customer_types,[])||[];
+    const mergedTypes=[...new Set([...targetTypes,...sourceTypes])];
+    const sourceRegions=parseJSON(source.service_regions,[])||[],targetRegions=parseJSON(target.service_regions,[])||[];
+    const mergedRegions=[...new Set([...targetRegions,...sourceRegions])];
+    const sourceCustom=parseJSON(source.custom_fields,{})||{},targetCustom=parseJSON(target.custom_fields,{})||{};
+    db.prepare(`UPDATE customers SET customer_types=?,service_regions=?,custom_fields=?,notes=?,updated_at=? WHERE id=?`)
+      .run(JSON.stringify(mergedTypes),JSON.stringify(mergedRegions),JSON.stringify({...sourceCustom,...targetCustom}),
+        [target.notes,source.notes?`[Merged from ${source.name}] ${source.notes}`:null].filter(Boolean).join('\n'),now(),targetId);
+
+    db.prepare(`UPDATE customers SET deleted_at=?,merged_into_id=?,owner_id=NULL,pool_status='merged',updated_at=? WHERE id=?`).run(now(),targetId,now(),sourceId);
+    db.exec('COMMIT');
+    return {source_id:sourceId,target_id:targetId};
+  }catch(e){db.exec('ROLLBACK');throw e;}
+}
+
 function resourceCustomerId(key,payloadOrId,isId=false){
   try{
     if(!isId){
@@ -1386,6 +1449,54 @@ const server = http.createServer(async (req,res)=>{
         FROM public_pool_events e JOIN customers c ON c.id=e.customer_id
         LEFT JOIN users fu ON fu.id=e.from_owner_id LEFT JOIN users tu ON tu.id=e.to_owner_id LEFT JOIN users ou ON ou.id=e.operated_by
         ORDER BY e.created_at DESC LIMIT 300`).all());
+    }
+
+
+    // ---- Customer organization hierarchy, merge and contact handover ----
+    {
+      const org=p.match(/^\/api\/customers\/([0-9a-f-]+)\/organization$/);
+      if(org&&req.method==='GET'){
+        const cid=org[1],c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(cid);if(!c)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'});
+        const parent=c.parent_customer_id?db.prepare('SELECT id,name,english_name,country,organization_role FROM customers WHERE id=? AND deleted_at IS NULL').get(c.parent_customer_id):null;
+        const children=db.prepare('SELECT id,name,english_name,country,organization_role,status,grade FROM customers WHERE parent_customer_id=? AND deleted_at IS NULL ORDER BY name').all(cid);
+        return json(res,200,{customer:{id:c.id,name:c.name,organization_role:c.organization_role,parent_customer_id:c.parent_customer_id},parent,children});
+      }
+      if(org&&req.method==='PATCH'){
+        const cid=org[1],c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(cid);if(!c)return json(res,404,{error:'not_found'});
+        if(!['admin','manager'].includes(user.role)&&c.owner_id!==user.user_id)return json(res,403,{error:'forbidden'});
+        const b=await body(req),parentId=b.parent_customer_id?String(b.parent_customer_id):null;
+        if(parentId===cid)return json(res,400,{error:'cannot_parent_self'});
+        if(parentId&&!db.prepare('SELECT id FROM customers WHERE id=? AND deleted_at IS NULL').get(parentId))return json(res,400,{error:'invalid_parent'});
+        let cursor=parentId,depth=0;
+        while(cursor&&depth++<20){if(cursor===cid)return json(res,400,{error:'organization_cycle'});cursor=db.prepare('SELECT parent_customer_id FROM customers WHERE id=?').get(cursor)?.parent_customer_id||null;}
+        db.prepare('UPDATE customers SET parent_customer_id=?,organization_role=?,updated_at=? WHERE id=?').run(parentId,b.organization_role||null,now(),cid);
+        audit(user,'update_organization','customers',cid,req,{parent_customer_id:parentId,organization_role:b.organization_role||null});return json(res,200,{ok:true});
+      }
+
+      const merge=p.match(/^\/api\/customers\/([0-9a-f-]+)\/merge-into\/([0-9a-f-]+)$/);
+      if(merge&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        try{const result=mergeCustomers(merge[1],merge[2],user.user_id);audit(user,'merge','customers',merge[2],req,{source_id:merge[1]});return json(res,200,result);}
+        catch(e){return json(res,400,{error:String(e?.message||e)});}
+      }
+
+      const handover=p.match(/^\/api\/contacts\/([0-9a-f-]+)\/depart$/);
+      if(handover&&req.method==='POST'){
+        const contact=db.prepare('SELECT * FROM contacts WHERE id=?').get(handover[1]);if(!contact)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,contact.customer_id))return json(res,403,{error:'forbidden'});
+        const b=await body(req),successor=b.successor_contact_id?String(b.successor_contact_id):null;
+        if(successor){
+          const next=db.prepare('SELECT * FROM contacts WHERE id=? AND customer_id=? AND is_departed=0').get(successor,contact.customer_id);
+          if(!next)return json(res,400,{error:'invalid_successor'});
+        }
+        db.prepare('UPDATE contacts SET is_departed=1,departed_at=?,successor_contact_id=?,notes=?,updated_at=? WHERE id=?')
+          .run(b.departed_at||now(),successor,[contact.notes,b.note].filter(Boolean).join('\n'),now(),contact.id);
+        const successorName=successor?db.prepare('SELECT name FROM contacts WHERE id=?').get(successor)?.name:null;
+        db.prepare('INSERT INTO activities(id,customer_id,contact_id,type,subject,content,result,next_action,occurred_at,created_by,attachments,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(randomUUID(),contact.customer_id,contact.id,'system','联系人离职交接',`${contact.name} 已标记离职${successorName?`，后续联系人：${successorName}`:''}`,b.note||null,successorName?`后续联系 ${successorName}`:null,b.departed_at||now(),user.user_id,'[]',now());
+        audit(user,'depart','contacts',contact.id,req,{successor_contact_id:successor});return json(res,200,db.prepare('SELECT * FROM contacts WHERE id=?').get(contact.id));
+      }
     }
 
     // ---- Sales workflow actions: inquiry -> opportunity -> quotation -> order / sample follow-up ----
