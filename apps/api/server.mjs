@@ -1006,6 +1006,10 @@ function normalizeReportSpec(input={}){
 }
 function runCustomReport(user,input={}){
   const spec=normalizeReportSpec(input),cfg=reportCatalog()[spec.entity_type],dimension=cfg.dimensions[spec.dimension],metric=cfg.metrics[spec.metric];
+  const moneyMetrics={orders:['total','avg_total'],opportunities:['expected','weighted'],quotations:['total'],payments:['amount']};
+  if((moneyMetrics[spec.entity_type]||[]).includes(spec.metric)&&spec.dimension!=='currency'&&!spec.filters.currency){
+    const e=new Error('currency_filter_required');e.details={entity_type:spec.entity_type,metric:spec.metric};throw e;
+  }
   const where=['c.deleted_at IS NULL'],args=[],access=customerScopeClause(user,'c');
   if(access.sql){where.push(access.sql.replace(/^\s*AND\s*/,'').trim());args.push(...access.args);}
   for(const [key,column] of Object.entries(cfg.filters)){
@@ -3550,6 +3554,6 @@ const server = http.createServer(async (req,res)=>{
     }
 
     return json(res,404,{error:'not_found',path:p});
-  } catch(e){ console.error(req.requestId,e); const known=['custom_field_validation_failed','weak_password']; const code=known.includes(e.message)?e.message:'request_failed'; return json(res,400,{error:code,message:e.message,details:e.details||undefined,request_id:req.requestId}); }
+  } catch(e){ console.error(req.requestId,e); const known=['custom_field_validation_failed','weak_password','currency_filter_required','invalid_report_entity','invalid_report_dimension','invalid_report_metric']; const code=known.includes(e.message)?e.message:'request_failed'; return json(res,400,{error:code,message:e.message,details:e.details||undefined,request_id:req.requestId}); }
 });
 server.listen(PORT,HOST,()=>console.log(`TradeFlow API listening on http://${HOST}:${PORT}/api`));
