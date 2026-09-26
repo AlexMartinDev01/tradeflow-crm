@@ -184,6 +184,125 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,{target,copyFallback:!target});
     }
 
+
+    // ---- Sales workflow actions: inquiry -> opportunity -> quotation -> order / sample follow-up ----
+    {
+      const wm=p.match(/^\/api\/workflows\/inquiries\/([0-9a-f-]+)\/to-opportunity$/);
+      if(wm && req.method==='POST'){
+        const inquiry=db.prepare('SELECT * FROM inquiries WHERE id=?').get(wm[1]);
+        if(!inquiry) return json(res,404,{error:'inquiry_not_found'});
+        const existing=db.prepare('SELECT * FROM opportunities WHERE inquiry_id=? ORDER BY created_at DESC LIMIT 1').get(inquiry.id);
+        if(existing) return json(res,200,existing);
+        const b=await body(req), id=randomUUID();
+        db.prepare('INSERT INTO opportunities(id,customer_id,inquiry_id,name,stage,expected_amount,currency,expected_close_date,probability,competitor,owner_id,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(id,inquiry.customer_id,inquiry.id,b.name||('商机 '+inquiry.inquiry_no),b.stage||'qualification',Number(b.expected_amount||0),b.currency||'USD',b.expected_close_date||null,Number(b.probability||20),b.competitor||null,b.owner_id||inquiry.owner_id||user.user_id,b.notes||inquiry.notes||null,now(),now());
+        db.prepare("UPDATE inquiries SET status='converted',updated_at=? WHERE id=?").run(now(),inquiry.id);
+        audit(user,'convert_inquiry_to_opportunity','opportunities',id,req,{inquiry_id:inquiry.id});
+        return json(res,201,db.prepare('SELECT * FROM opportunities WHERE id=?').get(id));
+      }
+
+      const wo=p.match(/^\/api\/workflows\/opportunities\/([0-9a-f-]+)\/to-quotation$/);
+      if(wo && req.method==='POST'){
+        const opp=db.prepare('SELECT * FROM opportunities WHERE id=?').get(wo[1]);
+        if(!opp) return json(res,404,{error:'opportunity_not_found'});
+        const b=await body(req), id=randomUUID(), quoteNo=makeNo('QT');
+        db.prepare(`INSERT INTO quotations(id,quote_no,customer_id,contact_id,opportunity_id,version,currency,incoterm,payment_terms,moq,packaging,lead_time,valid_until,subtotal,discount,total,margin_rate,status,notes,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(id,quoteNo,opp.customer_id,b.contact_id||null,opp.id,1,b.currency||opp.currency||'USD',b.incoterm||null,b.payment_terms||null,b.moq||null,b.packaging||null,b.lead_time||null,b.valid_until||null,0,0,0,null,'draft',b.notes||opp.notes||null,now(),now());
+        audit(user,'create_quotation_from_opportunity','quotations',id,req,{opportunity_id:opp.id});
+        return json(res,201,db.prepare('SELECT * FROM quotations WHERE id=?').get(id));
+      }
+
+      const qfull=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/full$/);
+      if(qfull && req.method==='GET'){
+        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qfull[1]);
+        if(!q) return json(res,404,{error:'quotation_not_found'});
+        const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=? ORDER BY rowid').all(q.id);
+        return json(res,200,{...q,items});
+      }
+
+      const qrecalc=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/recalculate$/);
+      if(qrecalc && req.method==='POST'){
+        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qrecalc[1]);
+        if(!q) return json(res,404,{error:'quotation_not_found'});
+        const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=?').all(q.id);
+        let subtotal=0,totalCost=0;
+        const upd=db.prepare('UPDATE quotation_items SET amount=? WHERE id=?');
+        for(const item of items){ const amount=Number(item.quantity||0)*Number(item.unit_price||0); subtotal+=amount; totalCost+=Number(item.quantity||0)*Number(item.cost||0); upd.run(amount,item.id); }
+        const discount=Number(q.discount||0), total=Math.max(0,subtotal-discount), marginRate=total>0?((total-totalCost)/total*100):null;
+        db.prepare('UPDATE quotations SET subtotal=?,total=?,margin_rate=?,updated_at=? WHERE id=?').run(subtotal,total,marginRate,now(),q.id);
+        audit(user,'recalculate','quotations',q.id,req,{subtotal,total,margin_rate:marginRate});
+        return json(res,200,{...db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id),items:db.prepare('SELECT * FROM quotation_items WHERE quotation_id=? ORDER BY rowid').all(q.id)});
+      }
+
+      const qcopy=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/copy-version$/);
+      if(qcopy && req.method==='POST'){
+        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qcopy[1]);
+        if(!q) return json(res,404,{error:'quotation_not_found'});
+        const maxv=db.prepare('SELECT COALESCE(MAX(version),0) v FROM quotations WHERE opportunity_id IS ? AND customer_id=?').get(q.opportunity_id,q.customer_id).v;
+        const id=randomUUID(), quoteNo=makeNo('QT');
+        db.prepare(`INSERT INTO quotations(id,quote_no,customer_id,contact_id,opportunity_id,version,currency,incoterm,payment_terms,moq,packaging,lead_time,valid_until,subtotal,discount,total,margin_rate,status,notes,created_at,updated_at)
+          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+          .run(id,quoteNo,q.customer_id,q.contact_id,q.opportunity_id,Number(maxv)+1,q.currency,q.incoterm,q.payment_terms,q.moq,q.packaging,q.lead_time,q.valid_until,q.subtotal,q.discount,q.total,q.margin_rate,'draft',q.notes,now(),now());
+        const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=?').all(q.id);
+        const ins=db.prepare('INSERT INTO quotation_items(id,quotation_id,product_code,product_name,quantity,unit,unit_price,amount,cost,spec) VALUES(?,?,?,?,?,?,?,?,?,?)');
+        for(const it of items) ins.run(randomUUID(),id,it.product_code,it.product_name,it.quantity,it.unit,it.unit_price,it.amount,it.cost,it.spec);
+        audit(user,'copy_version','quotations',id,req,{from_quotation_id:q.id,version:Number(maxv)+1});
+        return json(res,201,{...db.prepare('SELECT * FROM quotations WHERE id=?').get(id),items:db.prepare('SELECT * FROM quotation_items WHERE quotation_id=?').all(id)});
+      }
+
+      const qsubmit=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/submit$/);
+      if(qsubmit && req.method==='POST'){
+        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qsubmit[1]);
+        if(!q) return json(res,404,{error:'quotation_not_found'});
+        db.prepare("UPDATE quotations SET status='pending_approval',updated_at=? WHERE id=?").run(now(),q.id);
+        audit(user,'submit_approval','quotations',q.id,req);
+        return json(res,200,db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id));
+      }
+
+      const qapprove=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/approve$/);
+      if(qapprove && req.method==='POST'){
+        if(!['admin','manager'].includes(user.role)) return json(res,403,{error:'forbidden'});
+        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qapprove[1]);
+        if(!q) return json(res,404,{error:'quotation_not_found'});
+        db.prepare("UPDATE quotations SET status='approved',updated_at=? WHERE id=?").run(now(),q.id);
+        audit(user,'approve','quotations',q.id,req);
+        return json(res,200,db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id));
+      }
+
+      const qorder=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/to-order$/);
+      if(qorder && req.method==='POST'){
+        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qorder[1]);
+        if(!q) return json(res,404,{error:'quotation_not_found'});
+        if(!['approved','sent','accepted'].includes(q.status)) return json(res,409,{error:'quotation_not_approved'});
+        const existing=db.prepare('SELECT * FROM orders WHERE quotation_id=? ORDER BY created_at DESC LIMIT 1').get(q.id);
+        if(existing) return json(res,200,existing);
+        const b=await body(req), id=randomUUID();
+        db.prepare('INSERT INTO orders(id,order_no,customer_id,quotation_id,customer_po,status,currency,incoterm,payment_terms,total,requested_delivery,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(id,makeNo('SO'),q.customer_id,q.id,b.customer_po||null,'pending',q.currency,q.incoterm,q.payment_terms,q.total,b.requested_delivery||null,b.notes||q.notes||null,now(),now());
+        const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=?').all(q.id);
+        const ins=db.prepare('INSERT INTO order_items(id,order_id,product_name,quantity,unit,unit_price,amount) VALUES(?,?,?,?,?,?,?)');
+        for(const it of items) ins.run(randomUUID(),id,it.product_name,it.quantity,it.unit,it.unit_price,it.amount);
+        db.prepare("UPDATE quotations SET status='accepted',updated_at=? WHERE id=?").run(now(),q.id);
+        if(q.opportunity_id) db.prepare("UPDATE opportunities SET stage='won',probability=100,updated_at=? WHERE id=?").run(now(),q.opportunity_id);
+        audit(user,'convert_quotation_to_order','orders',id,req,{quotation_id:q.id});
+        return json(res,201,{...db.prepare('SELECT * FROM orders WHERE id=?').get(id),items:db.prepare('SELECT * FROM order_items WHERE order_id=?').all(id)});
+      }
+
+      const sdel=p.match(/^\/api\/workflows\/samples\/([0-9a-f-]+)\/mark-delivered$/);
+      if(sdel && req.method==='POST'){
+        const s=db.prepare('SELECT * FROM samples WHERE id=?').get(sdel[1]);
+        if(!s) return json(res,404,{error:'sample_not_found'});
+        const b=await body(req), deliveredAt=b.delivered_at||now();
+        db.prepare("UPDATE samples SET status='delivered',delivered_at=?,updated_at=? WHERE id=?").run(deliveredAt,now(),s.id);
+        const taskId=randomUUID(), due=new Date(new Date(deliveredAt).getTime()+3*24*3600_000).toISOString();
+        db.prepare('INSERT INTO tasks(id,customer_id,title,description,due_at,status,priority,assigned_to,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+          .run(taskId,s.customer_id,'跟进样品反馈',`样品：${s.product}；运单：${s.tracking_no||'-'}。请确认客户试用反馈并推动下一步。`,due,'todo','high',user.user_id,user.user_id,now(),now());
+        audit(user,'sample_delivered','samples',s.id,req,{task_id:taskId});
+        return json(res,200,{sample:db.prepare('SELECT * FROM samples WHERE id=?').get(s.id),task:db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId)});
+      }
+    }
+
     const m=p.match(/^\/api\/([A-Za-z]+)(?:\/([0-9a-f-]+))?$/);
     if(m && resourceMap[m[1]]){
       const key=m[1], id=m[2], cfg=resourceMap[key], table=cfg.table;
