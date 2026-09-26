@@ -1716,7 +1716,18 @@ setTimeout(evaluateOperationalAlerts,90_000).unref();
 setInterval(evaluateOperationalAlerts,5*60_000).unref();
 
 const rate = new Map();
-function rateLimit(req){ const ip=req.socket.remoteAddress||'x', t=Date.now(), w=60_000; const x=rate.get(ip)||{start:t,count:0}; if(t-x.start>w){x.start=t;x.count=0;} x.count++; rate.set(ip,x); return x.count<=300; }
+function rateLimit(req,scope='api',limit=600,windowMs=60_000){
+  const ip=req.socket.remoteAddress||'x',key=`${scope}:${ip}`,t=Date.now();
+  const bucket=rate.get(key)||{start:t,count:0};
+  if(t-bucket.start>windowMs){bucket.start=t;bucket.count=0;}
+  bucket.count++;rate.set(key,bucket);
+  return bucket.count<=limit;
+}
+function apiRatePolicy(pathname){
+  if(pathname==='/api/health'||pathname==='/api/ready')return null;
+  if(pathname==='/api/auth/login'||pathname==='/api/auth/2fa/verify')return {scope:'auth',limit:60,windowMs:60_000};
+  return {scope:'api',limit:600,windowMs:60_000};
+}
 
 const server = http.createServer(async (req,res)=>{
   req.requestId=randomUUID();
@@ -1729,10 +1740,12 @@ const server = http.createServer(async (req,res)=>{
   });
   if(req.method==='OPTIONS') return json(res,204,{});
   res.setHeader('x-request-id',req.requestId); res.setHeader('x-content-type-options','nosniff'); res.setHeader('x-frame-options','DENY'); res.setHeader('referrer-policy','same-origin');
-  if(!rateLimit(req)) return json(res,429,{error:'rate_limited'});
   const url=new URL(req.url,`http://${req.headers.host||'localhost'}`); const p=url.pathname;
   try {
+    // Frontend HTML/assets are not API traffic and must never consume API rate-limit quota.
     if(!p.startsWith('/api/')) return serveFrontend(req,res,p);
+    const policy=apiRatePolicy(p);
+    if(policy&&!rateLimit(req,policy.scope,policy.limit,policy.windowMs))return json(res,429,{error:'rate_limited',scope:policy.scope});
     if(p==='/api/health') return json(res,200,{ok:true,service:'tradeflow-api',time:now(),uptime_seconds:Math.floor((Date.now()-APP_STARTED_AT)/1000)});
     if(p==='/api/ready'){const ready=readinessSnapshot();return json(res,ready.ok?200:503,ready);}
     if(p==='/api/auth/login' && req.method==='POST'){
