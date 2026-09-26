@@ -67,7 +67,7 @@ onMounted(load);
     <el-form label-position="top">
       <el-form-item label="当前密码"><el-input v-model="passwordForm.current_password" type="password" show-password autocomplete="current-password"/></el-form-item>
       <el-form-item label="新密码"><el-input v-model="passwordForm.new_password" type="password" show-password autocomplete="new-password"/></el-form-item>
-      <el-form-item label="确认新密码"><el-input v-model="passwordForm.confirm_password" type="password" show-password autocomplete="new-password"/></el-form-item>
+      <el-form-item v-if="passwordForm.new_password" label="确认新密码"><el-input v-model="passwordForm.confirm_password" type="password" show-password autocomplete="new-password"/></el-form-item>
       <el-button type="primary" :loading="loading" @click="changePassword">修改密码</el-button>
     </el-form>
   </div>
