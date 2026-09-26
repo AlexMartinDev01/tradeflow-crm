@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS samples(id TEXT PRIMARY KEY, customer_id TEXT NOT NUL
 CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY, sku TEXT UNIQUE, name TEXT NOT NULL, category TEXT, description TEXT, certifications TEXT NOT NULL DEFAULT '[]', base_price REAL, currency TEXT DEFAULT 'USD', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS contracts(id TEXT PRIMARY KEY, contract_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, quotation_id TEXT, amount REAL, currency TEXT DEFAULT 'USD', signed_at TEXT, effective_from TEXT, effective_to TEXT, status TEXT DEFAULT 'draft', terms TEXT, attachments TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY, order_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, quotation_id TEXT, contract_id TEXT, customer_po TEXT, status TEXT NOT NULL DEFAULT 'pending', currency TEXT DEFAULT 'USD', incoterm TEXT, payment_terms TEXT, total REAL NOT NULL DEFAULT 0, requested_delivery TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS order_changes(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, field_name TEXT NOT NULL, old_value TEXT, new_value TEXT, changed_by TEXT, note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS order_items(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, product_id TEXT, product_name TEXT NOT NULL, quantity REAL NOT NULL, unit TEXT, unit_price REAL NOT NULL, amount REAL NOT NULL, delivery_date TEXT, FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS payments(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, order_id TEXT, type TEXT, amount REAL NOT NULL, currency TEXT DEFAULT 'USD', due_at TEXT, paid_at TEXT, status TEXT NOT NULL DEFAULT 'pending', bank_ref TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS credit_profiles(id TEXT PRIMARY KEY, customer_id TEXT UNIQUE NOT NULL, rating TEXT, credit_limit REAL, currency TEXT DEFAULT 'USD', payment_days INTEGER, insured_limit REAL, overdue_count INTEGER NOT NULL DEFAULT 0, max_overdue_days INTEGER NOT NULL DEFAULT 0, notes TEXT, updated_at TEXT NOT NULL);
@@ -433,6 +434,43 @@ const server = http.createServer(async (req,res)=>{
 
 
 
+
+
+    // ---- Dedicated order execution workflow ----
+    {
+      const ofull=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/full$/);
+      if(ofull && req.method==='GET'){
+        const o=db.prepare('SELECT o.*,c.name customer_name,c.english_name customer_english_name FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?').get(ofull[1]);
+        if(!o)return json(res,404,{error:'order_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,o.customer_id))return json(res,403,{error:'forbidden'});
+        return json(res,200,{...o,
+          items:db.prepare('SELECT * FROM order_items WHERE order_id=? ORDER BY rowid').all(o.id),
+          payments:db.prepare('SELECT * FROM payments WHERE order_id=? ORDER BY COALESCE(due_at,created_at)').all(o.id),
+          shipments:db.prepare('SELECT * FROM shipments WHERE order_id=? ORDER BY created_at DESC').all(o.id),
+          documents:db.prepare("SELECT * FROM documents WHERE entity_type='order' AND entity_id=? ORDER BY created_at DESC").all(o.id),
+          changes:db.prepare('SELECT oc.*,u.display_name changed_by_name FROM order_changes oc LEFT JOIN users u ON u.id=oc.changed_by WHERE order_id=? ORDER BY created_at DESC').all(o.id)
+        });
+      }
+      const ostatus=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/status$/);
+      if(ostatus && req.method==='POST'){
+        const o=db.prepare('SELECT * FROM orders WHERE id=?').get(ostatus[1]);if(!o)return json(res,404,{error:'order_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,o.customer_id))return json(res,403,{error:'forbidden'});
+        if(!canWriteResource(user.role,'orders'))return json(res,403,{error:'forbidden'});
+        const b=await body(req),next=String(b.status||'').trim();const allowed=['pending','confirmed','production','ready','partial_shipped','shipped','partial_delivered','completed','cancelled'];
+        if(!allowed.includes(next))return json(res,400,{error:'invalid_status'});
+        db.prepare('UPDATE orders SET status=?,updated_at=? WHERE id=?').run(next,now(),o.id);
+        db.prepare('INSERT INTO order_changes(id,order_id,field_name,old_value,new_value,changed_by,note,created_at) VALUES(?,?,?,?,?,?,?,?)').run(randomUUID(),o.id,'status',o.status,next,user.user_id,b.note||null,now());
+        audit(user,'change_status','orders',o.id,req,{from:o.status,to:next,note:b.note||null});return json(res,200,db.prepare('SELECT * FROM orders WHERE id=?').get(o.id));
+      }
+      const orecalc=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/recalculate$/);
+      if(orecalc && req.method==='POST'){
+        const o=db.prepare('SELECT * FROM orders WHERE id=?').get(orecalc[1]);if(!o)return json(res,404,{error:'order_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,o.customer_id))return json(res,403,{error:'forbidden'});
+        const total=db.prepare('SELECT COALESCE(SUM(amount),0) total FROM order_items WHERE order_id=?').get(o.id).total;
+        db.prepare('UPDATE orders SET total=?,updated_at=? WHERE id=?').run(total,now(),o.id);
+        return json(res,200,{...db.prepare('SELECT * FROM orders WHERE id=?').get(o.id),items:db.prepare('SELECT * FROM order_items WHERE order_id=?').all(o.id)});
+      }
+    }
 
     // ---- Customer Excel import / preview / export data ----
     if(p==='/api/customers/import/preview' && req.method==='POST'){
