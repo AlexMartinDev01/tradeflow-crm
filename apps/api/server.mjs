@@ -37,6 +37,11 @@ CREATE TABLE IF NOT EXISTS quotations(id TEXT PRIMARY KEY, quote_no TEXT UNIQUE 
 CREATE TABLE IF NOT EXISTS quotation_items(id TEXT PRIMARY KEY, quotation_id TEXT NOT NULL, product_code TEXT, product_name TEXT NOT NULL, quantity REAL NOT NULL DEFAULT 1, unit TEXT, unit_price REAL NOT NULL DEFAULT 0, amount REAL NOT NULL DEFAULT 0, cost REAL, spec TEXT, FOREIGN KEY(quotation_id) REFERENCES quotations(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS samples(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, opportunity_id TEXT, product TEXT NOT NULL, quantity TEXT, fee REAL, currency TEXT DEFAULT 'USD', courier TEXT, tracking_no TEXT, sent_at TEXT, delivered_at TEXT, feedback TEXT, status TEXT NOT NULL DEFAULT 'requested', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY, sku TEXT UNIQUE, name TEXT NOT NULL, category TEXT, description TEXT, certifications TEXT NOT NULL DEFAULT '[]', base_price REAL, currency TEXT DEFAULT 'USD', active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS customer_product_preferences(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, product_id TEXT NOT NULL, preference_type TEXT NOT NULL, interest_level TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(customer_id,product_id,preference_type), FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS price_lists(id TEXT PRIMARY KEY, name TEXT NOT NULL, customer_id TEXT, currency TEXT NOT NULL DEFAULT 'USD', valid_from TEXT, valid_to TEXT, status TEXT NOT NULL DEFAULT 'active', notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS price_list_items(id TEXT PRIMARY KEY, price_list_id TEXT NOT NULL, product_id TEXT NOT NULL, min_qty REAL NOT NULL DEFAULT 1, max_qty REAL, unit_price REAL NOT NULL, discount_percent REAL, notes TEXT, created_at TEXT NOT NULL, UNIQUE(price_list_id,product_id,min_qty), FOREIGN KEY(price_list_id) REFERENCES price_lists(id) ON DELETE CASCADE, FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS product_market_rules(id TEXT PRIMARY KEY, product_id TEXT NOT NULL, country TEXT, rule_type TEXT NOT NULL, required_certifications TEXT NOT NULL DEFAULT '[]', notes TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
+
 CREATE TABLE IF NOT EXISTS contracts(id TEXT PRIMARY KEY, contract_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, quotation_id TEXT, amount REAL, currency TEXT DEFAULT 'USD', signed_at TEXT, effective_from TEXT, effective_to TEXT, status TEXT DEFAULT 'draft', terms TEXT, attachments TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY, order_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, quotation_id TEXT, contract_id TEXT, customer_po TEXT, status TEXT NOT NULL DEFAULT 'pending', currency TEXT DEFAULT 'USD', incoterm TEXT, payment_terms TEXT, total REAL NOT NULL DEFAULT 0, requested_delivery TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS order_changes(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, field_name TEXT NOT NULL, old_value TEXT, new_value TEXT, changed_by TEXT, note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE);
@@ -184,6 +189,10 @@ const resourceMap = {
   quotationItems:{table:'quotation_items', required:['quotation_id','product_name']},
   samples:{table:'samples', required:['customer_id','product']},
   products:{table:'products', json:['certifications'], required:['name']},
+  customerProductPreferences:{table:'customer_product_preferences', required:['customer_id','product_id','preference_type']},
+  priceLists:{table:'price_lists', required:['name']},
+  priceListItems:{table:'price_list_items', required:['price_list_id','product_id','min_qty','unit_price']},
+  productMarketRules:{table:'product_market_rules', json:['required_certifications'], required:['product_id','rule_type']},
   contracts:{table:'contracts', json:['attachments'], required:['customer_id']},
   orders:{table:'orders', required:['customer_id']},
   orderItems:{table:'order_items', required:['order_id','product_name','quantity','unit_price','amount']},
@@ -347,7 +356,7 @@ function sanitizePayload(cfg, payload, isCreate=false){
 
 const writePolicy={
   admin:'*',manager:'*',
-  sales:new Set(['customers','contacts','channels','customerBrands','activities','tasks','inquiries','opportunities','quotations','quotationItems','samples','contracts','orders','orderItems','shipments','documents','aftersales']),
+  sales:new Set(['customers','contacts','channels','customerBrands','activities','tasks','inquiries','opportunities','quotations','quotationItems','samples','contracts','orders','orderItems','shipments','documents','aftersales','customerProductPreferences']),
   followup:new Set(['customers','contacts','channels','activities','tasks','inquiries','samples','aftersales']),
   finance:new Set(['payments','creditProfiles']),
   readonly:new Set()
@@ -500,6 +509,97 @@ const server = http.createServer(async (req,res)=>{
     }
 
 
+
+
+    // ---- Product preferences, price lists, tier pricing and market rules ----
+    if(p==='/api/pricing/history' && req.method==='GET'){
+      const customerId=String(url.searchParams.get('customer_id')||''),productId=String(url.searchParams.get('product_id')||'');
+      if(!customerId||!productId)return json(res,400,{error:'customer_and_product_required'});
+      if(scopedRole(user)&&!customerOwnedBy(user,customerId))return json(res,403,{error:'forbidden'});
+      const product=db.prepare('SELECT * FROM products WHERE id=?').get(productId);if(!product)return json(res,404,{error:'product_not_found'});
+      const quoteRows=db.prepare(`SELECT q.quote_no reference,q.created_at occurred_at,qi.quantity,qi.unit_price,q.currency,'quotation' source_type,q.status
+        FROM quotation_items qi JOIN quotations q ON q.id=qi.quotation_id
+        WHERE q.customer_id=? AND (qi.product_code=? OR qi.product_name=?)
+        ORDER BY q.created_at DESC`).all(customerId,product.sku||'',product.name);
+      const orderRows=db.prepare(`SELECT o.order_no reference,o.created_at occurred_at,oi.quantity,oi.unit_price,o.currency,'order' source_type,o.status
+        FROM order_items oi JOIN orders o ON o.id=oi.order_id
+        WHERE o.customer_id=? AND (oi.product_id=? OR oi.product_name=?)
+        ORDER BY o.created_at DESC`).all(customerId,productId,product.name);
+      return json(res,200,[...quoteRows,...orderRows].sort((a,b)=>String(b.occurred_at).localeCompare(String(a.occurred_at))));
+    }
+
+    if(p==='/api/pricing/resolve' && req.method==='GET'){
+      const customerId=String(url.searchParams.get('customer_id')||''),productId=String(url.searchParams.get('product_id')||''),qty=Math.max(0,Number(url.searchParams.get('quantity')||1));
+      if(!customerId||!productId)return json(res,400,{error:'customer_and_product_required'});
+      if(scopedRole(user)&&!customerOwnedBy(user,customerId))return json(res,403,{error:'forbidden'});
+      const customer=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(customerId),product=db.prepare('SELECT * FROM products WHERE id=? AND active=1').get(productId);
+      if(!customer||!product)return json(res,404,{error:'not_found'});
+      const today=now().slice(0,10);
+      const rules=db.prepare("SELECT * FROM product_market_rules WHERE product_id=? AND active=1 AND (country IS NULL OR country='' OR country=?)").all(productId,customer.country||'').map(r=>({...r,required_certifications:parseJSON(r.required_certifications,[])}));
+      const prohibited=rules.find(r=>r.rule_type==='prohibited');
+      const required=[...new Set(rules.filter(r=>r.rule_type==='requires_certification').flatMap(r=>r.required_certifications||[]))];
+      const pref=db.prepare("SELECT * FROM customer_product_preferences WHERE customer_id=? AND product_id=? AND preference_type IN ('prohibited','unsuitable') ORDER BY updated_at DESC LIMIT 1").get(customerId,productId);
+      const list=db.prepare(`SELECT pl.*,pli.id item_id,pli.min_qty,pli.max_qty,pli.unit_price,pli.discount_percent
+        FROM price_lists pl JOIN price_list_items pli ON pli.price_list_id=pl.id
+        WHERE pli.product_id=? AND pl.status='active' AND (pl.customer_id=? OR pl.customer_id IS NULL)
+          AND (pl.valid_from IS NULL OR pl.valid_from<=?) AND (pl.valid_to IS NULL OR pl.valid_to>=?)
+          AND pli.min_qty<=? AND (pli.max_qty IS NULL OR pli.max_qty>=?)
+        ORDER BY CASE WHEN pl.customer_id=? THEN 0 ELSE 1 END,pli.min_qty DESC,pl.updated_at DESC LIMIT 1`).get(productId,customerId,today,today,qty,qty,customerId);
+      const unitPrice=list?Number(list.unit_price):Number(product.base_price||0),currency=list?.currency||product.currency||'USD';
+      return json(res,200,{
+        customer:{id:customer.id,name:customer.name,country:customer.country},
+        product:{id:product.id,sku:product.sku,name:product.name,base_price:product.base_price,currency:product.currency,certifications:parseJSON(product.certifications,[])},
+        quantity:qty,unit_price:unitPrice,currency,total:Number((unitPrice*qty).toFixed(2)),
+        price_source:list?{type:list.customer_id?'customer_price_list':'general_price_list',price_list_id:list.id,price_list_name:list.name,tier:{min_qty:list.min_qty,max_qty:list.max_qty,discount_percent:list.discount_percent}}:{type:'base_price'},
+        allowed:!(prohibited||pref),block_reason:pref?`customer_${pref.preference_type}`:(prohibited?'market_prohibited':null),
+        required_certifications:required,market_rules:rules
+      });
+    }
+
+    if(p==='/api/pricing/price-lists' && req.method==='GET'){
+      const customerId=url.searchParams.get('customer_id');const rows=customerId?
+        db.prepare('SELECT * FROM price_lists WHERE customer_id=? OR customer_id IS NULL ORDER BY updated_at DESC').all(customerId):
+        db.prepare('SELECT * FROM price_lists ORDER BY updated_at DESC').all();
+      return json(res,200,rows);
+    }
+    if(p==='/api/pricing/price-lists' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req);if(!String(b.name||'').trim())return json(res,400,{error:'name_required'});
+      const id=randomUUID();db.prepare('INSERT INTO price_lists(id,name,customer_id,currency,valid_from,valid_to,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+        .run(id,b.name,b.customer_id||null,b.currency||'USD',b.valid_from||null,b.valid_to||null,b.status||'active',b.notes||null,now(),now());
+      audit(user,'create','price_list',id,req,{name:b.name,customer_id:b.customer_id||null});return json(res,201,db.prepare('SELECT * FROM price_lists WHERE id=?').get(id));
+    }
+    {
+      const pl=p.match(/^\/api\/pricing\/price-lists\/([0-9a-f-]+)$/);
+      if(pl&&req.method==='GET'){
+        const row=db.prepare('SELECT * FROM price_lists WHERE id=?').get(pl[1]);if(!row)return json(res,404,{error:'not_found'});
+        return json(res,200,{...row,items:db.prepare(`SELECT pli.*,p.sku,p.name product_name FROM price_list_items pli JOIN products p ON p.id=pli.product_id WHERE pli.price_list_id=? ORDER BY p.name,pli.min_qty`).all(row.id)});
+      }
+      if(pl&&req.method==='PATCH'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM price_lists WHERE id=?').get(pl[1]);if(!old)return json(res,404,{error:'not_found'});
+        const b=await body(req);db.prepare('UPDATE price_lists SET name=?,customer_id=?,currency=?,valid_from=?,valid_to=?,status=?,notes=?,updated_at=? WHERE id=?').run(b.name??old.name,b.customer_id===undefined?old.customer_id:(b.customer_id||null),b.currency??old.currency,b.valid_from===undefined?old.valid_from:(b.valid_from||null),b.valid_to===undefined?old.valid_to:(b.valid_to||null),b.status??old.status,b.notes===undefined?old.notes:b.notes,now(),old.id);
+        return json(res,200,db.prepare('SELECT * FROM price_lists WHERE id=?').get(old.id));
+      }
+      if(pl&&req.method==='DELETE'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        db.prepare('DELETE FROM price_lists WHERE id=?').run(pl[1]);audit(user,'delete','price_list',pl[1],req);return json(res,200,{ok:true});
+      }
+    }
+    if(p==='/api/pricing/price-list-items' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req),id=randomUUID();if(!b.price_list_id||!b.product_id||b.unit_price===undefined)return json(res,400,{error:'missing_fields'});
+      db.prepare('INSERT INTO price_list_items(id,price_list_id,product_id,min_qty,max_qty,unit_price,discount_percent,notes,created_at) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run(id,b.price_list_id,b.product_id,Number(b.min_qty||1),b.max_qty===null||b.max_qty===''?null:Number(b.max_qty),Number(b.unit_price),b.discount_percent===null||b.discount_percent===''?null:Number(b.discount_percent),b.notes||null,now());
+      return json(res,201,db.prepare('SELECT * FROM price_list_items WHERE id=?').get(id));
+    }
+    {
+      const pli=p.match(/^\/api\/pricing\/price-list-items\/([0-9a-f-]+)$/);
+      if(pli&&req.method==='DELETE'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        db.prepare('DELETE FROM price_list_items WHERE id=?').run(pli[1]);return json(res,200,{ok:true});
+      }
+    }
 
     // ---- Marketing segments, templates, consent and campaign recipients ----
     if(p==='/api/marketing/segments' && req.method==='GET'){
