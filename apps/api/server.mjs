@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS credit_profiles(id TEXT PRIMARY KEY, customer_id TEXT
 CREATE TABLE IF NOT EXISTS shipments(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, booking_no TEXT, carrier TEXT, forwarder TEXT, vessel_voyage TEXT, container_type TEXT, container_no TEXT, bl_no TEXT, port_of_loading TEXT, destination_port TEXT, etd TEXT, eta TEXT, status TEXT NOT NULL DEFAULT 'booking', tracking_url TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS shipment_items(id TEXT PRIMARY KEY, shipment_id TEXT NOT NULL, order_item_id TEXT, product_name TEXT NOT NULL, quantity REAL NOT NULL, unit TEXT, created_at TEXT NOT NULL, FOREIGN KEY(shipment_id) REFERENCES shipments(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS shipment_containers(id TEXT PRIMARY KEY, shipment_id TEXT NOT NULL, container_type TEXT, container_no TEXT, seal_no TEXT, created_at TEXT NOT NULL, FOREIGN KEY(shipment_id) REFERENCES shipments(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS customs_declarations(id TEXT PRIMARY KEY, declaration_no TEXT UNIQUE NOT NULL, order_id TEXT NOT NULL, shipment_id TEXT, export_country TEXT, destination_country TEXT, customs_office TEXT, declaration_date TEXT, trade_mode TEXT, incoterm TEXT, currency TEXT, total_value REAL NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'draft', notes TEXT, created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE, FOREIGN KEY(shipment_id) REFERENCES shipments(id) ON DELETE SET NULL);
+CREATE TABLE IF NOT EXISTS customs_declaration_items(id TEXT PRIMARY KEY, declaration_id TEXT NOT NULL, order_item_id TEXT, product_id TEXT, product_name TEXT NOT NULL, hs_code TEXT, customs_name TEXT, quantity REAL NOT NULL DEFAULT 0, unit TEXT, unit_price REAL NOT NULL DEFAULT 0, total_value REAL NOT NULL DEFAULT 0, origin_country TEXT, brand TEXT, model TEXT, material TEXT, usage TEXT, declaration_elements TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(declaration_id) REFERENCES customs_declarations(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, category TEXT, name TEXT NOT NULL, version TEXT, url TEXT, content_base64 TEXT, mime_type TEXT, notes TEXT, uploaded_by TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS aftersales(id TEXT PRIMARY KEY, ticket_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, order_id TEXT, category TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'normal', subject TEXT NOT NULL, description TEXT NOT NULL, responsible_team TEXT, solution TEXT, status TEXT NOT NULL DEFAULT 'open', satisfaction INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, segment_rule TEXT, status TEXT NOT NULL DEFAULT 'draft', scheduled_at TEXT, content TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -83,6 +85,10 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("ALTER TABLE products ADD COLUMN declaration_elements TEXT NOT NULL DEFAULT '{}'");}catch{}
+try{db.exec("ALTER TABLE products ADD COLUMN origin_country TEXT");}catch{}
+try{db.exec("ALTER TABLE products ADD COLUMN customs_name TEXT");}catch{}
+try{db.exec("ALTER TABLE products ADD COLUMN hs_code TEXT");}catch{}
 try{db.exec("ALTER TABLE contracts ADD COLUMN current_version INTEGER NOT NULL DEFAULT 1");}catch{}
 try{db.exec("ALTER TABLE products ADD COLUMN floor_price REAL");}catch{}
 try{db.exec("ALTER TABLE contacts ADD COLUMN anniversary TEXT");}catch{}
@@ -339,7 +345,7 @@ const resourceMap = {
   quotations:{table:'quotations', required:['customer_id']},
   quotationItems:{table:'quotation_items', required:['quotation_id','product_name']},
   samples:{table:'samples', required:['customer_id','product']},
-  products:{table:'products', json:['certifications'], required:['name']},
+  products:{table:'products', json:['certifications','declaration_elements'], required:['name']},
   customerProductPreferences:{table:'customer_product_preferences', required:['customer_id','product_id','preference_type']},
   priceLists:{table:'price_lists', required:['name']},
   priceListItems:{table:'price_list_items', required:['price_list_id','product_id','min_qty','unit_price']},
@@ -709,6 +715,19 @@ function renderOrderDocument(type,order,customer,items,shipment){
 }
 
 
+
+function renderCustomsDataSheet(declaration,order,customer,items,shipment){
+  const cp=companyProfile(),itemRows=items.map((x,i)=>`<tr><td>${i+1}</td><td>${esc(x.hs_code||'')}</td><td>${esc(x.customs_name||x.product_name)}</td><td>${esc(x.product_name)}</td><td>${esc(x.quantity)}</td><td>${esc(x.unit||'')}</td><td>${esc(Number(x.unit_price||0).toFixed(2))}</td><td>${esc(Number(x.total_value||0).toFixed(2))}</td><td>${esc(x.origin_country||'')}</td><td>${esc([x.brand,x.model,x.material,x.usage].filter(Boolean).join(' / '))}</td></tr>`).join('');
+  const ship=shipment?`<div class="box"><b>Shipment</b><br>Booking: ${esc(shipment.booking_no||'')} &nbsp; Carrier: ${esc(shipment.carrier||'')} &nbsp; Vessel/Voyage: ${esc(shipment.vessel_voyage||'')}<br>POL: ${esc(shipment.port_of_loading||'')} &nbsp; POD: ${esc(shipment.destination_port||'')} &nbsp; ETD: ${esc(shipment.etd||'')} &nbsp; ETA: ${esc(shipment.eta||'')}<br>BL No.: ${esc(shipment.bl_no||'')}</div>`:'';
+  return `<!doctype html><html><head><meta charset="utf-8"><title>Customs Declaration Data Sheet</title><style>body{font-family:Arial,sans-serif;color:#172033;margin:34px}h1{text-align:center}.draft{border:2px solid #b42318;padding:10px;text-align:center;font-weight:bold;margin:12px 0}.box{border:1px solid #ccd4df;padding:12px;line-height:1.7;margin:12px 0}table{width:100%;border-collapse:collapse;font-size:12px}th,td{border:1px solid #ccd4df;padding:7px}th{background:#f1f4f8}.foot{margin-top:22px;font-size:12px;color:#667085}</style></head><body>
+  <h1>CUSTOMS DECLARATION DATA SHEET</h1><div class="draft">INTERNAL DATA SHEET — NOT AN OFFICIAL CUSTOMS DECLARATION OR CLEARANCE CERTIFICATE</div>
+  <div class="box"><b>Exporter:</b> ${esc(cp.name)}<br><b>Buyer:</b> ${esc(customer.name)} · ${esc(customer.country||'')}<br><b>Order:</b> ${esc(order.order_no)} &nbsp; <b>Internal Declaration No.:</b> ${esc(declaration.declaration_no)}<br><b>Export Country:</b> ${esc(declaration.export_country||'')} &nbsp; <b>Destination:</b> ${esc(declaration.destination_country||customer.country||'')} &nbsp; <b>Trade Mode:</b> ${esc(declaration.trade_mode||'')}<br><b>Customs Office:</b> ${esc(declaration.customs_office||'')} &nbsp; <b>Incoterm:</b> ${esc(declaration.incoterm||order.incoterm||'')} &nbsp; <b>Currency:</b> ${esc(declaration.currency||order.currency||'USD')}</div>
+  ${ship}
+  <table><thead><tr><th>#</th><th>HS Code</th><th>Customs Name</th><th>Product</th><th>Qty</th><th>Unit</th><th>Unit Price</th><th>Total</th><th>Origin</th><th>Declaration Elements</th></tr></thead><tbody>${itemRows}</tbody></table>
+  <div class="foot">Total declared value: <b>${esc(declaration.currency||order.currency||'USD')} ${Number(declaration.total_value||0).toFixed(2)}</b><br>This document is generated from TradeFlow CRM for internal preparation/review. Official submission, customs acceptance and clearance must be performed/confirmed through the competent customs authority or authorized service provider.</div>
+  </body></html>`;
+}
+
 function aftersalesSlaDue(severity='normal',openedAt=now()){
   const hours={critical:24,high:72,normal:168,low:336}[String(severity).toLowerCase()]||168;
   return new Date(new Date(openedAt).getTime()+hours*3600_000).toISOString();
@@ -730,6 +749,7 @@ function attachmentCustomerId(entityType,entityId){
     if(entityType==='sample') return db.prepare('SELECT customer_id FROM samples WHERE id=?').get(entityId)?.customer_id||null;
     if(entityType==='contract') return db.prepare('SELECT customer_id FROM contracts WHERE id=?').get(entityId)?.customer_id||null;
     if(entityType==='shipment') return db.prepare('SELECT o.customer_id FROM shipments s JOIN orders o ON o.id=s.order_id WHERE s.id=?').get(entityId)?.customer_id||null;
+    if(entityType==='customs') return db.prepare('SELECT o.customer_id FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id WHERE cd.id=?').get(entityId)?.customer_id||null;
     if(entityType==='aftersales') return db.prepare('SELECT customer_id FROM aftersales WHERE id=?').get(entityId)?.customer_id||null;
     return null;
   }catch{return null;}
@@ -1254,6 +1274,103 @@ const server = http.createServer(async (req,res)=>{
         const d=db.prepare('SELECT * FROM documents WHERE id=?').get(fileDelete[1]);if(!d)return json(res,404,{error:'not_found'});
         const cid=attachmentCustomerId(d.entity_type,d.entity_id);if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'});
         removeStoredDocumentFile(d);db.prepare('DELETE FROM documents WHERE id=?').run(d.id);audit(user,'delete_file','documents',d.id,req,{name:d.name});return json(res,200,{ok:true});
+      }
+    }
+
+    // ---- Customs declaration preparation / HS Code workflow ----
+    if(p==='/api/customs-declarations' && req.method==='GET'){
+      const scope=scopedRole(user)?" WHERE (c.owner_id=? OR EXISTS (SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=c.id AND cc.user_id=?))":"";
+      const args=scopedRole(user)?[user.user_id,user.user_id]:[];
+      const rows=db.prepare(`SELECT cd.*,o.order_no,c.name customer_name,s.booking_no,s.bl_no FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN shipments s ON s.id=cd.shipment_id${scope} ORDER BY cd.updated_at DESC LIMIT 500`).all(...args);
+      return json(res,200,rows);
+    }
+    {
+      const createCustoms=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/customs-declaration$/);
+      if(createCustoms&&req.method==='POST'){
+        const order=db.prepare('SELECT * FROM orders WHERE id=?').get(createCustoms[1]);if(!order)return json(res,404,{error:'order_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,order.customer_id))return json(res,403,{error:'forbidden'});
+        if(!['admin','manager','sales'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const b=await body(req);
+        let shipment=null;if(b.shipment_id){shipment=db.prepare('SELECT * FROM shipments WHERE id=? AND order_id=?').get(b.shipment_id,order.id);if(!shipment)return json(res,400,{error:'invalid_shipment'});}
+        const id=randomUUID(),declarationNo=makeNo('DEC'),customer=db.prepare('SELECT * FROM customers WHERE id=?').get(order.customer_id);
+        db.prepare('INSERT INTO customs_declarations(id,declaration_no,order_id,shipment_id,export_country,destination_country,customs_office,declaration_date,trade_mode,incoterm,currency,total_value,status,notes,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(id,declarationNo,order.id,shipment?.id||null,b.export_country||null,b.destination_country||customer.country||null,b.customs_office||null,b.declaration_date||now().slice(0,10),b.trade_mode||'General Trade',b.incoterm||order.incoterm||null,b.currency||order.currency||'USD',0,'draft',b.notes||null,user.user_id,now(),now());
+
+        let sourceItems=[];
+        if(shipment){
+          sourceItems=db.prepare(`SELECT si.order_item_id,si.product_name,si.quantity,si.unit,oi.product_id,oi.unit_price
+            FROM shipment_items si LEFT JOIN order_items oi ON oi.id=si.order_item_id WHERE si.shipment_id=?`).all(shipment.id);
+        }else{
+          sourceItems=db.prepare('SELECT id order_item_id,product_id,product_name,quantity,unit,unit_price FROM order_items WHERE order_id=?').all(order.id);
+        }
+        const ins=db.prepare('INSERT INTO customs_declaration_items(id,declaration_id,order_item_id,product_id,product_name,hs_code,customs_name,quantity,unit,unit_price,total_value,origin_country,brand,model,material,usage,declaration_elements,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)');
+        let total=0;
+        for(const x of sourceItems){
+          let prod=null;if(x.product_id)prod=db.prepare('SELECT * FROM products WHERE id=?').get(x.product_id);if(!prod)prod=db.prepare('SELECT * FROM products WHERE name=? LIMIT 1').get(x.product_name);
+          const els=parseJSON(prod?.declaration_elements,{})||{},qty=Number(x.quantity||0),unitPrice=Number(x.unit_price||0),amount=Number((qty*unitPrice).toFixed(2));total+=amount;
+          ins.run(randomUUID(),id,x.order_item_id||null,x.product_id||prod?.id||null,x.product_name,prod?.hs_code||null,prod?.customs_name||x.product_name,qty,x.unit||null,unitPrice,amount,prod?.origin_country||b.export_country||null,els.brand||null,els.model||null,els.material||null,els.usage||null,JSON.stringify(els),now(),now());
+        }
+        db.prepare('UPDATE customs_declarations SET total_value=?,updated_at=? WHERE id=?').run(total,now(),id);
+        audit(user,'create','customs_declaration',id,req,{order_id:order.id,shipment_id:shipment?.id||null});
+        return json(res,201,db.prepare('SELECT * FROM customs_declarations WHERE id=?').get(id));
+      }
+
+      const cfull=p.match(/^\/api\/workflows\/customs\/([0-9a-f-]+)\/full$/);
+      if(cfull&&req.method==='GET'){
+        const d=db.prepare('SELECT cd.*,o.order_no,o.customer_id,c.name customer_name,c.country customer_country,s.booking_no,s.bl_no,s.carrier,s.vessel_voyage,s.port_of_loading,s.destination_port,s.etd,s.eta FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN shipments s ON s.id=cd.shipment_id WHERE cd.id=?').get(cfull[1]);
+        if(!d)return json(res,404,{error:'not_found'});if(scopedRole(user)&&!customerOwnedBy(user,d.customer_id))return json(res,403,{error:'forbidden'});
+        const items=db.prepare('SELECT * FROM customs_declaration_items WHERE declaration_id=? ORDER BY rowid').all(d.id).map(x=>({...x,declaration_elements:parseJSON(x.declaration_elements,{})}));
+        const documents=db.prepare("SELECT * FROM documents WHERE entity_type='customs' AND entity_id=? ORDER BY created_at DESC").all(d.id);
+        return json(res,200,{...d,items,documents});
+      }
+
+      const csave=p.match(/^\/api\/workflows\/customs\/([0-9a-f-]+)$/);
+      if(csave&&req.method==='PUT'){
+        const old=db.prepare('SELECT cd.*,o.customer_id FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id WHERE cd.id=?').get(csave[1]);if(!old)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,old.customer_id))return json(res,403,{error:'forbidden'});if(!['admin','manager','sales'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const b=await body(req);
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          db.prepare('UPDATE customs_declarations SET export_country=?,destination_country=?,customs_office=?,declaration_date=?,trade_mode=?,incoterm=?,currency=?,notes=?,updated_at=? WHERE id=?')
+            .run(b.export_country??old.export_country,b.destination_country??old.destination_country,b.customs_office??old.customs_office,b.declaration_date??old.declaration_date,b.trade_mode??old.trade_mode,b.incoterm??old.incoterm,b.currency??old.currency,b.notes??old.notes,now(),old.id);
+          let total=0;
+          const upd=db.prepare('UPDATE customs_declaration_items SET hs_code=?,customs_name=?,quantity=?,unit=?,unit_price=?,total_value=?,origin_country=?,brand=?,model=?,material=?,usage=?,declaration_elements=?,updated_at=? WHERE id=? AND declaration_id=?');
+          for(const x of (Array.isArray(b.items)?b.items:[])){
+            const qty=Number(x.quantity||0),unitPrice=Number(x.unit_price||0),amount=Number((qty*unitPrice).toFixed(2));total+=amount;
+            const elements={...(x.declaration_elements||{}),brand:x.brand||'',model:x.model||'',material:x.material||'',usage:x.usage||''};
+            upd.run(x.hs_code||null,x.customs_name||x.product_name,qty,x.unit||null,unitPrice,amount,x.origin_country||null,x.brand||null,x.model||null,x.material||null,x.usage||null,JSON.stringify(elements),now(),x.id,old.id);
+            if(x.product_id&&b.sync_product_master){
+              db.prepare('UPDATE products SET hs_code=?,customs_name=?,origin_country=?,declaration_elements=?,updated_at=? WHERE id=?').run(x.hs_code||null,x.customs_name||null,x.origin_country||null,JSON.stringify(elements),now(),x.product_id);
+            }
+          }
+          if(!(Array.isArray(b.items)&&b.items.length)) total=Number(db.prepare('SELECT COALESCE(SUM(total_value),0) v FROM customs_declaration_items WHERE declaration_id=?').get(old.id).v||0);
+          db.prepare('UPDATE customs_declarations SET total_value=?,updated_at=? WHERE id=?').run(total,now(),old.id);
+          db.exec('COMMIT');
+        }catch(e){db.exec('ROLLBACK');throw e;}
+        audit(user,'update','customs_declaration',old.id,req,{sync_product_master:!!b.sync_product_master});
+        return json(res,200,db.prepare('SELECT * FROM customs_declarations WHERE id=?').get(old.id));
+      }
+
+      const cstatus=p.match(/^\/api\/workflows\/customs\/([0-9a-f-]+)\/status$/);
+      if(cstatus&&req.method==='POST'){
+        const d=db.prepare('SELECT cd.*,o.customer_id FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id WHERE cd.id=?').get(cstatus[1]);if(!d)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,d.customer_id))return json(res,403,{error:'forbidden'});
+        const b=await body(req),next=String(b.status||''),allowed=['draft','reviewed','ready','submitted','cleared','rejected'];
+        if(!allowed.includes(next))return json(res,400,{error:'invalid_status'});
+        db.prepare('UPDATE customs_declarations SET status=?,updated_at=? WHERE id=?').run(next,now(),d.id);
+        audit(user,'change_status','customs_declaration',d.id,req,{from:d.status,to:next,note:b.note||null,recorded_only:true});
+        return json(res,200,db.prepare('SELECT * FROM customs_declarations WHERE id=?').get(d.id));
+      }
+
+      const cdoc=p.match(/^\/api\/workflows\/customs\/([0-9a-f-]+)\/generate-data-sheet$/);
+      if(cdoc&&req.method==='POST'){
+        const d=db.prepare('SELECT cd.*,o.customer_id FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id WHERE cd.id=?').get(cdoc[1]);if(!d)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,d.customer_id))return json(res,403,{error:'forbidden'});
+        const order=db.prepare('SELECT * FROM orders WHERE id=?').get(d.order_id),customer=db.prepare('SELECT * FROM customers WHERE id=?').get(order.customer_id),items=db.prepare('SELECT * FROM customs_declaration_items WHERE declaration_id=?').all(d.id),shipment=d.shipment_id?db.prepare('SELECT * FROM shipments WHERE id=?').get(d.shipment_id):null;
+        const html=renderCustomsDataSheet(d,order,customer,items,shipment),count=db.prepare("SELECT COUNT(*) c FROM documents WHERE entity_type='customs' AND entity_id=? AND category='CUSTOMS_DATA'").get(d.id).c,version=`V${Number(count)+1}`,docId=randomUUID(),name=`CUSTOMS_DATA_${d.declaration_no}_${version}.html`;
+        db.prepare('INSERT INTO documents(id,entity_type,entity_id,category,name,version,content_base64,mime_type,notes,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)').run(docId,'customs',d.id,'CUSTOMS_DATA',name,version,Buffer.from(html,'utf8').toString('base64'),'text/html','Internal draft/data sheet only — not official customs filing',user.user_id,now());
+        audit(user,'generate_document','documents',docId,req,{customs_declaration_id:d.id,type:'CUSTOMS_DATA'});
+        return json(res,201,{id:docId,name,version,mime_type:'text/html'});
       }
     }
 
