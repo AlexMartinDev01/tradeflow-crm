@@ -303,6 +303,63 @@ const server = http.createServer(async (req,res)=>{
 
 
 
+
+    // ---- Customer Excel import / preview / export data ----
+    if(p==='/api/customers/import/preview' && req.method==='POST'){
+      const b=await body(req), rows=Array.isArray(b.rows)?b.rows.slice(0,2000):[];
+      const out=rows.map((row,index)=>{
+        const clean={};
+        for(const k of ['name','english_name','local_name','country','region','city','address','postal_code','website','industry','status','grade','source','timezone','language','tax_no','registration_no','annual_sales','employee_count','business_scope','notes']){
+          if(row[k]!==undefined && row[k]!==null && row[k]!=='') clean[k]=row[k];
+        }
+        for(const k of ['customer_types','service_regions']){
+          const v=row[k]; if(Array.isArray(v)) clean[k]=v; else if(v) clean[k]=String(v).split(/[;,，；|]/).map(x=>x.trim()).filter(Boolean);
+        }
+        const errors=[]; if(!String(clean.name||'').trim()) errors.push('客户名称必填');
+        const matches=errors.length?[]:duplicateCandidates(clean);
+        return {index,row:clean,errors,matches,status:errors.length?'invalid':matches.length?'duplicate':'ready'};
+      });
+      return json(res,200,{rows:out,total:out.length,invalid:out.filter(x=>x.status==='invalid').length,duplicates:out.filter(x=>x.status==='duplicate').length,ready:out.filter(x=>x.status==='ready').length});
+    }
+    if(p==='/api/customers/import/commit' && req.method==='POST'){
+      const b=await body(req), items=Array.isArray(b.items)?b.items.slice(0,2000):[];
+      const result={created:0,updated:0,skipped:0,errors:[]};
+      db.exec('BEGIN IMMEDIATE');
+      try{
+        for(let i=0;i<items.length;i++){
+          const item=items[i]||{}, action=item.action||'skip', raw=item.row||{};
+          if(action==='skip'){result.skipped++;continue;}
+          const cfg=resourceMap.customers, payload=sanitizePayload(cfg,raw,action==='create');
+          if(!payload.name){result.errors.push({index:i,message:'客户名称必填'});continue;}
+          if(action==='update'){
+            const target=String(item.duplicate_id||''); const old=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(target);
+            if(!old){result.errors.push({index:i,message:'重复客户不存在'});continue;}
+            if(!['admin','manager'].includes(user.role) && old.owner_id!==user.user_id){result.skipped++;continue;}
+            delete payload.owner_id; payload.updated_at=now();
+            const es=Object.entries(payload); if(es.length) db.prepare(`UPDATE customers SET ${es.map(([k])=>`${k}=?`).join(',')} WHERE id=?`).run(...es.map(([,v])=>v),target);
+            audit(user,'import_update','customers',target,req,{index:i}); result.updated++;
+          }else{
+            payload.owner_id=['admin','manager'].includes(user.role)&&raw.owner_id?raw.owner_id:user.user_id;
+            const newId=randomUUID(), cols=['id',...Object.keys(payload),'created_at','updated_at'], vals=[newId,...Object.values(payload),now(),now()];
+            db.prepare(`INSERT INTO customers(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`).run(...vals);
+            audit(user,'import_create','customers',newId,req,{index:i}); result.created++;
+          }
+        }
+        db.exec('COMMIT');
+      }catch(e){db.exec('ROLLBACK');throw e;}
+      return json(res,200,result);
+    }
+    if(p==='/api/customers/export-data' && req.method==='GET'){
+      const filters=['c.deleted_at IS NULL'],args=[];
+      const exacts=['country','status','grade','source','industry','owner_id'];
+      for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`c.${k}=?`);args.push(v);}}
+      const tagId=url.searchParams.get('tag_id'); if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag_id=?)');args.push(tagId);}
+      const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('c.customer_types LIKE ?');args.push(`%"${customerType}"%`);}
+      const rows=db.prepare(`SELECT c.*,u.display_name owner_name FROM customers c LEFT JOIN users u ON u.id=c.owner_id WHERE ${filters.join(' AND ')} ORDER BY c.updated_at DESC LIMIT 5000`).all(...args)
+        .map(r=>decodeRow(r,resourceMap.customers));
+      return json(res,200,rows);
+    }
+
     // ---- Customer ownership, tags and duplicate/collision protection ----
     if(p==='/api/users/lookup' && req.method==='GET'){
       return json(res,200,db.prepare("SELECT id,username,display_name,role FROM users WHERE enabled=1 ORDER BY display_name").all());
