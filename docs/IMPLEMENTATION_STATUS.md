@@ -179,6 +179,8 @@
 - 自动任务去重
 - 规则开关、阈值、日志
 - Web 进程运行期间周期扫描
+- GitHub Actions 外部 Scheduler 模板，每 15 分钟调用 `/api/automation/run`
+- 使用 Repository Secrets 保存正式站点 URL 与 manager API Token
 
 ### 20. 统计分析
 - 客户增长
@@ -257,13 +259,24 @@
 - 导出审计
 - 客户导入接口后端限制为 admin / manager
 
+### 27. 移动端极速建档与 OCR 接入层
+- 手机直接拍摄/选择名片图片
+- 名片图片预览
+- OCR Provider 状态检测
+- OCR 未配置时明确提示，不伪造识别
+- OCR 配置后统一返回公司、联系人、职位、邮箱、电话、WhatsApp、网站、国家、城市、地址
+- 识别结果回填后必须人工核对
+- 客户查重
+- 一次创建客户、联系人、Email/Phone/WhatsApp
+- 名片原图保存为客户附件
+- 移动端响应式布局优化
+
 ## 当前仍需要继续开发
 
-### A. 移动端
-- 移动端专用快速建档
-- 拍照上传
-- 名片 OCR
-- 移动端联系人/跟进快捷操作
+### A. 移动端后续
+- 真实 OCR Provider 配置与验收
+- 更多移动端跟进快捷操作
+- 离线草稿/弱网增强
 
 ### B. 真实消息与邮件
 - SMTP/IMAP
@@ -274,11 +287,12 @@
 - WhatsApp Business API
 
 ### C. 生产任务调度
-当前自动化跟随 Web 进程：
-- Codespaces 休眠后不会执行
-- Web 容器停止后不会执行
+已提供 GitHub Actions 外部 Scheduler 模板，但要真正启用仍需：
+- 24/7 可访问的正式 TradeFlow 部署；
+- Repository Secret：TRADEFLOW_SCHEDULER_URL；
+- Repository Secret：TRADEFLOW_SCHEDULER_TOKEN。
 
-还需独立 Worker / Scheduler 或外部 Cron。
+Codespaces 休眠后 URL 本身不可访问，因此不能把 Codespaces 当作生产定时任务宿主。
 
 ### D. 文件生产化
 - S3 / OSS 等对象存储
