@@ -17,7 +17,7 @@ async function load(){shipments.value=(await api.get('/shipments',{params:{size:
 async function chooseOrder(){
   if(!form.order_id){orderFull.value=null;return}
   orderFull.value=(await api.get(`/workflows/orders/${form.order_id}/full`)).data;
-  form.items=(orderFull.value.items||[]).map((x:any)=>({order_item_id:x.id,product_name:x.product_name,unit:x.unit,ordered_quantity:x.quantity,quantity:0}));
+  form.items=(orderFull.value.items||[]).map((x:any)=>({order_item_id:x.id,product_name:x.product_name,unit:x.unit,ordered_quantity:Number(x.quantity||0),allocated_quantity:Number(x.allocated_quantity||0),remaining_quantity:Number(x.remaining_quantity??x.quantity??0),quantity:0}));
 }
 function addContainer(){form.containers.push({container_type:'40HQ',container_no:'',seal_no:''})}
 function removeContainer(i:string|number){form.containers.splice(Number(i),1);if(!form.containers.length)addContainer()}
@@ -25,8 +25,18 @@ async function createShipment(){
   if(!form.order_id)return ElMessage.warning('请选择订单');
   const items=form.items.filter((x:any)=>Number(x.quantity||0)>0).map((x:any)=>({order_item_id:x.order_item_id,product_name:x.product_name,unit:x.unit,quantity:Number(x.quantity)}));
   if(!items.length)return ElMessage.warning('至少填写一个本次出货数量');
-  await api.post(`/workflows/orders/${form.order_id}/shipments`,{...form,items,containers:form.containers.filter((x:any)=>x.container_no||x.container_type)});
-  createDialog.value=false;Object.assign(form,{order_id:'',booking_no:'',carrier:'',forwarder:'',vessel_voyage:'',bl_no:'',port_of_loading:'',destination_port:'',etd:'',eta:'',status:'booking',tracking_url:'',notes:'',items:[],containers:[{container_type:'40HQ',container_no:'',seal_no:''}]});await load();ElMessage.success('出运批次已创建')
+  try{
+    await api.post(`/workflows/orders/${form.order_id}/shipments`,{...form,items,containers:form.containers.filter((x:any)=>x.container_no||x.container_type)});
+    createDialog.value=false;Object.assign(form,{order_id:'',booking_no:'',carrier:'',forwarder:'',vessel_voyage:'',bl_no:'',port_of_loading:'',destination_port:'',etd:'',eta:'',status:'booking',tracking_url:'',notes:'',items:[],containers:[{container_type:'40HQ',container_no:'',seal_no:''}]});await load();ElMessage.success('出运批次已创建')
+  }catch(e:any){
+    const data=e.response?.data||{};
+    if(data.error==='shipment_quantity_exceeds_order'){
+      ElMessage.error(`出货数量超过剩余可出数量：订单 ${data.ordered}，已分配 ${data.already_allocated}，本次最多可出 ${data.remaining}`);
+      await chooseOrder();return;
+    }
+    if(data.error==='shipment_item_not_in_order'){ElMessage.error('出运明细与当前订单不匹配，请重新选择订单后再提交');await chooseOrder();return}
+    throw e;
+  }
 }
 async function open(r:any){detail.value=(await api.get(`/workflows/shipments/${r.id}/full`)).data;drawer.value=true}
 async function changeStatus(v:string){const {data}=await api.post(`/workflows/shipments/${detail.value.id}/status`,{status:v});detail.value={...detail.value,...data.shipment};await load();ElMessage.success(`出运状态已更新；订单已出货 ${data.summary.shipped}/${data.summary.ordered}`)}
@@ -50,7 +60,7 @@ onMounted(load);
 <el-form-item label="起运港"><el-input v-model="form.port_of_loading"/></el-form-item><el-form-item label="目的港"><el-input v-model="form.destination_port"/></el-form-item>
 <el-form-item label="ETD"><el-input v-model="form.etd" type="date"/></el-form-item><el-form-item label="ETA"><el-input v-model="form.eta" type="date"/></el-form-item>
 </div>
-<template v-if="orderFull"><h4>本次出货产品</h4><el-table :data="form.items"><el-table-column prop="product_name" label="产品"/><el-table-column prop="ordered_quantity" label="订单数量"/><el-table-column prop="unit" label="单位"/><el-table-column label="本次出货"><template #default="s"><el-input-number v-model="s.row.quantity" :min="0" :max="Number(s.row.ordered_quantity||0)"/></template></el-table-column></el-table></template>
+<template v-if="orderFull"><h4>本次出货产品</h4><el-table :data="form.items"><el-table-column prop="product_name" label="产品"/><el-table-column prop="ordered_quantity" label="订单数量" width="100"/><el-table-column prop="allocated_quantity" label="已分配出运" width="110"/><el-table-column prop="remaining_quantity" label="剩余可出" width="100"><template #default="s"><b>{{s.row.remaining_quantity}}</b></template></el-table-column><el-table-column prop="unit" label="单位" width="80"/><el-table-column label="本次出货" width="190"><template #default="s"><el-input-number v-model="s.row.quantity" :min="0" :max="Number(s.row.remaining_quantity||0)" :disabled="Number(s.row.remaining_quantity||0)<=0"/></template></el-table-column></el-table><el-alert v-if="form.items.some((x:any)=>Number(x.remaining_quantity||0)<=0)" type="info" :closable="false" title="剩余可出为 0 的订单明细已全部分配到已有出运批次，不能重复出运。" style="margin-top:10px"/></template>
 <h4 style="margin-top:18px">货柜</h4><div v-for="(c,i) in form.containers" :key="i" class="grid" style="grid-template-columns:1fr 1fr 1fr auto;margin-bottom:8px"><el-select v-model="c.container_type"><el-option v-for="x in ['20GP','40GP','40HQ','45HQ','LCL']" :key="x" :label="x" :value="x"/></el-select><el-input v-model="c.container_no" placeholder="柜号"/><el-input v-model="c.seal_no" placeholder="封条号"/><el-button @click="removeContainer(i)">删除</el-button></div><el-button link type="primary" @click="addContainer">+ 添加货柜</el-button>
 <el-form-item label="物流跟踪链接"><el-input v-model="form.tracking_url"/></el-form-item><el-form-item label="备注"><el-input v-model="form.notes" type="textarea"/></el-form-item>
 </el-form><template #footer><el-button @click="createDialog=false">取消</el-button><el-button type="primary" @click="createShipment">创建出运批次</el-button></template></el-dialog>

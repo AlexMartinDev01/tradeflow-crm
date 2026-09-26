@@ -119,6 +119,10 @@ test.describe('TradeFlow transaction integrity and business invariants',()=>{
     const listed=await getJson(request,'/api/workflows/orders/'+order.id+'/shipments',manager.headers);
     expect(listed.data).toHaveLength(2);
     expect(listed.data.flatMap(x=>x.items).reduce((sum,x)=>sum+Number(x.quantity||0),0)).toBe(10);
+    const orderFull=await getJson(request,'/api/workflows/orders/'+order.id+'/full',manager.headers);
+    const enriched=orderFull.items.find(x=>x.id===item.id);
+    expect(Number(enriched.allocated_quantity)).toBe(10);
+    expect(Number(enriched.remaining_quantity)).toBe(0);
   });
 
   test('contract creation always has V1 and concurrent revisions remain contiguous',async({request})=>{

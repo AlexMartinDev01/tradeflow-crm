@@ -3250,8 +3250,13 @@ const server = http.createServer(async (req,res)=>{
         const o=db.prepare('SELECT o.*,c.name customer_name,c.english_name customer_english_name FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.id=?').get(ofull[1]);
         if(!o)return json(res,404,{error:'order_not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,o.customer_id))return json(res,403,{error:'forbidden'});
+        const orderItems=db.prepare('SELECT * FROM order_items WHERE order_id=? ORDER BY rowid').all(o.id).map(item=>{
+          const allocated=Number(db.prepare('SELECT COALESCE(SUM(si.quantity),0) q FROM shipment_items si JOIN shipments s ON s.id=si.shipment_id WHERE s.order_id=? AND si.order_item_id=?').get(o.id,item.id).q||0);
+          const ordered=Number(item.quantity||0);
+          return {...item,allocated_quantity:allocated,remaining_quantity:Math.max(0,ordered-allocated)};
+        });
         return json(res,200,{...o,
-          items:db.prepare('SELECT * FROM order_items WHERE order_id=? ORDER BY rowid').all(o.id),
+          items:orderItems,
           payments:db.prepare('SELECT * FROM payments WHERE order_id=? ORDER BY COALESCE(due_at,created_at)').all(o.id),
           shipments:db.prepare('SELECT * FROM shipments WHERE order_id=? ORDER BY created_at DESC').all(o.id),
           documents:db.prepare("SELECT * FROM documents WHERE entity_type='order' AND entity_id=? ORDER BY created_at DESC").all(o.id),
