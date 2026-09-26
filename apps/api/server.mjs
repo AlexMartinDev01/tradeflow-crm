@@ -1783,6 +1783,54 @@ const server = http.createServer(async (req,res)=>{
       const session=issueSession(u.id);audit({user_id:u.id},'login','user',u.id,req,{two_factor:true});
       return json(res,200,{...session,user:sessionUserPayload(u)});
     }
+    // Public signed marketing engagement endpoints. These intentionally do not require a CRM login.
+    {
+      const marketingOpen=p.match(/^\/api\/marketing\/track\/open\/([0-9a-f-]+)$/);
+      if(marketingOpen&&req.method==='GET'){
+        const recipient=db.prepare('SELECT * FROM campaign_recipients WHERE id=?').get(marketingOpen[1]);
+        const sig=String(url.searchParams.get('sig')||'');
+        if(recipient&&sig===marketingTrackingSig('open',recipient.id)){
+          const t=now();
+          db.prepare('UPDATE campaign_recipients SET open_count=COALESCE(open_count,0)+1,first_opened_at=COALESCE(first_opened_at,?),last_opened_at=? WHERE id=?').run(t,t,recipient.id);
+          recordMarketingEvent(recipient,'open',req);
+        }
+        const pixel=Buffer.from('R0lGODlhAQABAAD/ACwAAAAAAQABAAACADs=','base64');
+        res.writeHead(200,{'content-type':'image/gif','content-length':pixel.length,'cache-control':'no-store, no-cache, must-revalidate, max-age=0','pragma':'no-cache'});
+        return res.end(pixel);
+      }
+
+      const marketingClick=p.match(/^\/api\/marketing\/track\/click\/([0-9a-f-]+)$/);
+      if(marketingClick&&req.method==='GET'){
+        const recipient=db.prepare('SELECT * FROM campaign_recipients WHERE id=?').get(marketingClick[1]);
+        const destination=validTrackedDestination(url.searchParams.get('u')||''),sig=String(url.searchParams.get('sig')||'');
+        if(!recipient||!destination||sig!==marketingTrackingSig('click',marketingClick[1],destination)){
+          res.writeHead(400,{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});return res.end('Invalid tracking link');
+        }
+        const t=now();
+        db.prepare('UPDATE campaign_recipients SET click_count=COALESCE(click_count,0)+1,first_clicked_at=COALESCE(first_clicked_at,?),last_clicked_at=? WHERE id=?').run(t,t,recipient.id);
+        recordMarketingEvent(recipient,'click',req,destination);
+        res.writeHead(302,{location:destination,'cache-control':'no-store'});return res.end();
+      }
+
+      const marketingUnsubscribe=p.match(/^\/api\/marketing\/unsubscribe\/([0-9a-f-]+)$/);
+      if(marketingUnsubscribe&&['GET','POST'].includes(req.method)){
+        const recipient=db.prepare('SELECT * FROM campaign_recipients WHERE id=?').get(marketingUnsubscribe[1]),sig=String(url.searchParams.get('sig')||'');
+        if(!recipient||sig!==marketingTrackingSig('unsubscribe',marketingUnsubscribe[1])){
+          res.writeHead(400,{'content-type':'text/plain; charset=utf-8','cache-control':'no-store'});return res.end('Invalid unsubscribe link');
+        }
+        const t=now(),already=!!recipient.unsubscribed_at;
+        db.prepare("DELETE FROM marketing_consents WHERE customer_id=? AND channel='email' AND ((contact_id IS NULL AND ? IS NULL) OR contact_id=?)")
+          .run(recipient.customer_id,recipient.contact_id||null,recipient.contact_id||null);
+        db.prepare('INSERT INTO marketing_consents(id,customer_id,contact_id,channel,status,source,updated_at) VALUES(?,?,?,?,?,?,?)')
+          .run(randomUUID(),recipient.customer_id,recipient.contact_id||null,'email','opt_out','email_one_click',t);
+        db.prepare('UPDATE campaign_recipients SET unsubscribed_at=COALESCE(unsubscribed_at,?) WHERE id=?').run(t,recipient.id);
+        if(!already)recordMarketingEvent(recipient,'unsubscribe',req);
+        if(req.method==='POST'){res.writeHead(204,{'cache-control':'no-store'});return res.end();}
+        res.writeHead(200,{'content-type':'text/html; charset=utf-8','cache-control':'no-store','x-content-type-options':'nosniff'});
+        return res.end('<!doctype html><html><head><meta charset="utf-8"><title>Unsubscribed</title></head><body style="font-family:Arial,sans-serif;padding:40px;color:#172033"><h2>You have been unsubscribed.</h2><p>This address will be excluded from future TradeFlow marketing campaigns.</p></body></html>');
+      }
+    }
+
     const user=auth(req); if(!user) return json(res,401,{error:'unauthorized'});
     if(user.must_change_password && !['/api/auth/me','/api/auth/logout','/api/auth/security-status','/api/auth/change-password'].includes(p)){
       return json(res,428,{error:'password_change_required',message:'必须先修改初始或重置密码'});

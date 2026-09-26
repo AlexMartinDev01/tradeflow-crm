@@ -112,7 +112,8 @@ const userDefs=[
   {id:did(2,5),username:'demo.followup',display_name:'许言清',role:'followup',department_id:deptDefs[2].id,data_scope:'department'},
   {id:did(2,6),username:'demo.finance',display_name:'唐静怡',role:'finance',department_id:deptDefs[3].id,data_scope:'all'},
   {id:did(2,7),username:'demo.service',display_name:'沈若川',role:'followup',department_id:deptDefs[4].id,data_scope:'department'},
-  {id:did(2,8),username:'demo.readonly',display_name:'业务观察员',role:'readonly',department_id:deptDefs[2].id,data_scope:'all'}
+  {id:did(2,8),username:'demo.readonly',display_name:'业务观察员',role:'readonly',department_id:deptDefs[2].id,data_scope:'all'},
+  {id:did(2,9),username:'demo.admin',display_name:'演示系统管理员',role:'admin',department_id:deptDefs[2].id,data_scope:'all'}
 ];
 for(const u of userDefs)insert('users',{
   ...u,password_hash:hashPassword(DEFAULT_PASSWORD),enabled:1,must_change_password:0,password_changed_at:now(),failed_login_count:0,

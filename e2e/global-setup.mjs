@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const DEMO_PASSWORD='Demo@TradeFlow2026!';
-const USERS=['demo.manager','demo.sales01','demo.readonly','demo.finance'];
+const USERS=['demo.admin','demo.manager','demo.sales01','demo.readonly','demo.finance'];
 
 export default async function globalSetup(){
   const baseURL=process.env.E2E_BASE_URL||'http://127.0.0.1:18080';
