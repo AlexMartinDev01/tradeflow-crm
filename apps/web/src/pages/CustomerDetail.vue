@@ -7,9 +7,9 @@ import AttachmentsPanel from '../components/AttachmentsPanel.vue';
 import {api} from '../api/client';
 
 const route=useRoute(),id=String(route.params.id);
-const customer=ref<any>({}),contacts=ref<any[]>([]),activities=ref<any[]>([]),timeline=ref<any[]>([]),tasks=ref<any[]>([]),brands=ref<any[]>([]),brandLinks=ref<any[]>([]),fieldDefs=ref<any[]>([]),tags=ref<any[]>([]),owners=ref<any[]>([]),collaborators=ref<any[]>([]),me=ref<any>(null);
-const cDialog=ref(false),aDialog=ref(false),channelDialog=ref(false),editDialog=ref(false),brandDialog=ref(false),taskDialog=ref(false),fieldDialog=ref(false),tagDialog=ref(false),transferDialog=ref(false),collabDialog=ref(false);
-const selectedContact=ref<any>(null),newTag=reactive<any>({name:'',category:''}),transfer=reactive<any>({owner_id:''}),collabForm=reactive<any>({user_id:''});
+const customer=ref<any>({}),contacts=ref<any[]>([]),activities=ref<any[]>([]),timeline=ref<any[]>([]),tasks=ref<any[]>([]),brands=ref<any[]>([]),brandLinks=ref<any[]>([]),fieldDefs=ref<any[]>([]),tags=ref<any[]>([]),owners=ref<any[]>([]),collaborators=ref<any[]>([]),organization=ref<any>({parent:null,children:[]}),customerOptions=ref<any[]>([]),me=ref<any>(null);
+const cDialog=ref(false),aDialog=ref(false),channelDialog=ref(false),editDialog=ref(false),brandDialog=ref(false),taskDialog=ref(false),fieldDialog=ref(false),tagDialog=ref(false),transferDialog=ref(false),collabDialog=ref(false),orgDialog=ref(false),mergeDialog=ref(false),departDialog=ref(false);
+const selectedContact=ref<any>(null),departingContact=ref<any>(null),newTag=reactive<any>({name:'',category:''}),transfer=reactive<any>({owner_id:''}),collabForm=reactive<any>({user_id:''}),orgForm=reactive<any>({parent_customer_id:'',organization_role:''}),mergeForm=reactive<any>({target_id:''}),departForm=reactive<any>({successor_contact_id:'',departed_at:new Date().toISOString().slice(0,16),note:''});
 const contact=reactive<any>({name:'',title:'',department:'',role:'',language:'English',timezone:'',is_primary:0});
 const activity=reactive<any>({type:'whatsapp',subject:'',content:'',result:'',next_action:'',occurred_at:new Date().toISOString().slice(0,16)});
 const channel=reactive<any>({channel:'email',value:'',label:'',is_primary:0,preferred_time:''});
@@ -24,6 +24,8 @@ const ownerName=computed(()=>owners.value.find((x:any)=>x.id===customer.value.ow
 const canTransfer=computed(()=>['admin','manager'].includes(me.value?.role));
 const canManageTeam=computed(()=>['admin','manager'].includes(me.value?.role)||customer.value.owner_id===me.value?.id);
 const availableCollaborators=computed(()=>owners.value.filter((x:any)=>x.id!==customer.value.owner_id&&!collaborators.value.some((c:any)=>c.user_id===x.id)));
+const activeContacts=computed(()=>contacts.value.filter((x:any)=>!x.is_departed));
+const mergeTargets=computed(()=>customerOptions.value.filter((x:any)=>x.id!==id));
 
 function resetContact(){Object.assign(contact,{name:'',title:'',department:'',role:'',language:'English',timezone:'',is_primary:0})}
 function resetTask(){Object.assign(taskForm,{title:'',description:'',due_at:'',priority:'normal',status:'todo'})}
@@ -43,6 +45,9 @@ async function load(){
   fieldDefs.value=(await api.get('/customFields',{params:{size:200}})).data.data;
   tags.value=(await api.get(`/customers/${id}/tags`)).data;
   collaborators.value=(await api.get(`/customers/${id}/collaborators`)).data;
+  organization.value=(await api.get(`/customers/${id}/organization`)).data;
+  customerOptions.value=(await api.get('/customers',{params:{size:200}})).data.data;
+  Object.assign(orgForm,{parent_customer_id:customer.value.parent_customer_id||'',organization_role:customer.value.organization_role||''});
   transfer.owner_id=customer.value.owner_id||'';
 }
 async function saveCustomer(){const payload={...editForm};delete payload.id;delete payload.created_at;delete payload.updated_at;delete payload.deleted_at;await api.patch(`/customers/${id}`,payload);editDialog.value=false;await load();ElMessage.success('客户资料已更新')}
@@ -68,6 +73,18 @@ async function releaseToPool(){
   const {value}=await ElMessageBox.prompt('请输入释放到公海的原因','释放客户到公海',{confirmButtonText:'确认释放',cancelButtonText:'取消',inputValue:'长期未有效推进'});
   try{await api.post(`/customers/${id}/release-to-pool`,{reason:value});ElMessage.success('客户已进入公海');location.hash='#/public-pool'}
   catch(e:any){if(e.response?.data?.error==='active_business_exists')ElMessage.error('该客户存在开放商机或未完成订单，禁止直接释放；如确需强制释放请由管理员处理');else throw e}
+}
+async function saveOrganization(){await api.patch(`/customers/${id}/organization`,{parent_customer_id:orgForm.parent_customer_id||null,organization_role:orgForm.organization_role||null});orgDialog.value=false;await load();ElMessage.success('组织关系已更新')}
+async function mergeCustomer(){
+  if(!mergeForm.target_id)return ElMessage.warning('请选择保留客户');
+  const target=customerOptions.value.find((x:any)=>x.id===mergeForm.target_id);
+  await ElMessageBox.confirm(`确认将当前客户“${customer.value.name}”完整合并到“${target?.name||mergeForm.target_id}”？当前客户将被软删除，联系人、询盘、报价、订单、回款等业务记录会迁移到保留客户。`,'客户合并',{type:'warning',confirmButtonText:'确认合并',cancelButtonText:'取消'});
+  await api.post(`/customers/${id}/merge-into/${mergeForm.target_id}`,{});ElMessage.success('客户合并完成');location.hash=`#/customers/${mergeForm.target_id}`
+}
+function openDepart(contactRow:any){departingContact.value=contactRow;Object.assign(departForm,{successor_contact_id:'',departed_at:new Date().toISOString().slice(0,16),note:''});departDialog.value=true}
+async function departContact(){
+  if(!departingContact.value)return;
+  await api.post(`/contacts/${departingContact.value.id}/depart`,{successor_contact_id:departForm.successor_contact_id||null,departed_at:new Date(departForm.departed_at).toISOString(),note:departForm.note});departDialog.value=false;await load();ElMessage.success('联系人已完成离职交接')
 }
 function fieldInputType(def:any){return ['number','amount'].includes(def.data_type)?'number':['date'].includes(def.data_type)?'date':'text'}
 onMounted(load);
@@ -97,11 +114,20 @@ onMounted(load);
 <div class="card">
   <div class="toolbar"><h3 class="section-title">联系人与多渠道联系方式</h3><el-button size="small" type="primary" plain @click="cDialog=true">添加联系人</el-button></div>
   <div v-for="c in contacts" :key="c.id" style="padding:12px 0;border-bottom:1px solid #edf1f6">
-    <div style="display:flex;justify-content:space-between"><div><b>{{c.name}}</b> <el-tag v-if="c.is_primary" size="small" type="success">主要</el-tag> <span class="muted">{{c.title||''}} {{c.role?'· '+c.role:''}}</span></div><div><el-button link type="primary" @click="prepareChannel(c)">+ 联系方式</el-button><el-button link type="danger" @click="removeContact(c)">删除</el-button></div></div>
+    <div style="display:flex;justify-content:space-between"><div><b>{{c.name}}</b> <el-tag v-if="c.is_primary" size="small" type="success">主要</el-tag> <el-tag v-if="c.is_departed" size="small" type="info">已离职</el-tag> <span class="muted">{{c.title||''}} {{c.role?'· '+c.role:''}}</span></div><div><el-button v-if="!c.is_departed" link type="primary" @click="prepareChannel(c)">+ 联系方式</el-button><el-button v-if="!c.is_departed" link type="warning" @click="openDepart(c)">离职交接</el-button><el-button link type="danger" @click="removeContact(c)">删除</el-button></div></div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><el-button v-for="ch in c.channels" :key="ch.id" size="small" @click="openChannel(ch)" @contextmenu.prevent="removeChannel(ch)">{{ch.channel}}：{{ch.value}}</el-button><span v-if="!c.channels?.length" class="muted">暂无联系方式</span></div>
   </div>
   <el-empty v-if="!contacts.length" description="暂无联系人"/>
 </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <div class="toolbar"><div><h3 class="section-title">集团 / 组织关系</h3><span class="muted">总部、母公司、子公司、分支机构</span></div><div><el-button v-if="canManageTeam" size="small" @click="orgDialog=true">编辑组织关系</el-button><el-button v-if="canTransfer" size="small" type="danger" plain @click="mergeDialog=true">合并重复客户</el-button></div></div>
+  <el-descriptions :column="2" border>
+    <el-descriptions-item label="当前组织角色">{{customer.organization_role||'-'}}</el-descriptions-item>
+    <el-descriptions-item label="上级 / 母公司"><template v-if="organization.parent"><el-link type="primary" :href="`#/customers/${organization.parent.id}`">{{organization.parent.name}}</el-link></template><span v-else>-</span></el-descriptions-item>
+  </el-descriptions>
+  <div style="margin-top:12px"><b>下属公司 / 分支：</b><span v-if="!organization.children?.length" class="muted"> 暂无</span><el-tag v-for="x in (organization.children||[])" :key="x.id" style="margin:4px 6px"><a :href="`#/customers/${x.id}`" style="color:inherit;text-decoration:none">{{x.name}} · {{x.organization_role||'子级'}}</a></el-tag></div>
 </div>
 
 <div class="grid" style="grid-template-columns:1fr 1fr;margin-top:16px">
@@ -116,6 +142,9 @@ onMounted(load);
 <el-dialog v-model="tagDialog" title="添加客户标签" width="480"><el-form label-position="top"><el-form-item label="标签名称"><el-input v-model="newTag.name" placeholder="例如：重点客户 / 德国市场 / 高潜"/></el-form-item><el-form-item label="标签分类"><el-input v-model="newTag.category" placeholder="例如：客户价值 / 市场 / 产品偏好"/></el-form-item></el-form><template #footer><el-button @click="tagDialog=false">取消</el-button><el-button type="primary" @click="addTag">添加</el-button></template></el-dialog>
 <el-dialog v-model="transferDialog" title="转移客户负责人" width="480"><el-form label-position="top"><el-form-item label="新负责人"><el-select v-model="transfer.owner_id" filterable style="width:100%"><el-option v-for="x in owners" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item></el-form><template #footer><el-button @click="transferDialog=false">取消</el-button><el-button type="primary" @click="transferOwner">确认转移</el-button></template></el-dialog>
 <el-dialog v-model="collabDialog" title="添加客户协同人" width="480"><el-form label-position="top"><el-form-item label="协同用户"><el-select v-model="collabForm.user_id" filterable style="width:100%"><el-option v-for="x in availableCollaborators" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item><el-alert type="info" :closable="false" title="协同人可参与该客户的业务操作，但客户唯一负责人不会改变。"/></el-form><template #footer><el-button @click="collabDialog=false">取消</el-button><el-button type="primary" @click="addCollaborator">添加</el-button></template></el-dialog>
+<el-dialog v-model="orgDialog" title="编辑客户组织关系" width="580"><el-form label-position="top"><el-form-item label="组织角色"><el-select v-model="orgForm.organization_role" clearable allow-create filterable style="width:100%"><el-option v-for="x in ['Headquarters','Parent Company','Subsidiary','Branch','Regional Office','Affiliate']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="上级 / 母公司"><el-select v-model="orgForm.parent_customer_id" clearable filterable style="width:100%"><el-option v-for="x in mergeTargets" :key="x.id" :label="`${x.name} · ${x.country||''}`" :value="x.id"/></el-select></el-form-item></el-form><template #footer><el-button @click="orgDialog=false">取消</el-button><el-button type="primary" @click="saveOrganization">保存</el-button></template></el-dialog>
+<el-dialog v-model="mergeDialog" title="合并重复客户" width="600"><el-alert type="warning" :closable="false" title="此操作会把当前客户的业务数据迁移到保留客户，并软删除当前客户。请确认两条记录确实属于同一个真实客户。"/><el-form label-position="top" style="margin-top:14px"><el-form-item label="保留客户"><el-select v-model="mergeForm.target_id" filterable style="width:100%"><el-option v-for="x in mergeTargets" :key="x.id" :label="`${x.name} · ${x.country||''} · ${x.website||''}`" :value="x.id"/></el-select></el-form-item></el-form><template #footer><el-button @click="mergeDialog=false">取消</el-button><el-button type="danger" @click="mergeCustomer">确认合并</el-button></template></el-dialog>
+<el-dialog v-model="departDialog" title="联系人离职交接" width="620"><template v-if="departingContact"><p>离职联系人：<b>{{departingContact.name}}</b></p><el-form label-position="top"><el-form-item label="继任联系人（可选）"><el-select v-model="departForm.successor_contact_id" clearable filterable style="width:100%"><el-option v-for="x in activeContacts.filter((x:any)=>x.id!==departingContact.id)" :key="x.id" :label="`${x.name} · ${x.title||''}`" :value="x.id"/></el-select></el-form-item><el-form-item label="离职时间"><el-input v-model="departForm.departed_at" type="datetime-local"/></el-form-item><el-form-item label="交接备注"><el-input v-model="departForm.note" type="textarea" :rows="4"/></el-form-item></el-form></template><template #footer><el-button @click="departDialog=false">取消</el-button><el-button type="primary" @click="departContact">完成交接</el-button></template></el-dialog>
 
 <el-dialog v-model="editDialog" title="编辑客户资料" width="760"><el-form label-position="top"><div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="客户名称"><el-input v-model="editForm.name"/></el-form-item><el-form-item label="英文名称"><el-input v-model="editForm.english_name"/></el-form-item><el-form-item label="国家"><el-input v-model="editForm.country"/></el-form-item><el-form-item label="城市"><el-input v-model="editForm.city"/></el-form-item><el-form-item label="官网"><el-input v-model="editForm.website"/></el-form-item><el-form-item label="行业"><el-input v-model="editForm.industry"/></el-form-item><el-form-item label="税号"><el-input v-model="editForm.tax_no"/></el-form-item><el-form-item label="注册号"><el-input v-model="editForm.registration_no"/></el-form-item><el-form-item label="客户属性"><el-select v-model="editForm.customer_types" multiple allow-create filterable style="width:100%"><el-option v-for="x in ['Importer','Distributor','Wholesaler','Retailer','Brand','Agent','Manufacturer','End User','E-commerce']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="状态"><el-select v-model="editForm.status" style="width:100%"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="等级"><el-select v-model="editForm.grade" style="width:100%"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="来源"><el-input v-model="editForm.source"/></el-form-item></div><el-form-item label="主营业务"><el-input v-model="editForm.business_scope" type="textarea"/></el-form-item></el-form><template #footer><el-button @click="editDialog=false">取消</el-button><el-button type="primary" @click="saveCustomer">保存</el-button></template></el-dialog>
 
