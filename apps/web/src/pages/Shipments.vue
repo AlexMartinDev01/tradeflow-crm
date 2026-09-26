@@ -17,7 +17,7 @@ async function chooseOrder(){
   form.items=(orderFull.value.items||[]).map((x:any)=>({order_item_id:x.id,product_name:x.product_name,unit:x.unit,ordered_quantity:x.quantity,quantity:0}));
 }
 function addContainer(){form.containers.push({container_type:'40HQ',container_no:'',seal_no:''})}
-function removeContainer(i:number){form.containers.splice(i,1);if(!form.containers.length)addContainer()}
+function removeContainer(i:string|number){form.containers.splice(Number(i),1);if(!form.containers.length)addContainer()}
 async function createShipment(){
   if(!form.order_id)return ElMessage.warning('请选择订单');
   const items=form.items.filter((x:any)=>Number(x.quantity||0)>0).map((x:any)=>({order_item_id:x.order_item_id,product_name:x.product_name,unit:x.unit,quantity:Number(x.quantity)}));
