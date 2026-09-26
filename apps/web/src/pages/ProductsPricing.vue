@@ -7,13 +7,13 @@ import {useAuth} from '../stores/auth';
 
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
 const products=ref<any[]>([]),customers=ref<any[]>([]),preferences=ref<any[]>([]),priceLists=ref<any[]>([]),rules=ref<any[]>([]);
-const productDialog=ref(false),prefDialog=ref(false),listDialog=ref(false),listDrawer=ref(false),ruleDialog=ref(false),resolveDialog=ref(false),historyDialog=ref(false);
+const productDialog=ref(false),editingProduct=ref<any>(null),prefDialog=ref(false),listDialog=ref(false),listDrawer=ref(false),ruleDialog=ref(false),resolveDialog=ref(false),historyDialog=ref(false);
 const selectedList=ref<any>(null),resolved=ref<any>(null),history=ref<any[]>([]);
 const canManage=computed(()=>['admin','manager'].includes(auth.user?.role));
 const productMap=computed(()=>Object.fromEntries(products.value.map(x=>[x.id,x])));
 const customerMap=computed(()=>Object.fromEntries(customers.value.map(x=>[x.id,x])));
 
-const product=reactive<any>({sku:'',name:'',category:'',description:'',certifications:[],base_price:0,floor_price:0,currency:'USD',active:1});
+const product=reactive<any>({sku:'',name:'',category:'',description:'',certifications:[],base_price:0,floor_price:0,currency:'USD',active:1,hs_code:'',customs_name:'',origin_country:'',declaration_elements:{brand:'',model:'',material:'',usage:''}});
 const pref=reactive<any>({customer_id:'',product_id:'',preference_type:'interested',interest_level:'medium',notes:''});
 const listForm=reactive<any>({name:'',customer_id:'',currency:'USD',valid_from:'',valid_to:'',status:'active',notes:''});
 const itemForm=reactive<any>({product_id:'',min_qty:1,max_qty:'',unit_price:0,discount_percent:'',notes:''});
@@ -29,9 +29,14 @@ async function load(){
   ]);
   products.value=p.data.data;customers.value=c.data.data;preferences.value=pr.data.data;priceLists.value=pl.data;rules.value=r.data.data;
 }
+function resetProduct(){editingProduct.value=null;Object.assign(product,{sku:'',name:'',category:'',description:'',certifications:[],base_price:0,floor_price:0,currency:'USD',active:1,hs_code:'',customs_name:'',origin_country:'',declaration_elements:{brand:'',model:'',material:'',usage:''}})}
+function newProduct(){resetProduct();productDialog.value=true}
+function editProduct(r:any){editingProduct.value=r;Object.assign(product,{...r,certifications:[...(r.certifications||[])],declaration_elements:{brand:'',model:'',material:'',usage:'',...(r.declaration_elements||{})}});productDialog.value=true}
 async function saveProduct(){
   if(!product.name.trim())return ElMessage.warning('产品名称必填');
-  await api.post('/products',product);productDialog.value=false;Object.assign(product,{sku:'',name:'',category:'',description:'',certifications:[],base_price:0,floor_price:0,currency:'USD',active:1});await load()
+  const payload=JSON.parse(JSON.stringify(product));
+  if(editingProduct.value)await api.patch(`/products/${editingProduct.value.id}`,payload);else await api.post('/products',payload);
+  const wasEditing=!!editingProduct.value;productDialog.value=false;resetProduct();await load();ElMessage.success(wasEditing?'产品已更新':'产品已保存')
 }
 async function savePref(){
   if(!pref.customer_id||!pref.product_id)return ElMessage.warning('客户和产品必填');
@@ -77,8 +82,8 @@ onMounted(load);
 
 <el-tabs>
 <el-tab-pane label="产品主数据">
-<div class="toolbar"><span class="muted">{{products.length}} 个产品</span><el-button v-if="canManage" type="primary" @click="productDialog=true">新增产品</el-button></div>
-<div class="card"><el-table :data="products"><el-table-column prop="sku" label="SKU" width="130"/><el-table-column prop="name" label="产品" min-width="180"/><el-table-column prop="category" label="分类"/><el-table-column label="认证" min-width="180"><template #default="s"><el-tag v-for="x in (s.row.certifications||[])" :key="x" size="small" style="margin:2px">{{x}}</el-tag></template></el-table-column><el-table-column label="基础价" width="140"><template #default="s">{{s.row.currency}} {{money(s.row.base_price)}}</template></el-table-column><el-table-column v-if="canManage" label="底价" width="140"><template #default="s">{{s.row.floor_price?`${s.row.currency} ${money(s.row.floor_price)}`:'-'}}</template></el-table-column><el-table-column label="启用" width="80"><template #default="s">{{s.row.active?'是':'否'}}</template></el-table-column></el-table></div>
+<div class="toolbar"><span class="muted">{{products.length}} 个产品</span><el-button v-if="canManage" type="primary" @click="newProduct">新增产品</el-button></div>
+<div class="card"><el-table :data="products"><el-table-column prop="sku" label="SKU" width="130"/><el-table-column prop="name" label="产品" min-width="170"/><el-table-column prop="category" label="分类"/><el-table-column prop="hs_code" label="HS Code" width="130"/><el-table-column prop="customs_name" label="报关品名" min-width="150"/><el-table-column prop="origin_country" label="原产国" width="100"/><el-table-column label="认证" min-width="150"><template #default="s"><el-tag v-for="x in (s.row.certifications||[])" :key="x" size="small" style="margin:2px">{{x}}</el-tag></template></el-table-column><el-table-column label="基础价" width="130"><template #default="s">{{s.row.currency}} {{money(s.row.base_price)}}</template></el-table-column><el-table-column v-if="canManage" label="底价" width="130"><template #default="s">{{s.row.floor_price?`${s.row.currency} ${money(s.row.floor_price)}`:'-'}}</template></el-table-column><el-table-column label="启用" width="75"><template #default="s">{{s.row.active?'是':'否'}}</template></el-table-column><el-table-column v-if="canManage" label="操作" width="80" fixed="right"><template #default="s"><el-button link type="primary" @click="editProduct(s.row)">编辑</el-button></template></el-table-column></el-table></div>
 </el-tab-pane>
 
 <el-tab-pane label="客户产品偏好">
@@ -97,7 +102,19 @@ onMounted(load);
 </el-tab-pane>
 </el-tabs>
 
-<el-dialog v-model="productDialog" title="新增产品" width="700"><el-form label-position="top"><div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="SKU"><el-input v-model="product.sku"/></el-form-item><el-form-item label="产品名称"><el-input v-model="product.name"/></el-form-item><el-form-item label="分类"><el-input v-model="product.category"/></el-form-item><el-form-item label="认证"><el-select v-model="product.certifications" multiple allow-create filterable style="width:100%"/></el-form-item><el-form-item label="基础价格"><el-input v-model.number="product.base_price" type="number"/></el-form-item><el-form-item label="底价（审批红线）"><el-input v-model.number="product.floor_price" type="number"/></el-form-item><el-form-item label="币种"><el-select v-model="product.currency" style="width:100%"><el-option v-for="x in ['USD','EUR','GBP','CNY']" :key="x" :label="x" :value="x"/></el-select></el-form-item></div><el-form-item label="描述"><el-input v-model="product.description" type="textarea"/></el-form-item></el-form><template #footer><el-button @click="productDialog=false">取消</el-button><el-button type="primary" @click="saveProduct">保存</el-button></template></el-dialog>
+<el-dialog v-model="productDialog" :title="editingProduct?'编辑产品':'新增产品'" width="780"><el-form label-position="top">
+<div class="grid" style="grid-template-columns:1fr 1fr">
+<el-form-item label="SKU"><el-input v-model="product.sku"/></el-form-item><el-form-item label="产品名称"><el-input v-model="product.name"/></el-form-item>
+<el-form-item label="分类"><el-input v-model="product.category"/></el-form-item><el-form-item label="认证"><el-select v-model="product.certifications" multiple allow-create filterable style="width:100%"/></el-form-item>
+<el-form-item label="基础价格"><el-input v-model.number="product.base_price" type="number"/></el-form-item><el-form-item label="底价（审批红线）"><el-input v-model.number="product.floor_price" type="number"/></el-form-item>
+<el-form-item label="币种"><el-select v-model="product.currency" style="width:100%"><el-option v-for="x in ['USD','EUR','GBP','CNY']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="HS Code"><el-input v-model="product.hs_code"/></el-form-item>
+<el-form-item label="报关品名"><el-input v-model="product.customs_name"/></el-form-item><el-form-item label="原产国"><el-input v-model="product.origin_country"/></el-form-item>
+</div>
+<el-divider content-position="left">常用申报要素</el-divider>
+<div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="品牌"><el-input v-model="product.declaration_elements.brand"/></el-form-item><el-form-item label="型号"><el-input v-model="product.declaration_elements.model"/></el-form-item><el-form-item label="材质"><el-input v-model="product.declaration_elements.material"/></el-form-item><el-form-item label="用途"><el-input v-model="product.declaration_elements.usage"/></el-form-item></div>
+<el-form-item label="描述"><el-input v-model="product.description" type="textarea"/></el-form-item>
+<el-form-item><el-checkbox v-model="product.active" :true-value="1" :false-value="0">启用产品</el-checkbox></el-form-item>
+</el-form><template #footer><el-button @click="productDialog=false">取消</el-button><el-button type="primary" @click="saveProduct">保存</el-button></template></el-dialog>
 
 <el-dialog v-model="prefDialog" title="客户产品关系" width="620"><el-form label-position="top"><el-form-item label="客户"><el-select v-model="pref.customer_id" filterable style="width:100%"><el-option v-for="c in customers" :key="c.id" :label="c.name" :value="c.id"/></el-select></el-form-item><el-form-item label="产品"><el-select v-model="pref.product_id" filterable style="width:100%"><el-option v-for="p in products" :key="p.id" :label="p.name" :value="p.id"/></el-select></el-form-item><div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="关系"><el-select v-model="pref.preference_type" style="width:100%"><el-option v-for="x in ['interested','quoted','purchased','prohibited','unsuitable']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="兴趣等级"><el-select v-model="pref.interest_level" style="width:100%"><el-option v-for="x in ['low','medium','high']" :key="x" :label="x" :value="x"/></el-select></el-form-item></div><el-form-item label="备注"><el-input v-model="pref.notes" type="textarea"/></el-form-item></el-form><template #footer><el-button @click="prefDialog=false">取消</el-button><el-button type="primary" @click="savePref">保存</el-button></template></el-dialog>
 
