@@ -134,6 +134,7 @@ try{db.exec("ALTER TABLE products ADD COLUMN floor_price REAL");}catch{}
 try{db.exec("ALTER TABLE contacts ADD COLUMN anniversary TEXT");}catch{}
 try{db.exec("ALTER TABLE tasks ADD COLUMN automation_key TEXT");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_automation_key ON tasks(automation_key)");}catch{}
+try{db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_automation_key_unique ON tasks(automation_key) WHERE automation_key IS NOT NULL");}catch{}
 try{db.exec("ALTER TABLE documents ADD COLUMN storage_path TEXT");}catch{}
 try{db.exec("ALTER TABLE documents ADD COLUMN size_bytes INTEGER");}catch{}
 try{db.exec("ALTER TABLE documents ADD COLUMN checksum TEXT");}catch{}
@@ -3054,14 +3055,33 @@ const server = http.createServer(async (req,res)=>{
         const order=db.prepare('SELECT * FROM orders WHERE id=?').get(listShip[1]);if(!order)return json(res,404,{error:'order_not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,order.customer_id))return json(res,403,{error:'forbidden'});
         if(!canWriteResource(user.role,'shipments'))return json(res,403,{error:'forbidden'});
-        const b=await body(req),id=randomUUID();
-        db.prepare('INSERT INTO shipments(id,order_id,booking_no,carrier,forwarder,vessel_voyage,bl_no,port_of_loading,destination_port,etd,eta,status,tracking_url,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-          .run(id,order.id,b.booking_no||null,b.carrier||null,b.forwarder||null,b.vessel_voyage||null,b.bl_no||null,b.port_of_loading||null,b.destination_port||null,b.etd||null,b.eta||null,b.status||'booking',b.tracking_url||null,b.notes||null,now(),now());
-        const insItem=db.prepare('INSERT INTO shipment_items(id,shipment_id,order_item_id,product_name,quantity,unit,created_at) VALUES(?,?,?,?,?,?,?)');
-        for(const x of (Array.isArray(b.items)?b.items:[]))if(Number(x.quantity||0)>0)insItem.run(randomUUID(),id,x.order_item_id||null,x.product_name||'',Number(x.quantity),x.unit||null,now());
-        const insC=db.prepare('INSERT INTO shipment_containers(id,shipment_id,container_type,container_no,seal_no,created_at) VALUES(?,?,?,?,?,?)');
-        for(const x of (Array.isArray(b.containers)?b.containers:[]))insC.run(randomUUID(),id,x.container_type||null,x.container_no||null,x.seal_no||null,now());
-        audit(user,'create','shipment',id,req,{order_id:order.id});return json(res,201,{...db.prepare('SELECT * FROM shipments WHERE id=?').get(id),items:db.prepare('SELECT * FROM shipment_items WHERE shipment_id=?').all(id),containers:db.prepare('SELECT * FROM shipment_containers WHERE shipment_id=?').all(id)});
+        const b=await body(req),allowedStatuses=['booking','booked','stuffed','customs','departed','arrived','delivered'],status=String(b.status||'booking');
+        if(!allowedStatuses.includes(status))return json(res,400,{error:'invalid_status'});
+        const requested=(Array.isArray(b.items)?b.items:[]).filter(x=>Number(x.quantity||0)>0);
+        if(!requested.length)return json(res,400,{error:'shipment_items_required'});
+        const orderItems=db.prepare('SELECT * FROM order_items WHERE order_id=?').all(order.id),byId=new Map(orderItems.map(x=>[x.id,x])),normalized=new Map();
+        for(const x of requested){
+          const item=byId.get(String(x.order_item_id||''));if(!item)return json(res,400,{error:'shipment_item_not_in_order',order_item_id:x.order_item_id||null});
+          const qty=Number(x.quantity);if(!Number.isFinite(qty)||qty<=0)return json(res,400,{error:'invalid_shipment_quantity',order_item_id:item.id});
+          const prior=normalized.get(item.id)||0;normalized.set(item.id,prior+qty);
+        }
+        for(const [itemId,qty] of normalized){
+          const item=byId.get(itemId),allocated=Number(db.prepare('SELECT COALESCE(SUM(si.quantity),0) q FROM shipment_items si JOIN shipments s ON s.id=si.shipment_id WHERE s.order_id=? AND si.order_item_id=?').get(order.id,itemId).q||0);
+          if(allocated+qty>Number(item.quantity||0)+1e-9)return json(res,409,{error:'shipment_quantity_exceeds_order',order_item_id:itemId,ordered:Number(item.quantity||0),already_allocated:allocated,requested:qty,remaining:Math.max(0,Number(item.quantity||0)-allocated)});
+        }
+        const id=randomUUID();
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          db.prepare('INSERT INTO shipments(id,order_id,booking_no,carrier,forwarder,vessel_voyage,bl_no,port_of_loading,destination_port,etd,eta,status,tracking_url,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+            .run(id,order.id,b.booking_no||null,b.carrier||null,b.forwarder||null,b.vessel_voyage||null,b.bl_no||null,b.port_of_loading||null,b.destination_port||null,b.etd||null,b.eta||null,status,b.tracking_url||null,b.notes||null,now(),now());
+          const insItem=db.prepare('INSERT INTO shipment_items(id,shipment_id,order_item_id,product_name,quantity,unit,created_at) VALUES(?,?,?,?,?,?,?)');
+          for(const [itemId,qty] of normalized){const item=byId.get(itemId);insItem.run(randomUUID(),id,item.id,item.product_name,qty,item.unit||null,now());}
+          const insC=db.prepare('INSERT INTO shipment_containers(id,shipment_id,container_type,container_no,seal_no,created_at) VALUES(?,?,?,?,?,?)');
+          for(const x of (Array.isArray(b.containers)?b.containers:[]))insC.run(randomUUID(),id,x.container_type||null,x.container_no||null,x.seal_no||null,now());
+          audit(user,'create','shipment',id,req,{order_id:order.id});
+          db.exec('COMMIT');
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
+        return json(res,201,{...db.prepare('SELECT * FROM shipments WHERE id=?').get(id),items:db.prepare('SELECT * FROM shipment_items WHERE shipment_id=?').all(id),containers:db.prepare('SELECT * FROM shipment_containers WHERE shipment_id=?').all(id)});
       }
       const sfull=p.match(/^\/api\/workflows\/shipments\/([0-9a-f-]+)\/full$/);
       if(sfull&&req.method==='GET'){
@@ -3100,12 +3120,22 @@ const server = http.createServer(async (req,res)=>{
         const o=db.prepare('SELECT * FROM orders WHERE id=?').get(plan[1]);if(!o)return json(res,404,{error:'order_not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,o.customer_id))return json(res,403,{error:'forbidden'});
         if(!canWriteResource(user.role,'payments')&&!['admin','manager','sales'].includes(user.role))return json(res,403,{error:'forbidden'});
-        const existing=db.prepare('SELECT COUNT(*) c FROM payments WHERE order_id=?').get(o.id).c;if(existing)return json(res,409,{error:'payment_plan_exists'});
-        const b=await body(req),depositPct=Math.min(100,Math.max(0,Number(b.deposit_percent??30))),deposit=Number((o.total*depositPct/100).toFixed(2)),balance=Number((o.total-deposit).toFixed(2));
-        const ins=db.prepare('INSERT INTO payments(id,customer_id,order_id,type,amount,currency,due_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)');
-        if(deposit>0)ins.run(randomUUID(),o.customer_id,o.id,'deposit',deposit,o.currency,b.deposit_due||now().slice(0,10),'pending',now(),now());
-        if(balance>0)ins.run(randomUUID(),o.customer_id,o.id,'balance',balance,o.currency,b.balance_due||o.requested_delivery||null,'pending',now(),now());
-        audit(user,'create_payment_plan','orders',o.id,req,{deposit_percent:depositPct});return json(res,201,db.prepare('SELECT * FROM payments WHERE order_id=? ORDER BY due_at').all(o.id));
+        const b=await body(req),rawPct=b.deposit_percent??30,depositPct=Number(rawPct);
+        if(!Number.isFinite(depositPct)||depositPct<0||depositPct>100)return json(res,400,{error:'invalid_deposit_percent'});
+        const deposit=Number((Number(o.total||0)*depositPct/100).toFixed(2)),balance=Number((Number(o.total||0)-deposit).toFixed(2));
+        let created=[];
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          const existing=Number(db.prepare('SELECT COUNT(*) c FROM payments WHERE order_id=?').get(o.id).c||0);
+          if(existing){db.exec('ROLLBACK');return json(res,409,{error:'payment_plan_exists'});}
+          const ins=db.prepare('INSERT INTO payments(id,customer_id,order_id,type,amount,currency,due_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)');
+          if(deposit>0)ins.run(randomUUID(),o.customer_id,o.id,'deposit',deposit,o.currency,b.deposit_due||now().slice(0,10),'pending',now(),now());
+          if(balance>0)ins.run(randomUUID(),o.customer_id,o.id,'balance',balance,o.currency,b.balance_due||o.requested_delivery||null,'pending',now(),now());
+          created=db.prepare('SELECT * FROM payments WHERE order_id=? ORDER BY due_at').all(o.id);
+          audit(user,'create_payment_plan','orders',o.id,req,{deposit_percent:depositPct});
+          db.exec('COMMIT');
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
+        return json(res,201,created);
       }
       const paidRoute=p.match(/^\/api\/workflows\/payments\/([0-9a-f-]+)\/mark-paid$/);
       if(paidRoute && req.method==='POST'){
@@ -3134,27 +3164,38 @@ const server = http.createServer(async (req,res)=>{
         if(scopedRole(user)&&!customerOwnedBy(user,customerId))return json(res,403,{error:'forbidden'});
         if(!canWriteResource(user.role,'contracts'))return json(res,403,{error:'forbidden'});
         const id=randomUUID(),no=makeNo('CT'),amount=Number(b.amount||0),currency=b.currency||'USD',terms=b.terms||'';
-        db.prepare('INSERT INTO contracts(id,contract_no,customer_id,quotation_id,amount,currency,effective_from,effective_to,status,terms,attachments,current_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-          .run(id,no,customerId,b.quotation_id||null,amount,currency,b.effective_from||null,b.effective_to||null,'draft',terms,'[]',1,now(),now());
-        db.prepare('INSERT INTO contract_versions(id,contract_id,version,amount,currency,effective_from,effective_to,terms,snapshot,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-          .run(randomUUID(),id,1,amount,currency,b.effective_from||null,b.effective_to||null,terms,JSON.stringify({manual:true}),user.user_id,now());
-        audit(user,'create','contracts',id,req,{manual:true});return json(res,201,db.prepare('SELECT * FROM contracts WHERE id=?').get(id));
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          db.prepare('INSERT INTO contracts(id,contract_no,customer_id,quotation_id,amount,currency,effective_from,effective_to,status,terms,attachments,current_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+            .run(id,no,customerId,b.quotation_id||null,amount,currency,b.effective_from||null,b.effective_to||null,'draft',terms,'[]',1,now(),now());
+          db.prepare('INSERT INTO contract_versions(id,contract_id,version,amount,currency,effective_from,effective_to,terms,snapshot,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+            .run(randomUUID(),id,1,amount,currency,b.effective_from||null,b.effective_to||null,terms,JSON.stringify({manual:true}),user.user_id,now());
+          audit(user,'create','contracts',id,req,{manual:true});
+          db.exec('COMMIT');
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
+        return json(res,201,db.prepare('SELECT * FROM contracts WHERE id=?').get(id));
       }
 
       const qcontract=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/to-contract$/);
       if(qcontract&&req.method==='POST'){
         if(!canWriteResource(user.role,'contracts'))return json(res,403,{error:'forbidden'});
-        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qcontract[1]);if(!q)return json(res,404,{error:'quotation_not_found'});
-        if(!['approved','sent','accepted'].includes(q.status))return json(res,409,{error:'quotation_not_approved'});
-        if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
-        const existing=db.prepare('SELECT * FROM contracts WHERE quotation_id=? ORDER BY created_at DESC LIMIT 1').get(q.id);
-        if(existing)return json(res,200,existing);
-        const b=await body(req),id=randomUUID(),no=makeNo('CT'),terms=b.terms||q.payment_terms||'';
-        db.prepare('INSERT INTO contracts(id,contract_no,customer_id,quotation_id,amount,currency,effective_from,effective_to,status,terms,attachments,current_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-          .run(id,no,q.customer_id,q.id,q.total,q.currency,b.effective_from||null,b.effective_to||null,'draft',terms,'[]',1,now(),now());
-        db.prepare('INSERT INTO contract_versions(id,contract_id,version,amount,currency,effective_from,effective_to,terms,snapshot,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-          .run(randomUUID(),id,1,q.total,q.currency,b.effective_from||null,b.effective_to||null,terms,JSON.stringify({quotation_id:q.id,quote_no:q.quote_no,quotation_version:q.version}),user.user_id,now());
-        audit(user,'create_contract_from_quotation','contracts',id,req,{quotation_id:q.id});
+        const b=await body(req);
+        let id=null,q=null,existing=null;
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qcontract[1]);if(!q){db.exec('ROLLBACK');return json(res,404,{error:'quotation_not_found'});}
+          if(!['approved','sent','accepted'].includes(q.status)){db.exec('ROLLBACK');return json(res,409,{error:'quotation_not_approved'});}
+          if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id)){db.exec('ROLLBACK');return json(res,403,{error:'forbidden'});}
+          existing=db.prepare('SELECT * FROM contracts WHERE quotation_id=? ORDER BY created_at DESC LIMIT 1').get(q.id);
+          if(existing){db.exec('COMMIT');return json(res,200,existing);}
+          id=randomUUID();const no=makeNo('CT'),terms=b.terms||q.payment_terms||'';
+          db.prepare('INSERT INTO contracts(id,contract_no,customer_id,quotation_id,amount,currency,effective_from,effective_to,status,terms,attachments,current_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+            .run(id,no,q.customer_id,q.id,q.total,q.currency,b.effective_from||null,b.effective_to||null,'draft',terms,'[]',1,now(),now());
+          db.prepare('INSERT INTO contract_versions(id,contract_id,version,amount,currency,effective_from,effective_to,terms,snapshot,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+            .run(randomUUID(),id,1,q.total,q.currency,b.effective_from||null,b.effective_to||null,terms,JSON.stringify({quotation_id:q.id,quote_no:q.quote_no,quotation_version:q.version}),user.user_id,now());
+          audit(user,'create_contract_from_quotation','contracts',id,req,{quotation_id:q.id});
+          db.exec('COMMIT');
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
         return json(res,201,db.prepare('SELECT * FROM contracts WHERE id=?').get(id));
       }
 
@@ -3171,15 +3212,22 @@ const server = http.createServer(async (req,res)=>{
 
       const cver=p.match(/^\/api\/workflows\/contracts\/([0-9a-f-]+)\/new-version$/);
       if(cver&&req.method==='POST'){
-        const c=db.prepare('SELECT * FROM contracts WHERE id=?').get(cver[1]);if(!c)return json(res,404,{error:'contract_not_found'});
-        if(scopedRole(user)&&!customerOwnedBy(user,c.customer_id))return json(res,403,{error:'forbidden'});
         if(!canWriteResource(user.role,'contracts'))return json(res,403,{error:'forbidden'});
-        const b=await body(req),next=Number(c.current_version||1)+1;
-        const amount=b.amount===undefined?c.amount:Number(b.amount),currency=b.currency||c.currency,effectiveFrom=b.effective_from===undefined?c.effective_from:(b.effective_from||null),effectiveTo=b.effective_to===undefined?c.effective_to:(b.effective_to||null),terms=b.terms===undefined?c.terms:b.terms;
-        db.prepare("UPDATE contracts SET amount=?,currency=?,effective_from=?,effective_to=?,terms=?,current_version=?,status='draft',updated_at=? WHERE id=?").run(amount,currency,effectiveFrom,effectiveTo,terms,next,now(),c.id);
-        db.prepare('INSERT INTO contract_versions(id,contract_id,version,amount,currency,effective_from,effective_to,terms,snapshot,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-          .run(randomUUID(),c.id,next,amount,currency,effectiveFrom,effectiveTo,terms,JSON.stringify({previous_version:c.current_version||1}),user.user_id,now());
-        audit(user,'new_version','contracts',c.id,req,{version:next});return json(res,201,db.prepare('SELECT * FROM contracts WHERE id=?').get(c.id));
+        const b=await body(req);
+        let result=null;
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          const c=db.prepare('SELECT * FROM contracts WHERE id=?').get(cver[1]);if(!c){db.exec('ROLLBACK');return json(res,404,{error:'contract_not_found'});}
+          if(scopedRole(user)&&!customerOwnedBy(user,c.customer_id)){db.exec('ROLLBACK');return json(res,403,{error:'forbidden'});}
+          const next=Number(c.current_version||1)+1,amount=b.amount===undefined?c.amount:Number(b.amount),currency=b.currency||c.currency,effectiveFrom=b.effective_from===undefined?c.effective_from:(b.effective_from||null),effectiveTo=b.effective_to===undefined?c.effective_to:(b.effective_to||null),terms=b.terms===undefined?c.terms:b.terms;
+          db.prepare("UPDATE contracts SET amount=?,currency=?,effective_from=?,effective_to=?,terms=?,current_version=?,status='draft',updated_at=? WHERE id=?").run(amount,currency,effectiveFrom,effectiveTo,terms,next,now(),c.id);
+          db.prepare('INSERT INTO contract_versions(id,contract_id,version,amount,currency,effective_from,effective_to,terms,snapshot,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+            .run(randomUUID(),c.id,next,amount,currency,effectiveFrom,effectiveTo,terms,JSON.stringify({previous_version:c.current_version||1}),user.user_id,now());
+          audit(user,'new_version','contracts',c.id,req,{version:next});
+          result=db.prepare('SELECT * FROM contracts WHERE id=?').get(c.id);
+          db.exec('COMMIT');
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
+        return json(res,201,result);
       }
 
       const cstatus=p.match(/^\/api\/workflows\/contracts\/([0-9a-f-]+)\/status$/);
@@ -3813,27 +3861,41 @@ const server = http.createServer(async (req,res)=>{
         if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
         const evaluation=evaluateQuotationApproval(q.id);
         if(evaluation.blocked)return json(res,409,{error:'below_floor_price',evaluation});
-        if(evaluation.requires_approval){
-          db.prepare("UPDATE quotations SET status='pending_approval',updated_at=? WHERE id=?").run(now(),q.id);
-          db.prepare('INSERT INTO quotation_approvals(id,quotation_id,status,reasons,submitted_by,submitted_at) VALUES(?,?,?,?,?,?)').run(randomUUID(),q.id,'pending',JSON.stringify(evaluation.reasons),user.user_id,now());
-          audit(user,'submit_approval','quotations',q.id,req,{reasons:evaluation.reasons});
-          return json(res,200,{quotation:db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id),evaluation,auto_approved:false});
-        }
-        db.prepare("UPDATE quotations SET status='approved',updated_at=? WHERE id=?").run(now(),q.id);
-        audit(user,'auto_approve','quotations',q.id,req,{reason:'no_approval_rule_triggered'});
-        return json(res,200,{quotation:db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id),evaluation,auto_approved:true});
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          const current=db.prepare('SELECT status FROM quotations WHERE id=?').get(q.id);
+          if(!current||!['draft','rejected'].includes(current.status)){db.exec('ROLLBACK');return json(res,409,{error:'quotation_not_draft'});}
+          if(evaluation.requires_approval){
+            db.prepare("UPDATE quotations SET status='pending_approval',updated_at=? WHERE id=?").run(now(),q.id);
+            db.prepare("DELETE FROM quotation_approvals WHERE quotation_id=? AND status='pending'").run(q.id);
+            db.prepare('INSERT INTO quotation_approvals(id,quotation_id,status,reasons,submitted_by,submitted_at) VALUES(?,?,?,?,?,?)').run(randomUUID(),q.id,'pending',JSON.stringify(evaluation.reasons),user.user_id,now());
+            audit(user,'submit_approval','quotations',q.id,req,{reasons:evaluation.reasons});
+            db.exec('COMMIT');
+            return json(res,200,{quotation:db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id),evaluation,auto_approved:false});
+          }
+          db.prepare("UPDATE quotations SET status='approved',updated_at=? WHERE id=?").run(now(),q.id);
+          audit(user,'auto_approve','quotations',q.id,req,{reason:'no_approval_rule_triggered'});
+          db.exec('COMMIT');
+          return json(res,200,{quotation:db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id),evaluation,auto_approved:true});
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
       }
 
       const qapprove=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/approve$/);
       if(qapprove && req.method==='POST'){
         if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
-        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qapprove[1]);if(!q)return json(res,404,{error:'quotation_not_found'});
-        if(q.status!=='pending_approval')return json(res,409,{error:'quotation_not_pending'});
         const b=await body(req);
-        db.prepare("UPDATE quotations SET status='approved',updated_at=? WHERE id=?").run(now(),q.id);
-        db.prepare("UPDATE quotation_approvals SET status='approved',decided_by=?,comment=?,decided_at=? WHERE quotation_id=? AND status='pending'").run(user.user_id,b.comment||null,now(),q.id);
-        audit(user,'approve','quotations',q.id,req,{comment:b.comment||null});
-        return json(res,200,db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id));
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qapprove[1]);if(!q){db.exec('ROLLBACK');return json(res,404,{error:'quotation_not_found'});}
+          if(q.status!=='pending_approval'){db.exec('ROLLBACK');return json(res,409,{error:'quotation_not_pending'});}
+          db.prepare("UPDATE quotations SET status='approved',updated_at=? WHERE id=?").run(now(),q.id);
+          const approval=db.prepare("SELECT id FROM quotation_approvals WHERE quotation_id=? AND status='pending' ORDER BY submitted_at DESC LIMIT 1").get(q.id);
+          if(!approval)throw requestBodyError('approval_record_missing','报价处于待审批状态，但未找到待审批记录',409);
+          db.prepare("UPDATE quotation_approvals SET status='approved',decided_by=?,comment=?,decided_at=? WHERE id=?").run(user.user_id,b.comment||null,now(),approval.id);
+          audit(user,'approve','quotations',q.id,req,{comment:b.comment||null});
+          db.exec('COMMIT');
+          return json(res,200,db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id));
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
       }
 
       const qorder=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/to-order$/);
@@ -3866,16 +3928,21 @@ const server = http.createServer(async (req,res)=>{
       const sdel=p.match(/^\/api\/workflows\/samples\/([0-9a-f-]+)\/mark-delivered$/);
       if(sdel && req.method==='POST'){
         if(!canWriteResource(user.role,'samples'))return json(res,403,{error:'forbidden'});
-        const s=db.prepare('SELECT * FROM samples WHERE id=?').get(sdel[1]);
-        if(!s) return json(res,404,{error:'sample_not_found'});
-        if(scopedRole(user)&&!customerOwnedBy(user,s.customer_id))return json(res,403,{error:'forbidden'});
-        const b=await body(req), deliveredAt=b.delivered_at||now();
-        db.prepare("UPDATE samples SET status='delivered',delivered_at=?,updated_at=? WHERE id=?").run(deliveredAt,now(),s.id);
-        const taskId=randomUUID(), due=new Date(new Date(deliveredAt).getTime()+3*24*3600_000).toISOString();
-        db.prepare('INSERT INTO tasks(id,customer_id,title,description,due_at,status,priority,assigned_to,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
-          .run(taskId,s.customer_id,'跟进样品反馈',`样品：${s.product}；运单：${s.tracking_no||'-'}。请确认客户试用反馈并推动下一步。`,due,'todo','high',user.user_id,user.user_id,now(),now());
-        audit(user,'sample_delivered','samples',s.id,req,{task_id:taskId});
-        return json(res,200,{sample:db.prepare('SELECT * FROM samples WHERE id=?').get(s.id),task:db.prepare('SELECT * FROM tasks WHERE id=?').get(taskId)});
+        const b=await body(req);
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          const sample=db.prepare('SELECT * FROM samples WHERE id=?').get(sdel[1]);
+          if(!sample){db.exec('ROLLBACK');return json(res,404,{error:'sample_not_found'});}
+          if(scopedRole(user)&&!customerOwnedBy(user,sample.customer_id)){db.exec('ROLLBACK');return json(res,403,{error:'forbidden'});}
+          const deliveredAt=sample.delivered_at||b.delivered_at||now();
+          if(sample.status!=='delivered'||!sample.delivered_at)db.prepare("UPDATE samples SET status='delivered',delivered_at=?,updated_at=? WHERE id=?").run(deliveredAt,now(),sample.id);
+          const due=new Date(new Date(deliveredAt).getTime()+3*24*3600_000).toISOString(),key=`sample-feedback:${sample.id}`;
+          const created=autoTask(key,sample.customer_id,'跟进样品反馈',`样品：${sample.product}；运单：${sample.tracking_no||'-'}。请确认客户试用反馈并推动下一步。`,due,'high',user.user_id);
+          const task=db.prepare('SELECT * FROM tasks WHERE automation_key=? ORDER BY created_at LIMIT 1').get(key)||null;
+          audit(user,'sample_delivered','samples',sample.id,req,{task_id:task?.id||null,task_created:created});
+          db.exec('COMMIT');
+          return json(res,200,{sample:db.prepare('SELECT * FROM samples WHERE id=?').get(sample.id),task,task_created:created});
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
       }
     }
 
