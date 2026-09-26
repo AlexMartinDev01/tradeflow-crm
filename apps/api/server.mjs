@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, 
 CREATE TABLE IF NOT EXISTS customers(id TEXT PRIMARY KEY, name TEXT NOT NULL, english_name TEXT, local_name TEXT, country TEXT, region TEXT, city TEXT, address TEXT, postal_code TEXT, website TEXT, industry TEXT, customer_types TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'potential', grade TEXT, source TEXT, timezone TEXT, language TEXT, tax_no TEXT, registration_no TEXT, owner_id TEXT, annual_sales REAL, employee_count INTEGER, business_scope TEXT, service_regions TEXT NOT NULL DEFAULT '[]', notes TEXT, custom_fields TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, FOREIGN KEY(owner_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS contacts(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, name TEXT NOT NULL, title TEXT, department TEXT, role TEXT, language TEXT, timezone TEXT, is_primary INTEGER NOT NULL DEFAULT 0, is_departed INTEGER NOT NULL DEFAULT 0, birthday TEXT, influence_level TEXT, attitude TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS contact_channels(id TEXT PRIMARY KEY, contact_id TEXT NOT NULL, channel TEXT NOT NULL, value TEXT NOT NULL, label TEXT, is_primary INTEGER NOT NULL DEFAULT 0, preferred_time TEXT, created_at TEXT NOT NULL, FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS channel_configs(id TEXT PRIMARY KEY, channel_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, icon TEXT, link_mode TEXT NOT NULL DEFAULT 'copy', url_template TEXT, value_hint TEXT, copy_fallback INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS brands(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, logo_url TEXT, website TEXT, country TEXT, group_name TEXT, main_products TEXT, positioning TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS customer_brands(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, brand_id TEXT NOT NULL, relation_type TEXT NOT NULL, authorized_regions TEXT NOT NULL DEFAULT '[]', exclusive INTEGER NOT NULL DEFAULT 0, start_date TEXT, end_date TEXT, sales_share REAL, price_band TEXT, notes TEXT, created_at TEXT NOT NULL, UNIQUE(customer_id, brand_id, relation_type), FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(brand_id) REFERENCES brands(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS tags(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, category TEXT, created_at TEXT NOT NULL);
@@ -237,7 +238,60 @@ function evaluateQuotationApproval(quotationId){
   return {quotation:q,policy,reasons,below_floor_items:belowFloor,discount_percent:Number(discountPct.toFixed(2)),requires_approval:reasons.some(x=>x.code!=='below_floor_price')||belowFloor.length>0,blocked:!!policy.block_below_floor_price&&belowFloor.length>0};
 }
 
+
+function safeChannelKey(v=''){return String(v).trim().toLowerCase().replace(/[^a-z0-9_-]/g,'').slice(0,40);}
+function channelConfigByKey(key){return db.prepare('SELECT * FROM channel_configs WHERE channel_key=? AND enabled=1').get(safeChannelKey(key));}
+function buildChannelTarget(config,value){
+  const v=String(value||'').trim(); if(!v||!config)return '';
+  const mode=String(config.link_mode||'copy');
+  if(mode==='copy')return '';
+  if(mode==='email')return `mailto:${encodeURIComponent(v)}`;
+  if(mode==='phone')return `tel:${v.replace(/[^+\d]/g,'')}`;
+  if(mode==='direct_url')return /^https?:\/\//i.test(v)?v:`https://${v}`;
+  if(mode==='template'){
+    let target=String(config.url_template||'')
+      .replaceAll('{value}',v)
+      .replaceAll('{encoded}',encodeURIComponent(v))
+      .replaceAll('{digits}',v.replace(/\D/g,''))
+      .replaceAll('{phone}',v.replace(/[^+\d]/g,''))
+      .replaceAll('{username}',v.replace(/^@/,''));
+    const scheme=(target.match(/^([a-z][a-z0-9+.-]*):/i)||[])[1]?.toLowerCase();
+    if(!scheme||['javascript','data','file','vbscript','about'].includes(scheme))return '';
+    return target;
+  }
+  return '';
+}
+
 seed();
+
+const channelDefaults=[
+  ['email','Email','email',null,'name@example.com',1,10],
+  ['phone','Phone','phone',null,'+1 555 123 4567',1,20],
+  ['whatsapp','WhatsApp','template','https://wa.me/{digits}','Country code + phone number',1,30],
+  ['wechat','WeChat','copy',null,'WeChat ID',1,40],
+  ['line','LINE','copy',null,'LINE ID or profile URL',1,50],
+  ['vk','VK','direct_url',null,'Profile URL',1,60],
+  ['telegram','Telegram','template','https://t.me/{username}','@username',1,70],
+  ['viber','Viber','copy',null,'Viber number/ID',1,80],
+  ['kakaotalk','KakaoTalk','copy',null,'KakaoTalk ID',1,90],
+  ['zalo','Zalo','copy',null,'Zalo number/ID',1,100],
+  ['linkedin','LinkedIn','direct_url',null,'Profile URL',1,110],
+  ['facebook','Facebook','direct_url',null,'Profile URL',1,120],
+  ['messenger','Messenger','direct_url',null,'Messenger URL',1,130],
+  ['instagram','Instagram','direct_url',null,'Profile URL',1,140],
+  ['x','X / Twitter','direct_url',null,'Profile URL',1,150],
+  ['skype','Skype','template','skype:{value}?chat','Skype ID',1,160],
+  ['teams','Microsoft Teams','direct_url',null,'Teams meeting/chat URL',1,170],
+  ['zoom','Zoom','direct_url',null,'Zoom URL',1,180],
+  ['website','Website','direct_url',null,'https://example.com',1,190],
+  ['store','E-commerce Store','direct_url',null,'Store URL',1,200]
+];
+for(const [key,name,mode,tpl,hint,copyFallback,sortOrder] of channelDefaults){
+  const id=randomUUID();
+  db.prepare('INSERT OR IGNORE INTO channel_configs(id,channel_key,name,link_mode,url_template,value_hint,copy_fallback,enabled,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+    .run(id,key,name,mode,tpl,hint,copyFallback,1,sortOrder,now(),now());
+}
+
 const automationDefaults=[
   ['overdue_payment','逾期回款提醒',1,{priority:'urgent'}],
   ['quotation_expiry','报价到期提醒',1,{days:3,priority:'high'}],
@@ -1174,11 +1228,45 @@ const server = http.createServer(async (req,res)=>{
     if(p==='/api/analytics/customers-by-type' && req.method==='GET'){
       const all=db.prepare('SELECT customer_types FROM customers WHERE deleted_at IS NULL').all(); const m={}; for(const r of all) for(const t of parseJSON(r.customer_types,[])) m[t]=(m[t]||0)+1; return json(res,200,Object.entries(m).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value));
     }
-    if(p==='/api/settings/channels' && req.method==='GET') return json(res,200,['email','phone','whatsapp','wechat','line','vk','telegram','viber','kakaotalk','zalo','linkedin','facebook','messenger','instagram','x','skype','teams','zoom','website','store']);
+    if(p==='/api/settings/channels' && req.method==='GET'){
+      const all=url.searchParams.get('all')==='1'&&['admin','manager'].includes(user.role);
+      const rows=db.prepare(`SELECT * FROM channel_configs ${all?'':'WHERE enabled=1'} ORDER BY sort_order,name`).all();
+      return json(res,200,rows);
+    }
+    if(p==='/api/settings/channels' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req),key=safeChannelKey(b.channel_key),name=String(b.name||'').trim();
+      if(!key||!name)return json(res,400,{error:'key_and_name_required'});
+      if(db.prepare('SELECT 1 FROM channel_configs WHERE channel_key=?').get(key))return json(res,409,{error:'channel_key_exists'});
+      const modes=['copy','email','phone','direct_url','template'];if(!modes.includes(b.link_mode||'copy'))return json(res,400,{error:'invalid_link_mode'});
+      const id=randomUUID();db.prepare('INSERT INTO channel_configs(id,channel_key,name,icon,link_mode,url_template,value_hint,copy_fallback,enabled,sort_order,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id,key,name,b.icon||null,b.link_mode||'copy',b.url_template||null,b.value_hint||null,b.copy_fallback===false?0:1,b.enabled===false?0:1,Number(b.sort_order||0),now(),now());
+      audit(user,'create','channel_config',id,req,{channel_key:key,name});return json(res,201,db.prepare('SELECT * FROM channel_configs WHERE id=?').get(id));
+    }
+    {
+      const cm=p.match(/^\/api\/settings\/channels\/([0-9a-f-]+)$/);
+      if(cm&&req.method==='PATCH'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM channel_configs WHERE id=?').get(cm[1]);if(!old)return json(res,404,{error:'not_found'});
+        const b=await body(req),key=b.channel_key===undefined?old.channel_key:safeChannelKey(b.channel_key),name=b.name===undefined?old.name:String(b.name||'').trim(),mode=b.link_mode===undefined?old.link_mode:b.link_mode;
+        if(!key||!name)return json(res,400,{error:'key_and_name_required'});if(!['copy','email','phone','direct_url','template'].includes(mode))return json(res,400,{error:'invalid_link_mode'});
+        const dup=db.prepare('SELECT id FROM channel_configs WHERE channel_key=? AND id!=?').get(key,old.id);if(dup)return json(res,409,{error:'channel_key_exists'});
+        db.prepare('UPDATE channel_configs SET channel_key=?,name=?,icon=?,link_mode=?,url_template=?,value_hint=?,copy_fallback=?,enabled=?,sort_order=?,updated_at=? WHERE id=?')
+          .run(key,name,b.icon===undefined?old.icon:(b.icon||null),mode,b.url_template===undefined?old.url_template:(b.url_template||null),b.value_hint===undefined?old.value_hint:(b.value_hint||null),b.copy_fallback===undefined?old.copy_fallback:(b.copy_fallback?1:0),b.enabled===undefined?old.enabled:(b.enabled?1:0),b.sort_order===undefined?old.sort_order:Number(b.sort_order||0),now(),old.id);
+        audit(user,'update','channel_config',old.id,req,{channel_key:key,name});return json(res,200,db.prepare('SELECT * FROM channel_configs WHERE id=?').get(old.id));
+      }
+      if(cm&&req.method==='DELETE'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM channel_configs WHERE id=?').get(cm[1]);if(!old)return json(res,404,{error:'not_found'});
+        const used=Number(db.prepare('SELECT COUNT(*) c FROM contact_channels WHERE channel=?').get(old.channel_key).c||0);
+        if(used)return json(res,409,{error:'channel_in_use',usage_count:used});
+        db.prepare('DELETE FROM channel_configs WHERE id=?').run(old.id);audit(user,'delete','channel_config',old.id,req,{channel_key:old.channel_key});return json(res,200,{ok:true});
+      }
+    }
     if(p==='/api/tools/link' && req.method==='POST'){
-      const b=await body(req), v=String(b.value||'').trim(), c=String(b.channel||'').toLowerCase(); let target='';
-      if(c==='email') target=`mailto:${encodeURIComponent(v)}`; else if(c==='phone') target=`tel:${v.replace(/[^+\d]/g,'')}`; else if(c==='whatsapp') target=`https://wa.me/${v.replace(/\D/g,'')}`; else if(c==='telegram') target=v.startsWith('http')?v:`https://t.me/${v.replace(/^@/,'')}`; else if(['website','linkedin','facebook','messenger','instagram','vk','line','x','store'].includes(c)) target=/^https?:\/\//i.test(v)?v:`https://${v}`; else target=v;
-      return json(res,200,{target,copyFallback:!target});
+      const b=await body(req),value=String(b.value||'').trim(),key=safeChannelKey(b.channel),config=channelConfigByKey(key);
+      const target=buildChannelTarget(config,value);
+      return json(res,200,{target,copyFallback:config?!!config.copy_fallback:true,channel:config||null});
     }
 
 
