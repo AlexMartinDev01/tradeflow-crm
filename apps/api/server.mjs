@@ -433,6 +433,55 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,db.prepare('SELECT * FROM automation_logs ORDER BY created_at DESC LIMIT 200').all());
     }
 
+
+    if(p==='/api/analytics/overview' && req.method==='GET'){
+      const months=Math.min(24,Math.max(3,Number(url.searchParams.get('months')||12)));
+      const customerScope=scopedRole(user)?' AND c.owner_id=?':'',scopeArgs=scopedRole(user)?[user.user_id]:[];
+      const orderScope=scopedRole(user)?' AND c.owner_id=?':'',orderArgs=scopedRole(user)?[user.user_id]:[];
+      const monthStart=new Date();monthStart.setMonth(monthStart.getMonth()-months+1);monthStart.setDate(1);monthStart.setHours(0,0,0,0);
+      const startIso=monthStart.toISOString();
+
+      const newCustomers=db.prepare(`SELECT substr(c.created_at,1,7) month,COUNT(*) value FROM customers c WHERE c.deleted_at IS NULL AND c.created_at>=?${customerScope} GROUP BY substr(c.created_at,1,7) ORDER BY month`).all(startIso,...scopeArgs);
+      const orderRevenue=db.prepare(`SELECT substr(o.created_at,1,7) month,COUNT(*) orders,COALESCE(SUM(o.total),0) revenue FROM orders o JOIN customers c ON c.id=o.customer_id WHERE o.created_at>=?${orderScope} GROUP BY substr(o.created_at,1,7) ORDER BY month`).all(startIso,...orderArgs);
+
+      const funnel=db.prepare(`SELECT op.stage,COUNT(*) count,COALESCE(SUM(op.expected_amount),0) amount FROM opportunities op JOIN customers c ON c.id=op.customer_id WHERE 1=1${customerScope} GROUP BY op.stage`).all(...scopeArgs);
+      const forecast=db.prepare(`SELECT COALESCE(SUM(COALESCE(op.expected_amount,0)*COALESCE(op.probability,0)/100.0),0) weighted,COALESCE(SUM(COALESCE(op.expected_amount,0)),0) pipeline FROM opportunities op JOIN customers c ON c.id=op.customer_id WHERE op.stage NOT IN ('won','lost')${customerScope}`).get(...scopeArgs);
+
+      const source=db.prepare(`SELECT COALESCE(c.source,'Unknown') source,COUNT(DISTINCT c.id) customers,COUNT(DISTINCT o.id) orders,COALESCE(SUM(o.total),0) revenue FROM customers c LEFT JOIN orders o ON o.customer_id=c.id WHERE c.deleted_at IS NULL${customerScope} GROUP BY COALESCE(c.source,'Unknown') ORDER BY revenue DESC,customers DESC LIMIT 20`).all(...scopeArgs);
+
+      const salespeople=db.prepare(`SELECT u.id,u.display_name,u.role,
+        COUNT(DISTINCT c.id) customers,
+        COUNT(DISTINCT a.id) activities,
+        COUNT(DISTINCT o.id) orders,
+        COALESCE(SUM(o.total),0) revenue
+        FROM users u LEFT JOIN customers c ON c.owner_id=u.id AND c.deleted_at IS NULL
+        LEFT JOIN activities a ON a.customer_id=c.id
+        LEFT JOIN orders o ON o.customer_id=c.id
+        WHERE u.enabled=1 AND u.role IN ('admin','manager','sales','followup')
+        GROUP BY u.id ORDER BY revenue DESC,activities DESC LIMIT 30`).all();
+
+      const customerValue=db.prepare(`SELECT c.id,c.name,COUNT(DISTINCT o.id) order_count,COALESCE(SUM(o.total),0) revenue,
+        COALESCE(SUM(CASE WHEN q.margin_rate IS NOT NULL THEN o.total*q.margin_rate/100.0 ELSE 0 END),0) estimated_gross_profit
+        FROM customers c JOIN orders o ON o.customer_id=c.id LEFT JOIN quotations q ON q.id=o.quotation_id
+        WHERE c.deleted_at IS NULL${customerScope}
+        GROUP BY c.id ORDER BY revenue DESC LIMIT 20`).all(...scopeArgs);
+
+      const brands=db.prepare(`SELECT b.name,COUNT(DISTINCT cb.customer_id) customers,COALESCE(SUM(cb.sales_share),0) sales_share_sum
+        FROM brands b JOIN customer_brands cb ON cb.brand_id=b.id JOIN customers c ON c.id=cb.customer_id
+        WHERE c.deleted_at IS NULL${customerScope} GROUP BY b.id ORDER BY customers DESC LIMIT 20`).all(...scopeArgs);
+
+      const orderCustomerRows=db.prepare(`SELECT c.id,COUNT(o.id) cnt FROM customers c JOIN orders o ON o.customer_id=c.id WHERE c.deleted_at IS NULL${customerScope} GROUP BY c.id`).all(...scopeArgs);
+      const buyers=orderCustomerRows.length,repeatBuyers=orderCustomerRows.filter(x=>Number(x.cnt)>=2).length,repurchaseRate=buyers?repeatBuyers/buyers*100:0;
+      const totalRevenue=db.prepare(`SELECT COALESCE(SUM(o.total),0) v FROM orders o JOIN customers c ON c.id=o.customer_id WHERE c.deleted_at IS NULL${orderScope}`).get(...orderArgs).v;
+      const totalCustomers=db.prepare(`SELECT COUNT(*) c FROM customers c WHERE c.deleted_at IS NULL${customerScope}`).get(...scopeArgs).c;
+      const openOpps=db.prepare(`SELECT COUNT(*) c FROM opportunities op JOIN customers c ON c.id=op.customer_id WHERE op.stage NOT IN ('won','lost')${customerScope}`).get(...scopeArgs).c;
+
+      return json(res,200,{
+        summary:{total_customers:totalCustomers,total_revenue:Number(totalRevenue||0),open_opportunities:openOpps,pipeline:Number(forecast.pipeline||0),weighted_forecast:Number(forecast.weighted||0),buyers,repeat_buyers:repeatBuyers,repurchase_rate:repurchaseRate},
+        new_customers:newCustomers,order_revenue:orderRevenue,funnel,source,salespeople,customer_value:customerValue,brands
+      });
+    }
+
     if(p==='/api/dashboard' && req.method==='GET'){
       const q=(sql,...a)=>db.prepare(sql).get(...a).c;
       return json(res,200,{
