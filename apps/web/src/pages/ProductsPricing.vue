@@ -18,7 +18,7 @@ const pref=reactive<any>({customer_id:'',product_id:'',preference_type:'interest
 const listForm=reactive<any>({name:'',customer_id:'',currency:'USD',valid_from:'',valid_to:'',status:'active',notes:''});
 const itemForm=reactive<any>({product_id:'',min_qty:1,max_qty:'',unit_price:0,discount_percent:'',notes:''});
 const rule=reactive<any>({product_id:'',country:'',rule_type:'prohibited',required_certifications:[],notes:'',active:1});
-const resolver=reactive<any>({customer_id:'',product_id:'',quantity:1});
+const resolver=reactive<any>({customer_id:'',product_id:'',quantity:1,target_currency:'USD'});
 const histFilter=reactive<any>({customer_id:'',product_id:''});
 
 async function load(){
@@ -61,7 +61,7 @@ async function saveRule(){
 async function deleteRule(r:any){await api.delete(`/productMarketRules/${r.id}`);await load()}
 async function resolvePrice(){
   if(!resolver.customer_id||!resolver.product_id)return ElMessage.warning('请选择客户和产品');
-  resolved.value=(await api.get('/pricing/resolve',{params:{customer_id:resolver.customer_id,product_id:resolver.product_id,quantity:resolver.quantity}})).data;resolveDialog.value=true
+  resolved.value=(await api.get('/pricing/resolve',{params:{customer_id:resolver.customer_id,product_id:resolver.product_id,quantity:resolver.quantity,target_currency:resolver.target_currency||undefined}})).data;resolveDialog.value=true
 }
 async function showHistory(){
   if(!histFilter.customer_id||!histFilter.product_id)return ElMessage.warning('请选择客户和产品');
@@ -74,10 +74,10 @@ onMounted(load);
 <template><AppLayout>
 <div class="toolbar"><div><h2 style="margin:0">产品与价格</h2><span class="muted">产品、客户偏好、专属价目表、阶梯价、历史价与市场限制</span></div><div style="display:flex;gap:8px"><el-button @click="showHistory">查询历史价</el-button><el-button type="primary" @click="resolvePrice">价格解析</el-button></div></div>
 
-<div class="card" style="margin-bottom:16px"><div class="grid" style="grid-template-columns:1fr 1fr 160px auto">
+<div class="card" style="margin-bottom:16px"><div class="grid" style="grid-template-columns:1fr 1fr 140px 140px auto">
 <el-select v-model="resolver.customer_id" filterable placeholder="选择客户"><el-option v-for="c in customers" :key="c.id" :label="c.name" :value="c.id"/></el-select>
 <el-select v-model="resolver.product_id" filterable placeholder="选择产品"><el-option v-for="p in products" :key="p.id" :label="`${p.sku||'-'} · ${p.name}`" :value="p.id"/></el-select>
-<el-input-number v-model="resolver.quantity" :min="1"/><el-button type="primary" plain @click="resolvePrice">解析当前价格</el-button>
+<el-input-number v-model="resolver.quantity" :min="1"/><el-select v-model="resolver.target_currency" clearable placeholder="目标币种"><el-option v-for="x in ['USD','EUR','GBP','CNY','JPY','CAD','AUD']" :key="x" :label="x" :value="x"/></el-select><el-button type="primary" plain @click="resolvePrice">解析当前价格</el-button>
 </div></div>
 
 <el-tabs>
@@ -124,7 +124,7 @@ onMounted(load);
 
 <el-dialog v-model="ruleDialog" title="新增市场规则" width="650"><el-form label-position="top"><el-form-item label="产品"><el-select v-model="rule.product_id" filterable style="width:100%"><el-option v-for="p in products" :key="p.id" :label="p.name" :value="p.id"/></el-select></el-form-item><div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="国家（留空=全球）"><el-input v-model="rule.country"/></el-form-item><el-form-item label="规则类型"><el-select v-model="rule.rule_type" style="width:100%"><el-option label="禁止销售" value="prohibited"/><el-option label="需要认证" value="requires_certification"/></el-select></el-form-item></div><el-form-item v-if="rule.rule_type==='requires_certification'" label="要求认证"><el-select v-model="rule.required_certifications" multiple allow-create filterable style="width:100%"/></el-form-item><el-form-item label="备注"><el-input v-model="rule.notes" type="textarea"/></el-form-item></el-form><template #footer><el-button @click="ruleDialog=false">取消</el-button><el-button type="primary" @click="saveRule">保存</el-button></template></el-dialog>
 
-<el-dialog v-model="resolveDialog" title="价格解析结果" width="650"><template v-if="resolved"><el-alert :type="resolved.allowed?'success':'error'" :closable="false" :title="resolved.allowed?'当前可报价':'当前存在销售限制'"/><el-descriptions :column="2" border style="margin-top:14px"><el-descriptions-item label="客户">{{resolved.customer.name}}</el-descriptions-item><el-descriptions-item label="国家">{{resolved.customer.country||'-'}}</el-descriptions-item><el-descriptions-item label="产品">{{resolved.product.name}}</el-descriptions-item><el-descriptions-item label="数量">{{resolved.quantity}}</el-descriptions-item><el-descriptions-item label="解析单价"><b>{{resolved.currency}} {{money(resolved.unit_price)}}</b></el-descriptions-item><el-descriptions-item label="总额"><b>{{resolved.currency}} {{money(resolved.total)}}</b></el-descriptions-item><el-descriptions-item label="价格来源">{{resolved.price_source.type}} {{resolved.price_source.price_list_name||''}}</el-descriptions-item><el-descriptions-item label="限制原因">{{resolved.block_reason||'-'}}</el-descriptions-item><el-descriptions-item label="要求认证" :span="2">{{(resolved.required_certifications||[]).join('、')||'-'}}</el-descriptions-item></el-descriptions></template></el-dialog>
+<el-dialog v-model="resolveDialog" title="价格解析结果" width="650"><template v-if="resolved"><el-alert :type="resolved.allowed?'success':'error'" :closable="false" :title="resolved.allowed?'当前可报价':'当前存在销售限制'"/><el-descriptions :column="2" border style="margin-top:14px"><el-descriptions-item label="客户">{{resolved.customer.name}}</el-descriptions-item><el-descriptions-item label="国家">{{resolved.customer.country||'-'}}</el-descriptions-item><el-descriptions-item label="产品">{{resolved.product.name}}</el-descriptions-item><el-descriptions-item label="数量">{{resolved.quantity}}</el-descriptions-item><el-descriptions-item label="解析单价"><b>{{resolved.currency}} {{money(resolved.unit_price)}}</b></el-descriptions-item><el-descriptions-item label="原始价格">{{resolved.original_price?.currency}} {{money(resolved.original_price?.unit_price)}}</el-descriptions-item><el-descriptions-item label="汇率"><span v-if="resolved.fx">{{resolved.fx.from}}→{{resolved.fx.to}} = {{Number(resolved.fx.rate).toFixed(6)}}（{{resolved.fx.source}}）</span><span v-else-if="resolved.fx_missing" style="color:#b42318">未找到有效汇率，未换算</span><span v-else>-</span></el-descriptions-item><el-descriptions-item label="总额"><b>{{resolved.currency}} {{money(resolved.total)}}</b></el-descriptions-item><el-descriptions-item label="价格来源">{{resolved.price_source.type}} {{resolved.price_source.price_list_name||''}}</el-descriptions-item><el-descriptions-item label="限制原因">{{resolved.block_reason||'-'}}</el-descriptions-item><el-descriptions-item label="要求认证" :span="2">{{(resolved.required_certifications||[]).join('、')||'-'}}</el-descriptions-item></el-descriptions></template></el-dialog>
 
 <el-dialog v-model="historyDialog" title="客户产品历史价格" width="850"><div class="grid" style="grid-template-columns:1fr 1fr auto;margin-bottom:12px"><el-select v-model="histFilter.customer_id" filterable placeholder="客户"><el-option v-for="c in customers" :key="c.id" :label="c.name" :value="c.id"/></el-select><el-select v-model="histFilter.product_id" filterable placeholder="产品"><el-option v-for="p in products" :key="p.id" :label="p.name" :value="p.id"/></el-select><el-button type="primary" @click="showHistory">查询</el-button></div><el-table :data="history"><el-table-column prop="occurred_at" label="时间" width="190"/><el-table-column prop="source_type" label="来源"/><el-table-column prop="reference" label="单据"/><el-table-column prop="quantity" label="数量"/><el-table-column prop="unit_price" label="单价"/><el-table-column prop="currency" label="币种"/><el-table-column prop="status" label="状态"/></el-table></el-dialog>
 </AppLayout></template>
