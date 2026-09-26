@@ -323,17 +323,12 @@ const quotations=[];
 quoteDefs.forEach((x,i)=>{
   const prod1=productDefs[x[5]],prod2=productDefs[x[6]],q1=x[7],p1=x[8],q2=Math.max(10,Math.round(q1*0.4)),p2=Number((prod2.base_price*0.9).toFixed(2));
   const subtotal=Number((q1*p1+q2*p2).toFixed(2)),discount=i%4===0?Number((subtotal*0.03).toFixed(2)):0,total=subtotal-discount;
-  const obj={id:did(22,i+1),quote_no:\`QT-DEMO-2026-\${String(i+1).padStart(3,'0')}\`,customer_id:customers[x[0]].id,contact_id:contacts[x[0]*2].id,opportunity_id:opportunities[x[1]].id,version:1,currency:x[2],incoterm:x[3],payment_terms:x[4],moq:'10 units',packaging:'Export carton/pallet',lead_time:'6-8 weeks',valid_until:d(x[10]),subtotal,discount,total,margin_rate:Number((x[9]*100).toFixed(1)),status:x[11]||x[10],notes:\`[\${BATCH}] Commercial quotation\`,created_at:dt(-20+i),updated_at:dt(-5+i%3)};
-  // Fix argument mapping for status/validity
-  obj.status=x[10] && typeof x[10]==='string'?x[10]:x[11];
-  obj.valid_until=d(typeof x[12]==='number'?x[12]:20);
+  const obj={id:did(22,i+1),quote_no:\`QT-DEMO-2026-\${String(i+1).padStart(3,'0')}\`,customer_id:customers[x[0]].id,contact_id:contacts[x[0]*2].id,opportunity_id:opportunities[x[1]].id,version:1,currency:x[2],incoterm:x[3],payment_terms:x[4],moq:'10 units',packaging:'Export carton/pallet',lead_time:'6-8 weeks',valid_until:d(x[11]),subtotal,discount,total,margin_rate:Number((x[9]*100).toFixed(1)),status:x[10],notes:\`[\${BATCH}] Commercial quotation\`,created_at:dt(-20+i),updated_at:dt(-5+i%3)};
   quotations.push(obj);insert('quotations',obj);
   insert('quotation_items',{id:did(23,i*2+1),quotation_id:obj.id,product_code:prod1.sku,product_name:prod1.name,quantity:q1,unit:'pcs',unit_price:p1,amount:Number((q1*p1).toFixed(2)),cost:Number((p1*(1-x[9])).toFixed(2)),spec:'Standard export configuration'});
   insert('quotation_items',{id:did(23,i*2+2),quotation_id:obj.id,product_code:prod2.sku,product_name:prod2.name,quantity:q2,unit:'pcs',unit_price:p2,amount:Number((q2*p2).toFixed(2)),cost:Number((p2*0.72).toFixed(2)),spec:'Accessory / supporting item'});
 });
 
-// Normalize quote statuses explicitly
-['sent','approved','sent','sent','pending_approval','accepted','accepted','accepted','sent'].forEach((st,i)=>update('quotations',quotations[i].id,{status:st,valid_until:d([20,30,15,18,12,25,22,10,30][i])}));
 
 if(tableExists('quotation_approvals')){
   insert('quotation_approvals',{id:did(24,1),quotation_id:quotations[4].id,status:'pending',reasons:j([{code:'low_margin',label:'Margin below policy threshold'}]),submitted_by:customers[5].owner_id,decided_by:null,comment:null,submitted_at:dt(-2),decided_at:null});
