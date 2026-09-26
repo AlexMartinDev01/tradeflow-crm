@@ -113,8 +113,14 @@ test.describe('TradeFlow aftersales knowledge UI loop',()=>{
     await expect(statusSelect).toBeVisible();
     await statusSelect.click();
     await page.getByRole('option',{name:'resolved',exact:true}).click();
-    await expect(page.getByText('工单状态已更新')).toBeVisible();
 
+    await expect.poll(async()=>{
+      const response=await request.get(`/api/workflows/aftersales/${ticket.id}/full`,{headers:manager.headers});
+      if(!response.ok())return 'http-'+response.status();
+      return (await response.json()).status;
+    },{message:'aftersales status must persist as resolved',timeout:10000}).toBe('resolved');
+
+    await expect(statusSelect).toContainText('resolved');
     await expect(drawer.getByRole('button',{name:'沉淀为知识'})).toBeVisible();
     await drawer.getByRole('button',{name:'沉淀为知识'}).click();
 
