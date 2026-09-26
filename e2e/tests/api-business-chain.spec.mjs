@@ -221,6 +221,14 @@ test.describe('TradeFlow role boundaries',()=>{
     expect(response.status()).toBe(403);
   });
 
+  test('readonly cannot generate commercial documents',async({request})=>{
+    const {headers}=await loginApi(request,'demo.readonly');
+    const orders=await getJson(request,'/api/orders?size=20',headers);
+    expect(orders.data.length).toBeGreaterThan(0);
+    const response=await request.post(`/api/workflows/orders/${orders.data[0].id}/generate-document`,{headers,data:{type:'PI'}});
+    expect(response.status()).toBe(403);
+  });
+
   test('finance can read receivables but cannot create customer master data',async({request})=>{
     const {headers}=await loginApi(request,'demo.finance');
     const payments=await getJson(request,'/api/payments?size=500',headers);
