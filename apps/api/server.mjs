@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS aftersales(id TEXT PRIMARY KEY, ticket_no TEXT UNIQUE
 CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, segment_rule TEXT, status TEXT NOT NULL DEFAULT 'draft', scheduled_at TEXT, content TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, entity_type TEXT, entity_id TEXT, ip TEXT, request_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS saved_views(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, entity_type TEXT NOT NULL, name TEXT NOT NULL, filters TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
 CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_customer ON contacts(customer_id);
@@ -245,9 +246,43 @@ const server = http.createServer(async (req,res)=>{
     }
     if(p==='/api/search' && req.method==='GET'){
       const term=(url.searchParams.get('q')||'').trim(); if(!term) return json(res,200,[]); const like=`%${term}%`;
-      const results=db.prepare(`SELECT id,name,english_name,country,status,grade,website FROM customers WHERE deleted_at IS NULL AND (name LIKE ? OR english_name LIKE ? OR website LIKE ? OR tax_no LIKE ?) LIMIT 50`).all(like,like,like,like);
+      const results=db.prepare(`
+        SELECT DISTINCT c.id,c.name,c.english_name,c.country,c.city,c.industry,c.status,c.grade,c.website,c.tax_no,c.registration_no,c.owner_id,u.display_name owner_name
+        FROM customers c
+        LEFT JOIN users u ON u.id=c.owner_id
+        WHERE c.deleted_at IS NULL AND (
+          c.name LIKE ? OR c.english_name LIKE ? OR c.local_name LIKE ? OR c.website LIKE ? OR c.tax_no LIKE ? OR c.registration_no LIKE ? OR c.business_scope LIKE ? OR c.custom_fields LIKE ?
+          OR EXISTS (SELECT 1 FROM contacts ct WHERE ct.customer_id=c.id AND (ct.name LIKE ? OR ct.title LIKE ? OR ct.department LIKE ?))
+          OR EXISTS (SELECT 1 FROM contacts ct JOIN contact_channels cc ON cc.contact_id=ct.id WHERE ct.customer_id=c.id AND cc.value LIKE ?)
+          OR EXISTS (SELECT 1 FROM customer_tags x JOIN tags t ON t.id=x.tag_id WHERE x.customer_id=c.id AND t.name LIKE ?)
+          OR EXISTS (SELECT 1 FROM customer_brands cb JOIN brands b ON b.id=cb.brand_id WHERE cb.customer_id=c.id AND b.name LIKE ?)
+        )
+        ORDER BY c.updated_at DESC LIMIT 100`).all(like,like,like,like,like,like,like,like,like,like,like,like,like,like);
       return json(res,200,results);
     }
+
+    if(p==='/api/views' && req.method==='GET'){
+      const entity=url.searchParams.get('entity_type')||'customers';
+      const rows=db.prepare('SELECT * FROM saved_views WHERE entity_type=? AND (user_id=? OR is_shared=1) ORDER BY updated_at DESC').all(entity,user.user_id)
+        .map(r=>({...r,filters:parseJSON(r.filters,{})}));
+      return json(res,200,rows);
+    }
+    if(p==='/api/views' && req.method==='POST'){
+      const b=await body(req), name=String(b.name||'').trim(); if(!name) return json(res,400,{error:'name_required'});
+      const id=randomUUID(); db.prepare('INSERT INTO saved_views(id,user_id,entity_type,name,filters,is_shared,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)')
+        .run(id,user.user_id,b.entity_type||'customers',name,JSON.stringify(b.filters||{}),b.is_shared?1:0,now(),now());
+      audit(user,'create','saved_view',id,req,{name,entity_type:b.entity_type||'customers'});
+      return json(res,201,{id,user_id:user.user_id,entity_type:b.entity_type||'customers',name,filters:b.filters||{},is_shared:b.is_shared?1:0});
+    }
+    {
+      const vm=p.match(/^\/api\/views\/([0-9a-f-]+)$/);
+      if(vm && req.method==='DELETE'){
+        const row=db.prepare('SELECT * FROM saved_views WHERE id=?').get(vm[1]); if(!row) return json(res,404,{error:'not_found'});
+        if(row.user_id!==user.user_id && user.role!=='admin') return json(res,403,{error:'forbidden'});
+        db.prepare('DELETE FROM saved_views WHERE id=?').run(vm[1]); audit(user,'delete','saved_view',vm[1],req); return json(res,200,{ok:true});
+      }
+    }
+
     if(p==='/api/audit' && req.method==='GET'){
       if(!['admin','manager'].includes(user.role)) return json(res,403,{error:'forbidden'});
       return json(res,200,db.prepare('SELECT a.*,u.display_name user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 500').all().map(x=>({...x,detail:parseJSON(x.detail,{})})));
@@ -440,7 +475,7 @@ const server = http.createServer(async (req,res)=>{
       if(req.method==='GET' && !id){
         const page=Math.max(1,Number(url.searchParams.get('page')||1)), size=Math.min(200,Math.max(1,Number(url.searchParams.get('size')||50))), offset=(page-1)*size;
         const customerId=url.searchParams.get('customer_id'); const contactId=url.searchParams.get('contact_id'); const orderId=url.searchParams.get('order_id'); const ownerId=url.searchParams.get('owner_id'); const tagId=url.searchParams.get('tag_id');
-        const filters=[]; const args=[]; if(customerId && tableCols(table).includes('customer_id')){filters.push('customer_id=?');args.push(customerId);} if(contactId&&tableCols(table).includes('contact_id')){filters.push('contact_id=?');args.push(contactId);} if(orderId&&tableCols(table).includes('order_id')){filters.push('order_id=?');args.push(orderId);} if(table==='customers'){filters.push('deleted_at IS NULL'); if(ownerId){filters.push('owner_id=?');args.push(ownerId);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);}}
+        const filters=[]; const args=[]; if(customerId && tableCols(table).includes('customer_id')){filters.push('customer_id=?');args.push(customerId);} if(contactId&&tableCols(table).includes('contact_id')){filters.push('contact_id=?');args.push(contactId);} if(orderId&&tableCols(table).includes('order_id')){filters.push('order_id=?');args.push(orderId);} if(table==='customers'){filters.push('deleted_at IS NULL'); const exacts=['owner_id','country','status','grade','source','industry']; for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`${k}=?`);args.push(v);}} const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('customer_types LIKE ?');args.push(`%"${customerType}"%`);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);}}
         const where=filters.length?`WHERE ${filters.join(' AND ')}`:''; const total=db.prepare(`SELECT COUNT(*) c FROM ${table} ${where}`).get(...args).c; const data=db.prepare(`SELECT * FROM ${table} ${where} ORDER BY ${tableCols(table).includes('updated_at')?'updated_at':'rowid'} DESC LIMIT ? OFFSET ?`).all(...args,size,offset).map(r=>decodeRow(r,cfg)); return json(res,200,{data,total,page,size});
       }
       if(req.method==='GET' && id){ const row=db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id); return row?json(res,200,decodeRow(row,cfg)):json(res,404,{error:'not_found'}); }
