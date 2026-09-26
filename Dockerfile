@@ -18,6 +18,16 @@ COPY apps/api ./apps/api
 RUN npm install --omit=dev --prefix apps/api
 COPY scripts ./scripts
 RUN node --check apps/api/server.mjs && node --check scripts/seed-full-demo.mjs
+RUN set -eux; \
+    NODE_ENV=development PORT=18080 DB_FILE=/tmp/seed-validation.db WEB_DIST=/tmp/no-web UPLOAD_DIR=/tmp/seed-uploads BACKUP_DIR=/tmp/seed-backups APP_SECRET=seed-validation-secret-2026 \
+      node apps/api/server.mjs >/tmp/seed-server.log 2>&1 & \
+    pid=$!; \
+    sleep 3; \
+    if ! kill -0 "$pid" 2>/dev/null; then cat /tmp/seed-server.log; exit 1; fi; \
+    kill "$pid"; \
+    wait "$pid" || true; \
+    DB_FILE=/tmp/seed-validation.db node scripts/seed-full-demo.mjs; \
+    rm -rf /tmp/seed-validation.db /tmp/seed-validation.db-shm /tmp/seed-validation.db-wal /tmp/seed-uploads /tmp/seed-backups /tmp/seed-server.log
 COPY --from=web-builder /src/apps/web/dist ./apps/web/dist
 RUN mkdir -p /data /app/uploads && chown -R node:node /app /data
 USER node
