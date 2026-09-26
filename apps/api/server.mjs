@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates(id TEXT PRIMARY KEY, base_currency TEX
 CREATE TABLE IF NOT EXISTS automation_rules(key TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_logs(id TEXT PRIMARY KEY, rule_key TEXT NOT NULL, message TEXT NOT NULL, entity_type TEXT, entity_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS saved_views(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, entity_type TEXT NOT NULL, name TEXT NOT NULL, filters TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS bulk_operation_previews(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_ids TEXT NOT NULL DEFAULT '[]', operations TEXT NOT NULL DEFAULT '{}', expires_at TEXT NOT NULL, applied_at TEXT, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
 CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_id);
 CREATE INDEX IF NOT EXISTS idx_contacts_customer ON contacts(customer_id);
@@ -96,6 +97,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("CREATE INDEX IF NOT EXISTS idx_bulk_preview_expiry ON bulk_operation_previews(expires_at,applied_at)");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_campaign_events_recipient ON campaign_events(recipient_id,event_type,created_at)");}catch{}
 try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN unsubscribed_at TEXT");}catch{}
 try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN last_clicked_at TEXT");}catch{}
@@ -820,6 +822,83 @@ function customerScopeClause(user,alias='c'){
   }
   return {sql:` AND (${alias}.owner_id=? OR EXISTS(SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=${alias}.id AND cc.user_id=?))`,args:[user.user_id,user.user_id]};
 }
+
+function customerRowsByFilters(user,input={},limit=5000){
+  const filters=['c.deleted_at IS NULL'],args=[],access=customerScopeClause(user,'c');
+  if(access.sql){filters.push(access.sql.replace(/^\s*AND\s*/,'').trim());args.push(...access.args);}
+  for(const k of ['country','status','grade','source','industry','owner_id']){
+    const v=String(input?.[k]??'').trim();if(v){filters.push(`c.${k}=?`);args.push(v);}
+  }
+  const tagId=String(input?.tag_id??'').trim();if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag_id=?)');args.push(tagId);}
+  const customerType=String(input?.customer_type??'').trim();if(customerType){filters.push('c.customer_types LIKE ?');args.push(`%"${customerType}"%`);}
+  const keyword=String(input?.keyword??'').trim().toLowerCase();
+  if(keyword){
+    const like=`%${keyword}%`;
+    filters.push(`(LOWER(COALESCE(c.name,'')) LIKE ? OR LOWER(COALESCE(c.english_name,'')) LIKE ? OR LOWER(COALESCE(c.website,'')) LIKE ? OR LOWER(COALESCE(c.tax_no,'')) LIKE ? OR LOWER(COALESCE(c.registration_no,'')) LIKE ? OR LOWER(COALESCE(c.business_scope,'')) LIKE ? OR LOWER(COALESCE(c.custom_fields,'')) LIKE ?)`);
+    args.push(like,like,like,like,like,like,like);
+  }
+  return db.prepare(`SELECT c.*,u.display_name owner_name,
+    (SELECT COUNT(*) FROM contacts ct WHERE ct.customer_id=c.id AND ct.is_departed=0) active_contact_count,
+    (SELECT COUNT(*) FROM contact_channels ch JOIN contacts ct2 ON ct2.id=ch.contact_id WHERE ct2.customer_id=c.id AND ct2.is_departed=0) active_channel_count,
+    (SELECT MAX(a.occurred_at) FROM activities a WHERE a.customer_id=c.id) last_activity_at
+    FROM customers c LEFT JOIN users u ON u.id=c.owner_id WHERE ${filters.join(' AND ')} ORDER BY c.updated_at DESC LIMIT ?`).all(...args,Math.max(1,Math.min(5000,Number(limit||5000))));
+}
+function customerRowsByIds(user,ids=[]){
+  const unique=[...new Set((Array.isArray(ids)?ids:[]).map(String).filter(x=>/^[0-9a-f-]+$/i.test(x)))].slice(0,5000);if(!unique.length)return [];
+  const rows=db.prepare(`SELECT c.*,u.display_name owner_name FROM customers c LEFT JOIN users u ON u.id=c.owner_id WHERE c.deleted_at IS NULL AND c.id IN (${unique.map(()=>'?').join(',')})`).all(...unique);
+  return scopedRole(user)?rows.filter(x=>customerOwnedBy(user,x.id)):rows;
+}
+function cleanCustomerBulkOperations(input,user){
+  const setInput=input?.set&&typeof input.set==='object'?input.set:{},set={};
+  if(Object.prototype.hasOwnProperty.call(setInput,'status')){
+    const v=String(setInput.status||'');const allowed=['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist'];
+    if(!allowed.includes(v))throw new Error('invalid_bulk_status');set.status=v;
+  }
+  if(Object.prototype.hasOwnProperty.call(setInput,'grade')){
+    const v=String(setInput.grade||'').toUpperCase();if(!['A','B','C','D'].includes(v))throw new Error('invalid_bulk_grade');set.grade=v;
+  }
+  for(const k of ['source','industry']){
+    if(Object.prototype.hasOwnProperty.call(setInput,k))set[k]=String(setInput[k]??'').trim();
+  }
+  if(Object.prototype.hasOwnProperty.call(setInput,'owner_id')){
+    if(!['admin','manager'].includes(user.role))throw new Error('bulk_owner_forbidden');
+    const ownerId=String(setInput.owner_id||'');const owner=db.prepare('SELECT id FROM users WHERE id=? AND enabled=1').get(ownerId);if(!owner)throw new Error('invalid_owner');
+    set.owner_id=ownerId;
+  }
+  const cleanTags=v=>[...new Set((Array.isArray(v)?v:[]).map(String).filter(Boolean))].filter(id=>db.prepare('SELECT 1 FROM tags WHERE id=?').get(id));
+  const add_tag_ids=cleanTags(input?.add_tag_ids),remove_tag_ids=cleanTags(input?.remove_tag_ids).filter(x=>!add_tag_ids.includes(x));
+  if(!Object.keys(set).length&&!add_tag_ids.length&&!remove_tag_ids.length)throw new Error('bulk_no_operations');
+  return {set,add_tag_ids,remove_tag_ids};
+}
+function customerDataQuality(user){
+  const rows=customerRowsByFilters(user,{},5000),emailRows=db.prepare(`SELECT ct.customer_id,ch.value FROM contact_channels ch JOIN contacts ct ON ct.id=ch.contact_id JOIN customers c ON c.id=ct.customer_id WHERE c.deleted_at IS NULL AND ct.is_departed=0 AND LOWER(ch.channel)='email'`).all();
+  const invalidEmail=new Set(emailRows.filter(x=>!validEmail(String(x.value||''))).map(x=>x.customer_id));
+  const maps={name:new Map(),domain:new Map(),tax:new Map(),reg:new Map()};
+  const add=(map,key,id)=>{if(!key)return;if(!map.has(key))map.set(key,[]);map.get(key).push(id);};
+  for(const r of rows){add(maps.name,normalizeCompanyName(r.name||r.english_name||''),r.id);add(maps.domain,normalizeDomain(r.website||''),r.id);add(maps.tax,String(r.tax_no||'').replace(/\s+/g,'').toLowerCase(),r.id);add(maps.reg,String(r.registration_no||'').replace(/\s+/g,'').toLowerCase(),r.id);}
+  const result=[];const nowMs=Date.now();
+  for(const r of rows){
+    const issues=[],duplicateReasons=[];
+    if(!r.country)issues.push('missing_country');if(!r.industry)issues.push('missing_industry');if(!r.source)issues.push('missing_source');if(!r.grade)issues.push('missing_grade');
+    if(Number(r.active_contact_count||0)===0)issues.push('no_contact');
+    else if(Number(r.active_channel_count||0)===0)issues.push('no_contact_method');
+    if(r.website){try{const u=new URL(/^https?:\/\//i.test(r.website)?r.website:`https://${r.website}`);if(!u.hostname.includes('.'))issues.push('invalid_website');}catch{issues.push('invalid_website');}}
+    if(invalidEmail.has(r.id))issues.push('invalid_email');
+    const activityAt=r.last_activity_at||r.created_at,days=activityAt?Math.floor((nowMs-new Date(activityAt).getTime())/86400000):9999;
+    if(days>90&&!['won','blacklist'].includes(r.status))issues.push('stale_90');
+    const nameKey=normalizeCompanyName(r.name||r.english_name||''),domain=normalizeDomain(r.website||''),tax=String(r.tax_no||'').replace(/\s+/g,'').toLowerCase(),reg=String(r.registration_no||'').replace(/\s+/g,'').toLowerCase();
+    if(nameKey&&(maps.name.get(nameKey)||[]).length>1)duplicateReasons.push('公司名称重复');
+    if(domain&&(maps.domain.get(domain)||[]).length>1)duplicateReasons.push('官网域名重复');
+    if(tax&&(maps.tax.get(tax)||[]).length>1)duplicateReasons.push('税号重复');
+    if(reg&&(maps.reg.get(reg)||[]).length>1)duplicateReasons.push('注册号重复');
+    if(duplicateReasons.length)issues.push('duplicate_risk');
+    let score=100;
+    for(const x of issues){score-=({missing_country:8,missing_industry:6,missing_source:6,missing_grade:5,no_contact:22,no_contact_method:16,invalid_website:8,invalid_email:12,stale_90:8,duplicate_risk:25}[x]||5);}
+    result.push({id:r.id,name:r.name,english_name:r.english_name,country:r.country,status:r.status,grade:r.grade,source:r.source,industry:r.industry,owner_id:r.owner_id,owner_name:r.owner_name,active_contact_count:Number(r.active_contact_count||0),active_channel_count:Number(r.active_channel_count||0),last_activity_at:r.last_activity_at,days_since_activity:days,quality_score:Math.max(0,score),issues,duplicate_reasons:duplicateReasons});
+  }
+  return result;
+}
+
 function getPublicPoolRule(){
   const row=db.prepare("SELECT value FROM settings WHERE key='public_pool_rule'").get();
   return parseJSON(row?.value,{enabled:true,inactive_days:90,protect_grades:['A'],eligible_statuses:['potential','contacted','following','dormant']});
@@ -2690,6 +2769,7 @@ const server = http.createServer(async (req,res)=>{
       for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`c.${k}=?`);args.push(v);}}
       const tagId=url.searchParams.get('tag_id');if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag_id=?)');args.push(tagId);}
       const customerType=url.searchParams.get('customer_type');if(customerType){filters.push('c.customer_types LIKE ?');args.push(`%"${customerType}"%`);}
+      const keyword=String(url.searchParams.get('keyword')||'').trim().toLowerCase();if(keyword){const like=`%${keyword}%`;filters.push("(LOWER(COALESCE(c.name,'')) LIKE ? OR LOWER(COALESCE(c.english_name,'')) LIKE ? OR LOWER(COALESCE(c.website,'')) LIKE ? OR LOWER(COALESCE(c.tax_no,'')) LIKE ? OR LOWER(COALESCE(c.registration_no,'')) LIKE ? OR LOWER(COALESCE(c.business_scope,'')) LIKE ? OR LOWER(COALESCE(c.custom_fields,'')) LIKE ?)");args.push(like,like,like,like,like,like,like);}
       const rows=db.prepare(`SELECT c.*,u.display_name owner_name FROM customers c LEFT JOIN users u ON u.id=c.owner_id WHERE ${filters.join(' AND ')} ORDER BY c.updated_at DESC LIMIT 5000`).all(...args)
         .map(r=>protectRow('customers',decodeRow(r,resourceMap.customers),user));
       audit(user,'export','customers',null,req,{count:rows.length,filters:Object.fromEntries(url.searchParams.entries())});
@@ -2697,6 +2777,52 @@ const server = http.createServer(async (req,res)=>{
     }
 
 
+
+    // ---- Customer bulk operations and data quality governance ----
+    if(p==='/api/customers/bulk/preview' && req.method==='POST'){
+      if(!user.user_id||!canWriteResource(user.role,'customers'))return json(res,403,{error:'forbidden'});
+      const b=await body(req),operations=cleanCustomerBulkOperations(b.operations||{},user);
+      const selected=Array.isArray(b.ids)&&b.ids.length?customerRowsByIds(user,b.ids):customerRowsByFilters(user,b.filters||{},5000);
+      const ids=selected.map(x=>x.id);if(!ids.length)return json(res,400,{error:'bulk_no_customers'});
+      db.prepare('DELETE FROM bulk_operation_previews WHERE expires_at<? OR applied_at IS NOT NULL').run(now());
+      const previewId=randomUUID(),expiresAt=new Date(Date.now()+10*60_000).toISOString();
+      db.prepare('INSERT INTO bulk_operation_previews(id,user_id,entity_type,entity_ids,operations,expires_at,created_at) VALUES(?,?,?,?,?,?,?)')
+        .run(previewId,user.user_id,'customers',JSON.stringify(ids),JSON.stringify(operations),expiresAt,now());
+      const sample=selected.slice(0,10).map(x=>({id:x.id,name:x.name,country:x.country,status:x.status,grade:x.grade,owner_id:x.owner_id,owner_name:x.owner_name}));
+      audit(user,'bulk_preview','customers',previewId,req,{count:ids.length,operations});
+      return json(res,200,{preview_id:previewId,expires_at:expiresAt,count:ids.length,sample,operations});
+    }
+    if(p==='/api/customers/bulk/apply' && req.method==='POST'){
+      if(!user.user_id||!canWriteResource(user.role,'customers'))return json(res,403,{error:'forbidden'});
+      const b=await body(req),preview=db.prepare('SELECT * FROM bulk_operation_previews WHERE id=? AND user_id=? AND entity_type=?').get(String(b.preview_id||''),user.user_id,'customers');
+      if(!preview)return json(res,404,{error:'bulk_preview_not_found'});if(preview.applied_at)return json(res,409,{error:'bulk_preview_already_applied'});if(preview.expires_at<now())return json(res,409,{error:'bulk_preview_expired'});
+      const ids=parseJSON(preview.entity_ids,[])||[],operations=parseJSON(preview.operations,{})||{},current=customerRowsByIds(user,ids);
+      if(current.length!==ids.length)return json(res,409,{error:'bulk_permission_or_data_changed',expected:ids.length,current:current.length});
+      db.exec('BEGIN IMMEDIATE');
+      try{
+        const set=operations.set||{},entries=Object.entries(set);
+        if(entries.length){
+          const assignments=entries.map(([k])=>`${k}=?`);
+          const values=entries.map(([,v])=>v);
+          if(Object.prototype.hasOwnProperty.call(set,'owner_id'))assignments.push("pool_status='assigned'","pool_entered_at=NULL","pool_reason=NULL");
+          assignments.push('updated_at=?');
+          const stmt=db.prepare(`UPDATE customers SET ${assignments.join(',')} WHERE id=?`);
+          for(const id of ids)stmt.run(...values,now(),id);
+        }
+        const add=db.prepare('INSERT OR IGNORE INTO customer_tags(customer_id,tag_id) VALUES(?,?)'),del=db.prepare('DELETE FROM customer_tags WHERE customer_id=? AND tag_id=?');
+        for(const id of ids){for(const tid of (operations.add_tag_ids||[]))add.run(id,tid);for(const tid of (operations.remove_tag_ids||[]))del.run(id,tid);}
+        db.prepare('UPDATE bulk_operation_previews SET applied_at=? WHERE id=?').run(now(),preview.id);
+        db.exec('COMMIT');
+      }catch(e){db.exec('ROLLBACK');throw e;}
+      audit(user,'bulk_apply','customers',preview.id,req,{count:ids.length,operations});
+      return json(res,200,{ok:true,count:ids.length,operations});
+    }
+    if(p==='/api/customers/data-quality' && req.method==='GET'){
+      const issue=String(url.searchParams.get('issue')||''),all=customerDataQuality(user),filtered=issue?all.filter(x=>x.issues.includes(issue)):all.filter(x=>x.issues.length);
+      const summary={total_customers:all.length,customers_with_issues:all.filter(x=>x.issues.length).length,average_score:all.length?Number((all.reduce((a,x)=>a+x.quality_score,0)/all.length).toFixed(1)):100,issues:{}};
+      for(const row of all)for(const code of row.issues)summary.issues[code]=(summary.issues[code]||0)+1;
+      return json(res,200,{summary,issue,data:filtered.sort((a,b)=>a.quality_score-b.quality_score).slice(0,500)});
+    }
 
     // ---- Customer profile completeness / value / potential insights ----
     {
@@ -3232,7 +3358,7 @@ const server = http.createServer(async (req,res)=>{
           else if(key==='quotationItems'){filters.push(`quotation_id IN (SELECT q.id FROM quotations q WHERE q.customer_id IN (${accessibleCustomerSql}))`);args.push(...scopeArgs);}
           else if(key==='orderItems'){filters.push(`order_id IN (SELECT o.id FROM orders o WHERE o.customer_id IN (${accessibleCustomerSql}))`);args.push(...scopeArgs);}
           else if(key==='shipments'){filters.push(`order_id IN (SELECT o.id FROM orders o WHERE o.customer_id IN (${accessibleCustomerSql}))`);args.push(...scopeArgs);}
-        } if(table==='customers'){filters.push('deleted_at IS NULL'); const exacts=['owner_id','country','status','grade','source','industry']; for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`${k}=?`);args.push(v);}} const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('customer_types LIKE ?');args.push(`%"${customerType}"%`);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);}}
+        } if(table==='customers'){filters.push('deleted_at IS NULL'); const exacts=['owner_id','country','status','grade','source','industry']; for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`${k}=?`);args.push(v);}} const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('customer_types LIKE ?');args.push(`%"${customerType}"%`);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);} const keyword=String(url.searchParams.get('keyword')||'').trim().toLowerCase();if(keyword){const like=`%${keyword}%`;filters.push("(LOWER(COALESCE(name,'')) LIKE ? OR LOWER(COALESCE(english_name,'')) LIKE ? OR LOWER(COALESCE(website,'')) LIKE ? OR LOWER(COALESCE(tax_no,'')) LIKE ? OR LOWER(COALESCE(registration_no,'')) LIKE ? OR LOWER(COALESCE(business_scope,'')) LIKE ? OR LOWER(COALESCE(custom_fields,'')) LIKE ?)");args.push(like,like,like,like,like,like,like);}}
         const where=filters.length?`WHERE ${filters.join(' AND ')}`:''; let total=db.prepare(`SELECT COUNT(*) c FROM ${table} ${where}`).get(...args).c; let data=db.prepare(`SELECT * FROM ${table} ${where} ORDER BY ${tableCols(table).includes('updated_at')?'updated_at':'rowid'} DESC LIMIT ? OFFSET ?`).all(...args,size,offset).map(r=>protectRow(key,decodeRow(r,cfg),user)); if(key==='customFields'){data=data.filter(r=>customFieldVisible(r,user.role));total=data.length;} return json(res,200,{data,total,page,size});
       }
       if(req.method==='GET' && id){ const row=db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id); if(!row)return json(res,404,{error:'not_found'}); const cid=key==='customers'?row.id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); return json(res,200,protectRow(key,decodeRow(row,cfg),user)); }
