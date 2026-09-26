@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS contact_channels(id TEXT PRIMARY KEY, contact_id TEXT
 CREATE TABLE IF NOT EXISTS channel_configs(id TEXT PRIMARY KEY, channel_key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, icon TEXT, link_mode TEXT NOT NULL DEFAULT 'copy', url_template TEXT, value_hint TEXT, copy_fallback INTEGER NOT NULL DEFAULT 1, enabled INTEGER NOT NULL DEFAULT 1, sort_order INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS brands(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, logo_url TEXT, website TEXT, country TEXT, group_name TEXT, main_products TEXT, positioning TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS customer_brands(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, brand_id TEXT NOT NULL, relation_type TEXT NOT NULL, authorized_regions TEXT NOT NULL DEFAULT '[]', exclusive INTEGER NOT NULL DEFAULT 0, start_date TEXT, end_date TEXT, sales_share REAL, price_band TEXT, notes TEXT, created_at TEXT NOT NULL, UNIQUE(customer_id, brand_id, relation_type), FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(brand_id) REFERENCES brands(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS channel_network_links(id TEXT PRIMARY KEY, brand_id TEXT NOT NULL, upstream_customer_id TEXT, downstream_customer_id TEXT NOT NULL, relationship_type TEXT NOT NULL DEFAULT 'distributor', channel_level INTEGER, territory TEXT, exclusive INTEGER NOT NULL DEFAULT 0, start_date TEXT, end_date TEXT, status TEXT NOT NULL DEFAULT 'active', notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(brand_id,upstream_customer_id,downstream_customer_id,relationship_type), FOREIGN KEY(brand_id) REFERENCES brands(id) ON DELETE CASCADE, FOREIGN KEY(upstream_customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(downstream_customer_id) REFERENCES customers(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS tags(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, category TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS customer_tags(customer_id TEXT NOT NULL, tag_id TEXT NOT NULL, PRIMARY KEY(customer_id,tag_id), FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS customer_collaborators(customer_id TEXT NOT NULL, user_id TEXT NOT NULL, added_by TEXT, created_at TEXT NOT NULL, PRIMARY KEY(customer_id,user_id), FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
@@ -1783,6 +1784,57 @@ const server = http.createServer(async (req,res)=>{
         for(const x of db.prepare('SELECT * FROM aftersales WHERE customer_id=?').all(customerId)) events.push({type:'aftersales',time:x.opened_at,title:`售后：${x.subject}`,summary:x.category,entity_id:x.id,status:x.status});
         events.sort((a,b)=>String(b.time||'').localeCompare(String(a.time||'')));
         return json(res,200,events);
+      }
+    }
+
+    // ---- Brand / customer channel distribution network ----
+    if(p==='/api/channel-network' && req.method==='GET'){
+      const brandId=String(url.searchParams.get('brand_id')||'');
+      const where=brandId?'WHERE n.brand_id=?':'',args=brandId?[brandId]:[];
+      const rows=db.prepare(`SELECT n.*,b.name brand_name,up.name upstream_name,down.name downstream_name
+        FROM channel_network_links n JOIN brands b ON b.id=n.brand_id
+        LEFT JOIN customers up ON up.id=n.upstream_customer_id JOIN customers down ON down.id=n.downstream_customer_id
+        ${where} ORDER BY b.name,COALESCE(n.channel_level,999),n.created_at`).all(...args);
+      return json(res,200,rows);
+    }
+    if(p==='/api/channel-network/tree' && req.method==='GET'){
+      const brandId=String(url.searchParams.get('brand_id')||'');if(!brandId)return json(res,400,{error:'brand_required'});
+      const brand=db.prepare('SELECT * FROM brands WHERE id=?').get(brandId);if(!brand)return json(res,404,{error:'brand_not_found'});
+      const edges=db.prepare(`SELECT n.*,up.name upstream_name,down.name downstream_name FROM channel_network_links n
+        LEFT JOIN customers up ON up.id=n.upstream_customer_id JOIN customers down ON down.id=n.downstream_customer_id WHERE n.brand_id=? ORDER BY COALESCE(n.channel_level,999),n.created_at`).all(brandId);
+      const byParent=new Map();for(const e of edges){const k=e.upstream_customer_id||'ROOT';if(!byParent.has(k))byParent.set(k,[]);byParent.get(k).push(e);}
+      const walk=(parentId,seen=new Set())=>(byParent.get(parentId||'ROOT')||[]).filter(e=>!seen.has(e.downstream_customer_id)).map(e=>{const next=new Set(seen);next.add(e.downstream_customer_id);return {id:e.downstream_customer_id,label:e.downstream_name,edge:e,children:walk(e.downstream_customer_id,next)};});
+      return json(res,200,{brand:{id:brand.id,name:brand.name},tree:walk(null),edges});
+    }
+    if(p==='/api/channel-network' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req),brandId=String(b.brand_id||''),down=String(b.downstream_customer_id||''),up=b.upstream_customer_id?String(b.upstream_customer_id):null;
+      if(!brandId||!down)return json(res,400,{error:'brand_and_downstream_required'});
+      if(up&&up===down)return json(res,400,{error:'self_reference'});
+      if(!db.prepare('SELECT 1 FROM brands WHERE id=?').get(brandId)||!db.prepare('SELECT 1 FROM customers WHERE id=? AND deleted_at IS NULL').get(down))return json(res,404,{error:'not_found'});
+      if(up&&!db.prepare('SELECT 1 FROM customers WHERE id=? AND deleted_at IS NULL').get(up))return json(res,404,{error:'upstream_not_found'});
+      if(up){
+        const edges=db.prepare('SELECT upstream_customer_id,downstream_customer_id FROM channel_network_links WHERE brand_id=?').all(brandId);
+        const children=new Map();for(const e of edges){if(!children.has(e.upstream_customer_id))children.set(e.upstream_customer_id,[]);children.get(e.upstream_customer_id).push(e.downstream_customer_id);}
+        const stack=[down],seen=new Set();while(stack.length){const cur=stack.pop();if(cur===up)return json(res,409,{error:'channel_cycle'});if(seen.has(cur))continue;seen.add(cur);for(const x of (children.get(cur)||[]))stack.push(x);}
+      }
+      const id=randomUUID();db.prepare('INSERT INTO channel_network_links(id,brand_id,upstream_customer_id,downstream_customer_id,relationship_type,channel_level,territory,exclusive,start_date,end_date,status,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id,brandId,up,down,b.relationship_type||'distributor',b.channel_level==null?null:Number(b.channel_level),b.territory||null,b.exclusive?1:0,b.start_date||null,b.end_date||null,b.status||'active',b.notes||null,now(),now());
+      audit(user,'create','channel_network',id,req,{brand_id:brandId,upstream_customer_id:up,downstream_customer_id:down});return json(res,201,db.prepare('SELECT * FROM channel_network_links WHERE id=?').get(id));
+    }
+    {
+      const cn=p.match(/^\/api\/channel-network\/([0-9a-f-]+)$/);
+      if(cn&&req.method==='PATCH'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM channel_network_links WHERE id=?').get(cn[1]);if(!old)return json(res,404,{error:'not_found'});
+        const b=await body(req);db.prepare('UPDATE channel_network_links SET relationship_type=?,channel_level=?,territory=?,exclusive=?,start_date=?,end_date=?,status=?,notes=?,updated_at=? WHERE id=?')
+          .run(b.relationship_type??old.relationship_type,b.channel_level===undefined?old.channel_level:(b.channel_level==null?null:Number(b.channel_level)),b.territory===undefined?old.territory:(b.territory||null),b.exclusive===undefined?old.exclusive:(b.exclusive?1:0),b.start_date===undefined?old.start_date:(b.start_date||null),b.end_date===undefined?old.end_date:(b.end_date||null),b.status??old.status,b.notes===undefined?old.notes:(b.notes||null),now(),old.id);
+        audit(user,'update','channel_network',old.id,req,b);return json(res,200,db.prepare('SELECT * FROM channel_network_links WHERE id=?').get(old.id));
+      }
+      if(cn&&req.method==='DELETE'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM channel_network_links WHERE id=?').get(cn[1]);if(!old)return json(res,404,{error:'not_found'});
+        db.prepare('DELETE FROM channel_network_links WHERE id=?').run(old.id);audit(user,'delete','channel_network',old.id,req);return json(res,200,{ok:true});
       }
     }
 
