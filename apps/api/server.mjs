@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHmac } from 'node:crypto';
+import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHmac, createHash } from 'node:crypto';
 import { URL } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -67,6 +67,10 @@ CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 db.exec(schema);
 try{db.exec("ALTER TABLE tasks ADD COLUMN automation_key TEXT");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_automation_key ON tasks(automation_key)");}catch{}
+try{db.exec("ALTER TABLE documents ADD COLUMN storage_path TEXT");}catch{}
+try{db.exec("ALTER TABLE documents ADD COLUMN size_bytes INTEGER");}catch{}
+try{db.exec("ALTER TABLE documents ADD COLUMN checksum TEXT");}catch{}
+try{db.exec("ALTER TABLE documents ADD COLUMN original_name TEXT");}catch{}
 
 const now = () => new Date().toISOString();
 const parseJSON = (v, fallback = null) => { try { return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
@@ -211,7 +215,7 @@ function json(res, status, data, extraHeaders={}) {
   res.writeHead(status, {'content-type':'application/json; charset=utf-8','access-control-allow-origin':CORS_ORIGIN,'access-control-allow-headers':'content-type, authorization','access-control-allow-methods':'GET,POST,PATCH,DELETE,OPTIONS',...extraHeaders});
   res.end(JSON.stringify(data));
 }
-function body(req) { return new Promise((resolve,reject)=>{ let raw=''; req.on('data',c=>{ raw+=c; if(raw.length>5_000_000){reject(new Error('payload too large'));req.destroy();}}); req.on('end',()=>{ if(!raw)return resolve({}); try{resolve(JSON.parse(raw));}catch{reject(new Error('invalid json'));}}); req.on('error',reject);}); }
+function body(req) { return new Promise((resolve,reject)=>{ let raw=''; req.on('data',c=>{ raw+=c; if(raw.length>25_000_000){reject(new Error('payload too large'));req.destroy();}}); req.on('end',()=>{ if(!raw)return resolve({}); try{resolve(JSON.parse(raw));}catch{reject(new Error('invalid json'));}}); req.on('error',reject);}); }
 function columns(table) { return db.prepare(`PRAGMA table_info(${table})`).all().map(x=>x.name); }
 const colCache = new Map();
 function tableCols(table){ if(!colCache.has(table)) colCache.set(table,columns(table)); return colCache.get(table); }
@@ -343,6 +347,42 @@ function renderOrderDocument(type,order,customer,items,shipment){
   </body></html>`;
 }
 
+
+const MAX_UPLOAD_BYTES=15*1024*1024;
+const BLOCKED_UPLOAD_EXT=new Set(['.exe','.dll','.bat','.cmd','.com','.scr','.msi','.ps1','.sh','.apk','.dmg','.pkg','.jar','.js','.mjs','.cjs','.html','.htm','.svg']);
+const INLINE_PREVIEW_MIME=new Set(['application/pdf','image/png','image/jpeg','image/webp','image/gif','text/plain','text/csv']);
+function safeUploadName(name='file'){
+  const base=path.basename(String(name)).replace(/[^\p{L}\p{N}._()\- ]/gu,'_').slice(0,180)||'file';
+  return base;
+}
+function attachmentCustomerId(entityType,entityId){
+  try{
+    if(entityType==='customer') return entityId;
+    if(entityType==='order') return db.prepare('SELECT customer_id FROM orders WHERE id=?').get(entityId)?.customer_id||null;
+    if(entityType==='inquiry') return db.prepare('SELECT customer_id FROM inquiries WHERE id=?').get(entityId)?.customer_id||null;
+    if(entityType==='opportunity') return db.prepare('SELECT customer_id FROM opportunities WHERE id=?').get(entityId)?.customer_id||null;
+    if(entityType==='quotation') return db.prepare('SELECT customer_id FROM quotations WHERE id=?').get(entityId)?.customer_id||null;
+    if(entityType==='sample') return db.prepare('SELECT customer_id FROM samples WHERE id=?').get(entityId)?.customer_id||null;
+    if(entityType==='contract') return db.prepare('SELECT customer_id FROM contracts WHERE id=?').get(entityId)?.customer_id||null;
+    if(entityType==='shipment') return db.prepare('SELECT o.customer_id FROM shipments s JOIN orders o ON o.id=s.order_id WHERE s.id=?').get(entityId)?.customer_id||null;
+    if(entityType==='aftersales') return db.prepare('SELECT customer_id FROM aftersales WHERE id=?').get(entityId)?.customer_id||null;
+    return null;
+  }catch{return null;}
+}
+function documentBuffer(d){
+  if(d.storage_path){
+    const root=path.resolve(UPLOAD_DIR),file=path.resolve(root,d.storage_path);
+    if(file===root||!file.startsWith(root+path.sep)||!fs.existsSync(file)) return null;
+    return fs.readFileSync(file);
+  }
+  return d.content_base64?Buffer.from(d.content_base64,'base64'):Buffer.alloc(0);
+}
+function removeStoredDocumentFile(d){
+  if(!d?.storage_path)return;
+  const root=path.resolve(UPLOAD_DIR),file=path.resolve(root,d.storage_path);
+  if(file!==root&&file.startsWith(root+path.sep)&&fs.existsSync(file))fs.unlinkSync(file);
+}
+
 const rate = new Map();
 function rateLimit(req){ const ip=req.socket.remoteAddress||'x', t=Date.now(), w=60_000; const x=rate.get(ip)||{start:t,count:0}; if(t-x.start>w){x.start=t;x.count=0;} x.count++; rate.set(ip,x); return x.count<=300; }
 
@@ -465,6 +505,51 @@ const server = http.createServer(async (req,res)=>{
 
 
 
+
+    // ---- Real file attachments: filesystem storage + document metadata ----
+    if(p==='/api/files' && req.method==='GET'){
+      const entityType=String(url.searchParams.get('entity_type')||''),entityId=String(url.searchParams.get('entity_id')||'');
+      if(!entityType||!entityId)return json(res,400,{error:'entity_required'});
+      const cid=attachmentCustomerId(entityType,entityId);
+      if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'});
+      const rows=db.prepare('SELECT id,entity_type,entity_id,category,name,original_name,version,mime_type,size_bytes,checksum,notes,uploaded_by,created_at,storage_path IS NOT NULL stored FROM documents WHERE entity_type=? AND entity_id=? ORDER BY created_at DESC').all(entityType,entityId);
+      return json(res,200,rows);
+    }
+    if(p==='/api/files/upload' && req.method==='POST'){
+      if(!canWriteResource(user.role,'documents'))return json(res,403,{error:'forbidden'});
+      const b=await body(req),entityType=String(b.entity_type||''),entityId=String(b.entity_id||''),originalName=safeUploadName(b.file_name||'file');
+      if(!entityType||!entityId)return json(res,400,{error:'entity_required'});
+      const cid=attachmentCustomerId(entityType,entityId);
+      if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'});
+      if(!cid&&entityType!=='customer')return json(res,400,{error:'invalid_entity'});
+      const ext=path.extname(originalName).toLowerCase(); if(BLOCKED_UPLOAD_EXT.has(ext))return json(res,400,{error:'blocked_file_type'});
+      let raw=String(b.content_base64||''); const comma=raw.indexOf(','); if(comma>=0)raw=raw.slice(comma+1);
+      let buf;try{buf=Buffer.from(raw,'base64');}catch{return json(res,400,{error:'invalid_file_data'});}
+      if(!buf.length)return json(res,400,{error:'empty_file'});
+      if(buf.length>MAX_UPLOAD_BYTES)return json(res,413,{error:'file_too_large',max_bytes:MAX_UPLOAD_BYTES});
+      const category=String(b.category||'attachment'),mime=String(b.mime_type||'application/octet-stream').slice(0,120);
+      const count=db.prepare('SELECT COUNT(*) c FROM documents WHERE entity_type=? AND entity_id=? AND category=? AND COALESCE(original_name,name)=?').get(entityType,entityId,category,originalName).c;
+      const version=`V${Number(count)+1}`,id=randomUUID(),storedName=`${id}${ext}`,relative=path.join(entityType,entityId,storedName);
+      const dir=path.resolve(UPLOAD_DIR,entityType,entityId);fs.mkdirSync(dir,{recursive:true});
+      const full=path.resolve(UPLOAD_DIR,relative),root=path.resolve(UPLOAD_DIR);
+      if(!full.startsWith(root+path.sep))return json(res,400,{error:'invalid_path'});
+      fs.writeFileSync(full,buf,{flag:'wx'});
+      const checksum=createHash('sha256').update(buf).digest('hex');
+      db.prepare('INSERT INTO documents(id,entity_type,entity_id,category,name,original_name,version,storage_path,size_bytes,checksum,mime_type,notes,uploaded_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id,entityType,entityId,category,originalName,originalName,version,relative,buf.length,checksum,mime,b.notes||null,user.user_id,now());
+      audit(user,'upload','documents',id,req,{entity_type:entityType,entity_id:entityId,name:originalName,size:buf.length,checksum});
+      return json(res,201,db.prepare('SELECT id,entity_type,entity_id,category,name,original_name,version,mime_type,size_bytes,checksum,notes,uploaded_by,created_at FROM documents WHERE id=?').get(id));
+    }
+    {
+      const fileDelete=p.match(/^\/api\/files\/([0-9a-f-]+)$/);
+      if(fileDelete&&req.method==='DELETE'){
+        if(!canWriteResource(user.role,'documents'))return json(res,403,{error:'forbidden'});
+        const d=db.prepare('SELECT * FROM documents WHERE id=?').get(fileDelete[1]);if(!d)return json(res,404,{error:'not_found'});
+        const cid=attachmentCustomerId(d.entity_type,d.entity_id);if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'});
+        removeStoredDocumentFile(d);db.prepare('DELETE FROM documents WHERE id=?').run(d.id);audit(user,'delete_file','documents',d.id,req,{name:d.name});return json(res,200,{ok:true});
+      }
+    }
+
     // ---- Commercial document generation ----
     {
       const genDoc=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/generate-document$/);
@@ -481,14 +566,19 @@ const server = http.createServer(async (req,res)=>{
       const previewDoc=p.match(/^\/api\/documents\/([0-9a-f-]+)\/preview$/);
       if(previewDoc&&req.method==='GET'){
         const d=db.prepare('SELECT * FROM documents WHERE id=?').get(previewDoc[1]);if(!d)return json(res,404,{error:'not_found'});
-        const html=d.content_base64?Buffer.from(d.content_base64,'base64').toString('utf8'):'';
-        res.writeHead(200,{'content-type':d.mime_type||'text/html; charset=utf-8','cache-control':'no-store'});return res.end(html);
+        const cid=attachmentCustomerId(d.entity_type,d.entity_id);if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'});
+        const buf=documentBuffer(d);if(buf===null)return json(res,404,{error:'file_missing'});
+        const mime=d.mime_type||'application/octet-stream';
+        if(d.storage_path&&!INLINE_PREVIEW_MIME.has(mime))return json(res,415,{error:'preview_not_supported',mime_type:mime});
+        res.writeHead(200,{'content-type':mime,'content-disposition':'inline','cache-control':'no-store','x-content-type-options':'nosniff'});return res.end(buf);
       }
       const downloadDoc=p.match(/^\/api\/documents\/([0-9a-f-]+)\/download$/);
       if(downloadDoc&&req.method==='GET'){
         const d=db.prepare('SELECT * FROM documents WHERE id=?').get(downloadDoc[1]);if(!d)return json(res,404,{error:'not_found'});
-        const buf=d.content_base64?Buffer.from(d.content_base64,'base64'):Buffer.from('');
-        res.writeHead(200,{'content-type':d.mime_type||'application/octet-stream','content-disposition':`attachment; filename="${String(d.name||'document').replace(/["\r\n]/g,'_')}"`});return res.end(buf);
+        const cid=attachmentCustomerId(d.entity_type,d.entity_id);if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'});
+        const buf=documentBuffer(d);if(buf===null)return json(res,404,{error:'file_missing'});
+        const filename=safeUploadName(d.original_name||d.name||'document');
+        res.writeHead(200,{'content-type':d.mime_type||'application/octet-stream','content-disposition':`attachment; filename*=UTF-8''${encodeURIComponent(filename)}`,'content-length':String(buf.length),'x-content-type-options':'nosniff'});return res.end(buf);
       }
     }
 
