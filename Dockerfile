@@ -15,6 +15,7 @@ ENV NODE_ENV=production \
     WEB_DIST=/app/apps/web/dist \
     UPLOAD_DIR=/app/uploads
 COPY apps/api ./apps/api
+RUN node --check apps/api/server.mjs
 COPY --from=web-builder /src/apps/web/dist ./apps/web/dist
 RUN mkdir -p /data /app/uploads && chown -R node:node /app /data
 USER node
