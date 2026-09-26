@@ -4,6 +4,7 @@ import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHmac, creat
 import { URL } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
+import nodemailer from 'nodemailer';
 
 const PORT = Number(process.env.PORT || 8787);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -94,6 +95,9 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0");}catch{}
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN send_error TEXT");}catch{}
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN provider_message_id TEXT");}catch{}
 try{db.exec("ALTER TABLE customers ADD COLUMN deleted_reason TEXT");}catch{}
 try{db.exec("ALTER TABLE customers ADD COLUMN deleted_by TEXT");}catch{}
 try{db.exec("ALTER TABLE users ADD COLUMN totp_last_counter INTEGER NOT NULL DEFAULT -1");}catch{}
@@ -578,6 +582,30 @@ function renderMarketingText(text='',ctx={}){
   const vars={customer_name:ctx.customer_name||'',contact_name:ctx.contact_name||'',country:ctx.country||'',company_name:companyProfile().name||'',email:ctx.email||''};
   return String(text).replace(/{{\s*([a-z_]+)\s*}}/gi,(_,k)=>vars[String(k).toLowerCase()]??'');
 }
+function smtpIntegration(){
+  return db.prepare("SELECT * FROM integrations WHERE enabled=1 AND type='email_smtp' ORDER BY updated_at DESC LIMIT 1").get();
+}
+function smtpConfig(row){
+  if(!row)return null;
+  const cfg=parseJSON(row.config,{})||{},host=String(cfg.host||'').trim(),port=Number(cfg.port||(cfg.secure?465:587)),username=String(cfg.username||'').trim(),password=row.secret_env?process.env[row.secret_env]||'':'';
+  return {host,port,secure:!!cfg.secure,username,password,from_name:String(cfg.from_name||companyProfile().name||'TradeFlow').trim(),from_email:String(cfg.from_email||username||'').trim(),reply_to:String(cfg.reply_to||'').trim(),reject_unauthorized:cfg.reject_unauthorized!==false};
+}
+function createSmtpTransport(row){
+  const cfg=smtpConfig(row);if(!cfg?.host||!cfg.from_email)throw new Error('smtp_config_incomplete');
+  if(cfg.username&&!cfg.password)throw new Error('smtp_password_env_missing');
+  const transport=nodemailer.createTransport({host:cfg.host,port:cfg.port,secure:cfg.secure,auth:cfg.username?{user:cfg.username,pass:cfg.password}:undefined,tls:{rejectUnauthorized:cfg.reject_unauthorized},connectionTimeout:10000,greetingTimeout:10000,socketTimeout:30000});
+  return {transport,cfg};
+}
+function validEmail(v=''){return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v).trim());}
+async function deliverEmail(row,{to,subject,text}){
+  if(!validEmail(to))throw new Error('invalid_recipient_email');
+  const {transport,cfg}=createSmtpTransport(row);
+  try{
+    const info=await transport.sendMail({from:{name:cfg.from_name,address:cfg.from_email},to:String(to).trim(),replyTo:cfg.reply_to||undefined,subject:String(subject||'').replace(/[\r\n]+/g,' ').slice(0,998),text:String(text||'')});
+    return {message_id:info.messageId||null,accepted:info.accepted||[],rejected:info.rejected||[],response:info.response||''};
+  }finally{try{transport.close()}catch{}}
+}
+
 async function emitIntegrationEvent(event,payload){
   const rows=db.prepare("SELECT * FROM integrations WHERE enabled=1 AND type='webhook'").all();
   for(const row of rows){
@@ -1589,6 +1617,26 @@ const server = http.createServer(async (req,res)=>{
       if(pli&&req.method==='DELETE'){
         if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
         db.prepare('DELETE FROM price_list_items WHERE id=?').run(pli[1]);return json(res,200,{ok:true});
+      }
+    }
+
+    // ---- SMTP email delivery ----
+    if(p==='/api/email/status' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const row=smtpIntegration(),cfg=row?smtpConfig(row):null;
+      return json(res,200,{configured:!!row,integration:row?{id:row.id,name:row.name,provider:row.provider,updated_at:row.updated_at}:null,config:cfg?{host:cfg.host,port:cfg.port,secure:cfg.secure,username:cfg.username,from_name:cfg.from_name,from_email:cfg.from_email,reply_to:cfg.reply_to,password_env_configured:!!(row.secret_env&&process.env[row.secret_env])}:null});
+    }
+    if(p==='/api/email/test' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const row=smtpIntegration();if(!row)return json(res,503,{error:'smtp_not_configured',message:'尚未配置并启用 SMTP 邮件集成'});
+      const b=await body(req),to=String(b.to||'').trim();if(!validEmail(to))return json(res,400,{error:'invalid_recipient_email',message:'测试收件邮箱格式无效'});
+      try{
+        const info=await deliverEmail(row,{to,subject:'TradeFlow SMTP Test',text:`This is a TradeFlow SMTP configuration test.\n\nTime: ${now()}\nNo customer campaign was sent.`});
+        db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),row.id,'email.test','success',250,String(info.response||info.message_id||'sent').slice(0,500),now());
+        audit(user,'test','email_smtp',row.id,req,{to,message_id:info.message_id});return json(res,200,{ok:true,message_id:info.message_id,response:info.response});
+      }catch(e){
+        const msg=String(e?.message||e).slice(0,500);db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),row.id,'email.test','failed',null,msg,now());
+        return json(res,502,{error:'smtp_test_failed',message:msg});
       }
     }
 

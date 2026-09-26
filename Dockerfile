@@ -15,6 +15,7 @@ ENV NODE_ENV=production \
     WEB_DIST=/app/apps/web/dist \
     UPLOAD_DIR=/app/uploads
 COPY apps/api ./apps/api
+RUN npm install --omit=dev --prefix apps/api
 COPY scripts ./scripts
 RUN node --check apps/api/server.mjs
 COPY --from=web-builder /src/apps/web/dist ./apps/web/dist
