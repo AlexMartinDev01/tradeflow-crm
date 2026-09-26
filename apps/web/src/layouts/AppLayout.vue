@@ -39,7 +39,7 @@ const showAdmin=computed(()=>['admin','manager'].includes(role.value));
 
   <div class="nav-group">订单履约</div><router-link class="nav" to="/contracts"><span class="label">合同管理</span></router-link>
   <router-link class="nav" to="/orders"><span class="label">订单执行</span></router-link>
-  <router-link class="nav" to="/shipments"><span class="label">出运执行</span></router-link>
+  <router-link class="nav" to="/shipments"><span class="label">出运执行</span></router-link><router-link class="nav" to="/customs"><span class="label">报关管理</span></router-link>
   <router-link class="nav" to="/aftersales"><span class="label">售后与投诉</span></router-link>
   <router-link v-if="showFinance" class="nav" to="/finance"><span class="label">回款与信用</span></router-link>
 
