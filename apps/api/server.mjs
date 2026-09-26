@@ -489,11 +489,63 @@ function resourceCustomerId(key,payloadOrId,isId=false){
     return null;
   }catch{return null;}
 }
+
+function customFieldDefs(entityType='customer'){
+  return db.prepare('SELECT * FROM custom_field_defs WHERE entity_type=? AND enabled=1 ORDER BY sort_order,id').all(entityType)
+    .map(r=>({...r,options:parseJSON(r.options,[]),visible_roles:parseJSON(r.visible_roles,[])}));
+}
+function customFieldVisible(def,role){
+  const roles=Array.isArray(def.visible_roles)?def.visible_roles:[];
+  return roles.length===0||roles.includes(role)||role==='admin';
+}
+function customValueKey(v){
+  if(v===null||v===undefined||v==='')return '';
+  return typeof v==='object'?JSON.stringify(v):String(v).trim().toLowerCase();
+}
+function validateCustomFieldValue(def,value){
+  if(value===null||value===undefined||value==='')return null;
+  switch(def.data_type){
+    case 'number':case 'amount': if(!Number.isFinite(Number(value)))return '必须是数字';break;
+    case 'date': if(Number.isNaN(Date.parse(String(value))))return '必须是有效日期';break;
+    case 'email': if(!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(value)))return '邮箱格式无效';break;
+    case 'url': try{new URL(/^https?:\/\//i.test(String(value))?String(value):`https://${value}`);}catch{return '网址格式无效';}break;
+    case 'boolean': if(![true,false,0,1,'0','1'].includes(value))return '必须是是/否值';break;
+    case 'select': if(Array.isArray(def.options)&&def.options.length&&!def.options.includes(value))return '不在允许选项中';break;
+    case 'multi_select':
+      if(!Array.isArray(value))return '必须是多选数组';
+      if(Array.isArray(def.options)&&def.options.length&&value.some(x=>!def.options.includes(x)))return '包含不允许的选项';
+      break;
+  }
+  return null;
+}
+function applyCustomerCustomFieldRules(incoming,role,customerId=null,existing={}){
+  const defs=customFieldDefs('customer'),visibleDefs=defs.filter(d=>customFieldVisible(d,role)),visibleKeys=new Set(visibleDefs.map(d=>d.field_key));
+  const merged={...(existing||{})};
+  for(const [k,v] of Object.entries(incoming||{}))if(visibleKeys.has(k))merged[k]=v;
+  const errors=[];
+  for(const def of visibleDefs){
+    const value=merged[def.field_key];
+    if(def.required&&(value===null||value===undefined||value===''||(Array.isArray(value)&&!value.length)))errors.push({field:def.field_key,label:def.label,error:'必填'});
+    const typeError=validateCustomFieldValue(def,value);if(typeError)errors.push({field:def.field_key,label:def.label,error:typeError});
+    if(def.unique_value&&customValueKey(value)){
+      const rows=db.prepare('SELECT id,custom_fields FROM customers WHERE deleted_at IS NULL AND id!=?').all(customerId||'');
+      const wanted=customValueKey(value);
+      if(rows.some(r=>customValueKey(parseJSON(r.custom_fields,{})?.[def.field_key])===wanted))errors.push({field:def.field_key,label:def.label,error:'值必须唯一'});
+    }
+  }
+  if(errors.length){const e=new Error('custom_field_validation_failed');e.details=errors;throw e;}
+  return merged;
+}
+
 function protectRow(key,row,user){
   if(!row)return row; const r={...row};
   if(!['admin','manager'].includes(user.role)){
     if(key==='quotations')delete r.margin_rate;
     if(key==='quotationItems')delete r.cost;
+  }
+  if(key==='customers'&&r.custom_fields&&typeof r.custom_fields==='object'){
+    const allowed=new Set(customFieldDefs('customer').filter(d=>customFieldVisible(d,user.role)).map(d=>d.field_key));
+    r.custom_fields=Object.fromEntries(Object.entries(r.custom_fields).filter(([k])=>allowed.has(k)));
   }
   return r;
 }
@@ -917,20 +969,22 @@ const server = http.createServer(async (req,res)=>{
       });
     }
     if(p==='/api/search' && req.method==='GET'){
-      const term=(url.searchParams.get('q')||'').trim(); if(!term) return json(res,200,[]); const like=`%${term}%`;
-      const results=db.prepare(`
-        SELECT DISTINCT c.id,c.name,c.english_name,c.country,c.city,c.industry,c.status,c.grade,c.website,c.tax_no,c.registration_no,c.owner_id,u.display_name owner_name
-        FROM customers c
-        LEFT JOIN users u ON u.id=c.owner_id
-        WHERE c.deleted_at IS NULL AND (
-          c.name LIKE ? OR c.english_name LIKE ? OR c.local_name LIKE ? OR c.website LIKE ? OR c.tax_no LIKE ? OR c.registration_no LIKE ? OR c.business_scope LIKE ? OR c.custom_fields LIKE ?
+      const term=(url.searchParams.get('q')||'').trim();if(!term)return json(res,200,[]);const like=`%${term}%`,scope=scopedRole(user)?' AND (c.owner_id=? OR EXISTS(SELECT 1 FROM customer_collaborators cca WHERE cca.customer_id=c.id AND cca.user_id=?))':'',scopeArgs=scopedRole(user)?[user.user_id,user.user_id]:[];
+      const base=db.prepare(`
+        SELECT DISTINCT c.*,u.display_name owner_name
+        FROM customers c LEFT JOIN users u ON u.id=c.owner_id
+        WHERE c.deleted_at IS NULL${scope} AND (
+          c.name LIKE ? OR c.english_name LIKE ? OR c.local_name LIKE ? OR c.website LIKE ? OR c.tax_no LIKE ? OR c.registration_no LIKE ? OR c.business_scope LIKE ?
           OR EXISTS (SELECT 1 FROM contacts ct WHERE ct.customer_id=c.id AND (ct.name LIKE ? OR ct.title LIKE ? OR ct.department LIKE ?))
           OR EXISTS (SELECT 1 FROM contacts ct JOIN contact_channels cc ON cc.contact_id=ct.id WHERE ct.customer_id=c.id AND cc.value LIKE ?)
           OR EXISTS (SELECT 1 FROM customer_tags x JOIN tags t ON t.id=x.tag_id WHERE x.customer_id=c.id AND t.name LIKE ?)
           OR EXISTS (SELECT 1 FROM customer_brands cb JOIN brands b ON b.id=cb.brand_id WHERE cb.customer_id=c.id AND b.name LIKE ?)
-        )
-        ORDER BY c.updated_at DESC LIMIT 100`).all(like,like,like,like,like,like,like,like,like,like,like,like,like,like);
-      return json(res,200,results);
+        ) ORDER BY c.updated_at DESC LIMIT 100`).all(...scopeArgs,like,like,like,like,like,like,like,like,like,like,like,like,like);
+      const searchableDefs=customFieldDefs('customer').filter(d=>d.searchable&&customFieldVisible(d,user.role)),lower=term.toLowerCase();
+      const customCandidates=db.prepare(`SELECT c.*,u.display_name owner_name FROM customers c LEFT JOIN users u ON u.id=c.owner_id WHERE c.deleted_at IS NULL${scope} ORDER BY c.updated_at DESC LIMIT 2000`).all(...scopeArgs)
+        .filter(r=>{const cf=parseJSON(r.custom_fields,{})||{};return searchableDefs.some(d=>String(cf[d.field_key]??'').toLowerCase().includes(lower));});
+      const map=new Map();for(const r of [...base,...customCandidates])if(!map.has(r.id))map.set(r.id,protectRow('customers',decodeRow(r,resourceMap.customers),user));
+      return json(res,200,[...map.values()].slice(0,100));
     }
 
     if(p==='/api/views' && req.method==='GET'){
@@ -1635,20 +1689,20 @@ const server = http.createServer(async (req,res)=>{
           else if(key==='orderItems'){filters.push(`order_id IN (SELECT o.id FROM orders o WHERE o.customer_id IN (${accessibleCustomerSql}))`);args.push(user.user_id,user.user_id);}
           else if(key==='shipments'){filters.push(`order_id IN (SELECT o.id FROM orders o WHERE o.customer_id IN (${accessibleCustomerSql}))`);args.push(user.user_id,user.user_id);}
         } if(table==='customers'){filters.push('deleted_at IS NULL'); const exacts=['owner_id','country','status','grade','source','industry']; for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`${k}=?`);args.push(v);}} const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('customer_types LIKE ?');args.push(`%"${customerType}"%`);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);}}
-        const where=filters.length?`WHERE ${filters.join(' AND ')}`:''; const total=db.prepare(`SELECT COUNT(*) c FROM ${table} ${where}`).get(...args).c; const data=db.prepare(`SELECT * FROM ${table} ${where} ORDER BY ${tableCols(table).includes('updated_at')?'updated_at':'rowid'} DESC LIMIT ? OFFSET ?`).all(...args,size,offset).map(r=>protectRow(key,decodeRow(r,cfg),user)); return json(res,200,{data,total,page,size});
+        const where=filters.length?`WHERE ${filters.join(' AND ')}`:''; let total=db.prepare(`SELECT COUNT(*) c FROM ${table} ${where}`).get(...args).c; let data=db.prepare(`SELECT * FROM ${table} ${where} ORDER BY ${tableCols(table).includes('updated_at')?'updated_at':'rowid'} DESC LIMIT ? OFFSET ?`).all(...args,size,offset).map(r=>protectRow(key,decodeRow(r,cfg),user)); if(key==='customFields'){data=data.filter(r=>customFieldVisible(r,user.role));total=data.length;} return json(res,200,{data,total,page,size});
       }
       if(req.method==='GET' && id){ const row=db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id); if(!row)return json(res,404,{error:'not_found'}); const cid=key==='customers'?row.id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); return json(res,200,protectRow(key,decodeRow(row,cfg),user)); }
       if(req.method==='POST' && !id){
-        const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; if(tableCols(table).includes('pool_status'))payload.pool_status='assigned'; } else { const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
+        const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ const cf=applyCustomerCustomFieldRules(b.custom_fields||{},user.role,null,{}); payload.custom_fields=JSON.stringify(cf); if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; if(tableCols(table).includes('pool_status'))payload.pool_status='assigned'; } else { const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
         if(table==='inquiries' && !payload.inquiry_no){cols.push('inquiry_no');vals.push(makeNo('INQ'));} if(table==='quotations'&&!payload.quote_no){cols.push('quote_no');vals.push(makeNo('QT'));} if(table==='contracts'&&!payload.contract_no){cols.push('contract_no');vals.push(makeNo('CT'));} if(table==='orders'&&!payload.order_no){cols.push('order_no');vals.push(makeNo('SO'));} if(table==='aftersales'){if(!payload.ticket_no){cols.push('ticket_no');vals.push(makeNo('AS'));} if(!payload.opened_at){const opened=now();cols.push('opened_at');vals.push(opened);if(tableCols(table).includes('sla_due_at')){cols.push('sla_due_at');vals.push(aftersalesSlaDue(payload.severity||'normal',opened));}}}
         if(table==='users'){ const password=String(b.password||'ChangeMe@123'); cols.push('password_hash');vals.push(hashPassword(password)); }
         db.prepare(`INSERT INTO ${table}(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`).run(...vals); audit(user,'create',key,newId,req,payload); return json(res,201,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(newId),cfg));
       }
-      if(req.method==='PATCH' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const b=await body(req), payload=sanitizePayload(cfg,b,false); if(table==='customers' && !['admin','manager'].includes(user.role)) delete payload.owner_id; if(table==='users' && b.password) payload.password_hash=hashPassword(String(b.password)); if(tableCols(table).includes('updated_at')) payload.updated_at=now(); const entries=Object.entries(payload); if(!entries.length) return json(res,400,{error:'no_fields'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); db.prepare(`UPDATE ${table} SET ${entries.map(([k])=>`${k}=?`).join(',')} WHERE id=?`).run(...entries.map(([,v])=>v),id); audit(user,'update',key,id,req,payload); return json(res,200,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),cfg)); }
+      if(req.method==='PATCH' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const b=await body(req), payload=sanitizePayload(cfg,b,false); if(table==='customers'&&b.custom_fields!==undefined){const oldRow=db.prepare('SELECT custom_fields FROM customers WHERE id=?').get(id);const merged=applyCustomerCustomFieldRules(b.custom_fields||{},user.role,id,parseJSON(oldRow?.custom_fields,{}));payload.custom_fields=JSON.stringify(merged);} if(table==='customers' && !['admin','manager'].includes(user.role)) delete payload.owner_id; if(table==='users' && b.password) payload.password_hash=hashPassword(String(b.password)); if(tableCols(table).includes('updated_at')) payload.updated_at=now(); const entries=Object.entries(payload); if(!entries.length) return json(res,400,{error:'no_fields'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); db.prepare(`UPDATE ${table} SET ${entries.map(([k])=>`${k}=?`).join(',')} WHERE id=?`).run(...entries.map(([,v])=>v),id); audit(user,'update',key,id,req,payload); return json(res,200,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),cfg)); }
       if(req.method==='DELETE' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); if(table==='customers') db.prepare('UPDATE customers SET deleted_at=?,updated_at=? WHERE id=?').run(now(),now(),id); else db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); audit(user,'delete',key,id,req); return json(res,200,{ok:true}); }
     }
 
     return json(res,404,{error:'not_found',path:p});
-  } catch(e){ console.error(req.requestId,e); return json(res,400,{error:'request_failed',message:e.message,request_id:req.requestId}); }
+  } catch(e){ console.error(req.requestId,e); return json(res,400,{error:e.message==='custom_field_validation_failed'?'custom_field_validation_failed':'request_failed',message:e.message,details:e.details||undefined,request_id:req.requestId}); }
 });
 server.listen(PORT,HOST,()=>console.log(`TradeFlow API listening on http://${HOST}:${PORT}/api`));
