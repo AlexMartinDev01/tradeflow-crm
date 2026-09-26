@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS customs_declarations(id TEXT PRIMARY KEY, declaration
 CREATE TABLE IF NOT EXISTS customs_declaration_items(id TEXT PRIMARY KEY, declaration_id TEXT NOT NULL, order_item_id TEXT, product_id TEXT, product_name TEXT NOT NULL, hs_code TEXT, customs_name TEXT, quantity REAL NOT NULL DEFAULT 0, unit TEXT, unit_price REAL NOT NULL DEFAULT 0, total_value REAL NOT NULL DEFAULT 0, origin_country TEXT, brand TEXT, model TEXT, material TEXT, usage TEXT, declaration_elements TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(declaration_id) REFERENCES customs_declarations(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, category TEXT, name TEXT NOT NULL, version TEXT, url TEXT, content_base64 TEXT, mime_type TEXT, notes TEXT, uploaded_by TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS aftersales(id TEXT PRIMARY KEY, ticket_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, order_id TEXT, category TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'normal', subject TEXT NOT NULL, description TEXT NOT NULL, responsible_team TEXT, solution TEXT, status TEXT NOT NULL DEFAULT 'open', satisfaction INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS knowledge_articles(id TEXT PRIMARY KEY, title TEXT NOT NULL, category TEXT, summary TEXT, content TEXT NOT NULL, tags TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'draft', source_ticket_id TEXT, use_count INTEGER NOT NULL DEFAULT 0, created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(source_ticket_id) REFERENCES aftersales(id) ON DELETE SET NULL, FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, segment_rule TEXT, status TEXT NOT NULL DEFAULT 'draft', scheduled_at TEXT, content TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS marketing_segments(id TEXT PRIMARY KEY, name TEXT NOT NULL, rules TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS email_templates(id TEXT PRIMARY KEY, name TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -99,6 +100,8 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_source_ticket ON knowledge_articles(source_ticket_id) WHERE source_ticket_id IS NOT NULL");}catch{}
+try{db.exec("CREATE INDEX IF NOT EXISTS idx_knowledge_status_category ON knowledge_articles(status,category,updated_at)");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_bulk_preview_expiry ON bulk_operation_previews(expires_at,applied_at)");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_campaign_events_recipient ON campaign_events(recipient_id,event_type,created_at)");}catch{}
 try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN unsubscribed_at TEXT");}catch{}
@@ -2605,6 +2608,101 @@ const server = http.createServer(async (req,res)=>{
 
 
 
+    // ---- Knowledge base for aftersales ----
+    if(p==='/api/knowledge' && req.method==='GET'){
+      const q=String(url.searchParams.get('q')||'').trim().toLowerCase(),category=String(url.searchParams.get('category')||'').trim(),requested=String(url.searchParams.get('status')||'published');
+      const canManage=['admin','manager'].includes(user.role)||canWriteResource(user.role,'aftersales');
+      const status=requested==='all'&&canManage?'all':(['draft','published','archived'].includes(requested)&&canManage?requested:'published');
+      const filters=[],args=[];
+      if(category){filters.push('k.category=?');args.push(category);}
+      if(status!=='all'){filters.push('k.status=?');args.push(status);}
+      if(q){const like='%'+q+'%';filters.push("(LOWER(k.title) LIKE ? OR LOWER(COALESCE(k.summary,'')) LIKE ? OR LOWER(k.content) LIKE ? OR LOWER(k.tags) LIKE ?)");args.push(like,like,like,like);}
+      const where=filters.length?'WHERE '+filters.join(' AND '):'';
+      const rows=db.prepare(`SELECT k.*,u.display_name created_by_name,a.ticket_no source_ticket_no
+        FROM knowledge_articles k LEFT JOIN users u ON u.id=k.created_by LEFT JOIN aftersales a ON a.id=k.source_ticket_id
+        ${where} ORDER BY CASE k.status WHEN 'published' THEN 0 WHEN 'draft' THEN 1 ELSE 2 END,k.use_count DESC,k.updated_at DESC LIMIT 500`)
+        .all(...args).map(x=>({...x,tags:parseJSON(x.tags,[])}));
+      return json(res,200,rows);
+    }
+    if(p==='/api/knowledge' && req.method==='POST'){
+      if(!canWriteResource(user.role,'aftersales')||!user.user_id)return json(res,403,{error:'forbidden'});
+      const b=await body(req),title=String(b.title||'').trim(),content=String(b.content||'').trim();if(!title||!content)return json(res,400,{error:'title_content_required'});
+      const status=['draft','published','archived'].includes(String(b.status||''))?String(b.status):'draft';
+      const tags=[...new Set((Array.isArray(b.tags)?b.tags:[]).map(x=>String(x).trim()).filter(Boolean))].slice(0,30),id=randomUUID();
+      db.prepare('INSERT INTO knowledge_articles(id,title,category,summary,content,tags,status,source_ticket_id,use_count,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id,title,b.category||null,String(b.summary||'').trim()||null,content,JSON.stringify(tags),status,null,0,user.user_id,now(),now());
+      audit(user,'create','knowledge_article',id,req,{title,status,category:b.category||null});return json(res,201,{id});
+    }
+    if(p==='/api/knowledge/recommend' && req.method==='GET'){
+      const ticketId=String(url.searchParams.get('ticket_id')||''),q=String(url.searchParams.get('q')||'').trim(),category=String(url.searchParams.get('category')||'').trim();
+      let query=q,cat=category;
+      if(ticketId){
+        const ticket=db.prepare('SELECT * FROM aftersales WHERE id=?').get(ticketId);if(!ticket)return json(res,404,{error:'ticket_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,ticket.customer_id))return json(res,403,{error:'forbidden'});
+        query=[ticket.subject,ticket.category].filter(Boolean).join(' ');cat=ticket.category||cat;
+      }
+      const words=[...new Set(String(query).toLowerCase().split(/[^\p{L}\p{N}]+/u).map(x=>x.trim()).filter(x=>x.length>=2))].slice(0,12);
+      const rows=db.prepare("SELECT k.*,u.display_name created_by_name FROM knowledge_articles k LEFT JOIN users u ON u.id=k.created_by WHERE k.status='published' ORDER BY k.use_count DESC,k.updated_at DESC LIMIT 500").all();
+      const scored=rows.map(x=>{
+        const title=String(x.title||'').toLowerCase(),summary=String(x.summary||'').toLowerCase(),content=String(x.content||'').toLowerCase(),tags=parseJSON(x.tags,[])||[];
+        let score=0;if(cat&&String(x.category||'')===cat)score+=8;
+        for(const w of words){if(title.includes(w))score+=4;if(summary.includes(w))score+=2;if(tags.some(t=>String(t).toLowerCase().includes(w)))score+=3;if(content.includes(w))score+=1;}
+        score+=Math.min(3,Math.log10(Number(x.use_count||0)+1));
+        return {...x,tags,relevance:Number(score.toFixed(2))};
+      }).filter(x=>x.relevance>0||(!query&&!cat)).sort((a,b)=>b.relevance-a.relevance||Number(b.use_count||0)-Number(a.use_count||0)).slice(0,8);
+      return json(res,200,scored);
+    }
+    {
+      const fromTicket=p.match(/^\/api\/knowledge\/from-ticket\/([0-9a-f-]+)$/);
+      if(fromTicket&&req.method==='POST'){
+        if(!canWriteResource(user.role,'aftersales')||!user.user_id)return json(res,403,{error:'forbidden'});
+        const ticket=db.prepare('SELECT * FROM aftersales WHERE id=?').get(fromTicket[1]);if(!ticket)return json(res,404,{error:'ticket_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,ticket.customer_id))return json(res,403,{error:'forbidden'});
+        if(!['resolved','closed'].includes(ticket.status))return json(res,409,{error:'ticket_not_resolved'});
+        if(!String(ticket.solution||'').trim())return json(res,409,{error:'ticket_solution_required'});
+        const existing=db.prepare('SELECT id FROM knowledge_articles WHERE source_ticket_id=?').get(ticket.id);if(existing)return json(res,409,{error:'knowledge_already_exists',article_id:existing.id});
+        const b=await body(req),id=randomUUID(),title=String(b.title||ticket.subject||'售后解决方案').trim(),status=['draft','published'].includes(String(b.status||''))?String(b.status):'draft';
+        const tags=[...new Set([ticket.category,ticket.severity,ticket.responsible_team,...(Array.isArray(b.tags)?b.tags:[])].map(x=>String(x||'').trim()).filter(Boolean))].slice(0,30);
+        const summary=String(b.summary||(`来源工单 ${ticket.ticket_no} · ${ticket.category||'未分类'}`)).trim();
+        // Privacy rule: do not copy ticket.description/customer complaint into the shared knowledge base by default.
+        db.prepare('INSERT INTO knowledge_articles(id,title,category,summary,content,tags,status,source_ticket_id,use_count,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(id,title,ticket.category||null,summary,String(ticket.solution).trim(),JSON.stringify(tags),status,ticket.id,0,user.user_id,now(),now());
+        audit(user,'create_from_ticket','knowledge_article',id,req,{ticket_id:ticket.id,status,title});return json(res,201,{id});
+      }
+      const article=p.match(/^\/api\/knowledge\/([0-9a-f-]+)$/);
+      if(article&&req.method==='GET'){
+        const row=db.prepare('SELECT k.*,u.display_name created_by_name,a.ticket_no source_ticket_no FROM knowledge_articles k LEFT JOIN users u ON u.id=k.created_by LEFT JOIN aftersales a ON a.id=k.source_ticket_id WHERE k.id=?').get(article[1]);
+        if(!row)return json(res,404,{error:'not_found'});if(row.status!=='published'&&!(['admin','manager'].includes(user.role)||canWriteResource(user.role,'aftersales')))return json(res,403,{error:'forbidden'});
+        return json(res,200,{...row,tags:parseJSON(row.tags,[])});
+      }
+      if(article&&req.method==='PATCH'){
+        if(!canWriteResource(user.role,'aftersales'))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM knowledge_articles WHERE id=?').get(article[1]);if(!old)return json(res,404,{error:'not_found'});
+        const b=await body(req),title=b.title===undefined?old.title:String(b.title||'').trim(),content=b.content===undefined?old.content:String(b.content||'').trim();
+        if(!title||!content)return json(res,400,{error:'title_content_required'});
+        const status=b.status===undefined?old.status:(['draft','published','archived'].includes(String(b.status))?String(b.status):old.status);
+        const tags=b.tags===undefined?parseJSON(old.tags,[]):[...new Set((Array.isArray(b.tags)?b.tags:[]).map(x=>String(x).trim()).filter(Boolean))].slice(0,30);
+        db.prepare('UPDATE knowledge_articles SET title=?,category=?,summary=?,content=?,tags=?,status=?,updated_at=? WHERE id=?')
+          .run(title,b.category===undefined?old.category:(b.category||null),b.summary===undefined?old.summary:(String(b.summary||'').trim()||null),content,JSON.stringify(tags),status,now(),old.id);
+        audit(user,'update','knowledge_article',old.id,req,{title,status});return json(res,200,{ok:true});
+      }
+      if(article&&req.method==='DELETE'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM knowledge_articles WHERE id=?').get(article[1]);if(!old)return json(res,404,{error:'not_found'});
+        db.prepare('DELETE FROM knowledge_articles WHERE id=?').run(old.id);audit(user,'delete','knowledge_article',old.id,req,{title:old.title});return json(res,200,{ok:true});
+      }
+      const apply=p.match(/^\/api\/knowledge\/([0-9a-f-]+)\/apply$/);
+      if(apply&&req.method==='POST'){
+        if(!canWriteResource(user.role,'aftersales'))return json(res,403,{error:'forbidden'});
+        const articleRow=db.prepare("SELECT * FROM knowledge_articles WHERE id=? AND status='published'").get(apply[1]);if(!articleRow)return json(res,404,{error:'not_found'});
+        const b=await body(req),ticket=db.prepare('SELECT * FROM aftersales WHERE id=?').get(String(b.ticket_id||''));if(!ticket)return json(res,404,{error:'ticket_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,ticket.customer_id))return json(res,403,{error:'forbidden'});
+        db.prepare('UPDATE aftersales SET solution=?,updated_at=? WHERE id=?').run(articleRow.content,now(),ticket.id);
+        db.prepare('UPDATE knowledge_articles SET use_count=use_count+1,updated_at=? WHERE id=?').run(now(),articleRow.id);
+        audit(user,'apply_knowledge','aftersales',ticket.id,req,{knowledge_id:articleRow.id});return json(res,200,{ok:true,solution:articleRow.content});
+      }
+    }
+
     // ---- Aftersales / complaint ticket workflow ----
     if(p==='/api/aftersales/summary' && req.method==='GET'){
       const access=customerScopeClause(user,'c');
@@ -3720,6 +3818,6 @@ const server = http.createServer(async (req,res)=>{
     }
 
     return json(res,404,{error:'not_found',path:p});
-  } catch(e){ console.error(req.requestId,e); const known=['custom_field_validation_failed','weak_password','currency_filter_required','invalid_report_entity','invalid_report_dimension','invalid_report_metric','invalid_automation_entity','automation_conditions_required','automation_actions_required','invalid_automation_condition','invalid_automation_condition_value','invalid_automation_action','automation_task_title_required','invalid_automation_tag','invalid_automation_action_value']; const code=known.includes(e.message)?e.message:'request_failed'; return json(res,400,{error:code,message:e.message,details:e.details||undefined,request_id:req.requestId}); }
+  } catch(e){ console.error(req.requestId,e); const known=['custom_field_validation_failed','weak_password','currency_filter_required','invalid_report_entity','invalid_report_dimension','invalid_report_metric','invalid_automation_entity','automation_conditions_required','automation_actions_required','invalid_automation_condition','invalid_automation_condition_value','invalid_automation_action','automation_task_title_required','invalid_automation_tag','invalid_automation_action_value','title_content_required','ticket_not_resolved','ticket_solution_required','knowledge_already_exists']; const code=known.includes(e.message)?e.message:'request_failed'; return json(res,400,{error:code,message:e.message,details:e.details||undefined,request_id:req.requestId}); }
 });
 server.listen(PORT,HOST,()=>console.log(`TradeFlow API listening on http://${HOST}:${PORT}/api`));
