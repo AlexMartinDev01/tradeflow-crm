@@ -71,6 +71,9 @@ try{db.exec("ALTER TABLE documents ADD COLUMN storage_path TEXT");}catch{}
 try{db.exec("ALTER TABLE documents ADD COLUMN size_bytes INTEGER");}catch{}
 try{db.exec("ALTER TABLE documents ADD COLUMN checksum TEXT");}catch{}
 try{db.exec("ALTER TABLE documents ADD COLUMN original_name TEXT");}catch{}
+try{db.exec("ALTER TABLE aftersales ADD COLUMN sla_due_at TEXT");}catch{}
+try{db.exec("ALTER TABLE aftersales ADD COLUMN closed_at TEXT");}catch{}
+try{db.exec("ALTER TABLE aftersales ADD COLUMN satisfaction_note TEXT");}catch{}
 
 const now = () => new Date().toISOString();
 const parseJSON = (v, fallback = null) => { try { return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
@@ -348,6 +351,10 @@ function renderOrderDocument(type,order,customer,items,shipment){
 }
 
 
+function aftersalesSlaDue(severity='normal',openedAt=now()){
+  const hours={critical:24,high:72,normal:168,low:336}[String(severity).toLowerCase()]||168;
+  return new Date(new Date(openedAt).getTime()+hours*3600_000).toISOString();
+}
 const MAX_UPLOAD_BYTES=15*1024*1024;
 const BLOCKED_UPLOAD_EXT=new Set(['.exe','.dll','.bat','.cmd','.com','.scr','.msi','.ps1','.sh','.apk','.dmg','.pkg','.jar','.js','.mjs','.cjs','.html','.htm','.svg']);
 const INLINE_PREVIEW_MIME=new Set(['application/pdf','image/png','image/jpeg','image/webp','image/gif','text/plain','text/csv']);
@@ -505,6 +512,50 @@ const server = http.createServer(async (req,res)=>{
 
 
 
+
+
+    // ---- Aftersales / complaint ticket workflow ----
+    if(p==='/api/aftersales/summary' && req.method==='GET'){
+      const rows=scopedRole(user)?
+        db.prepare("SELECT a.* FROM aftersales a JOIN customers c ON c.id=a.customer_id WHERE c.owner_id=?").all(user.user_id):
+        db.prepare("SELECT * FROM aftersales").all();
+      const open=rows.filter(x=>!['resolved','closed'].includes(x.status)).length;
+      const overdue=rows.filter(x=>!['resolved','closed'].includes(x.status)&&x.sla_due_at&&x.sla_due_at<now()).length;
+      const resolved=rows.filter(x=>['resolved','closed'].includes(x.status)).length;
+      const critical=rows.filter(x=>String(x.severity).toLowerCase()==='critical'&&!['closed'].includes(x.status)).length;
+      return json(res,200,{total:rows.length,open,overdue,resolved,critical});
+    }
+    {
+      const afull=p.match(/^\/api\/workflows\/aftersales\/([0-9a-f-]+)\/full$/);
+      if(afull&&req.method==='GET'){
+        const a=db.prepare(`SELECT a.*,c.name customer_name,o.order_no FROM aftersales a
+          JOIN customers c ON c.id=a.customer_id LEFT JOIN orders o ON o.id=a.order_id WHERE a.id=?`).get(afull[1]);
+        if(!a)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,a.customer_id))return json(res,403,{error:'forbidden'});
+        const docs=db.prepare("SELECT id,entity_type,entity_id,category,name,original_name,version,mime_type,size_bytes,notes,created_at,storage_path IS NOT NULL stored FROM documents WHERE entity_type='aftersales' AND entity_id=? ORDER BY created_at DESC").all(a.id);
+        return json(res,200,{...a,sla_status:['resolved','closed'].includes(a.status)?'completed':(a.sla_due_at&&a.sla_due_at<now()?'overdue':'within_sla'),documents:docs});
+      }
+      const astatus=p.match(/^\/api\/workflows\/aftersales\/([0-9a-f-]+)\/status$/);
+      if(astatus&&req.method==='POST'){
+        const a=db.prepare('SELECT * FROM aftersales WHERE id=?').get(astatus[1]);if(!a)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,a.customer_id))return json(res,403,{error:'forbidden'});
+        if(!canWriteResource(user.role,'aftersales'))return json(res,403,{error:'forbidden'});
+        const b=await body(req),next=String(b.status||''),allowed=['open','investigating','awaiting_customer','resolved','closed'];
+        if(!allowed.includes(next))return json(res,400,{error:'invalid_status'});
+        const resolvedAt=['resolved','closed'].includes(next)?(a.resolved_at||now()):null,closedAt=next==='closed'?now():null;
+        db.prepare('UPDATE aftersales SET status=?,resolved_at=?,closed_at=COALESCE(?,closed_at),solution=COALESCE(?,solution),updated_at=? WHERE id=?').run(next,resolvedAt,closedAt,b.solution||null,now(),a.id);
+        audit(user,'change_status','aftersales',a.id,req,{from:a.status,to:next,solution:b.solution||null});
+        return json(res,200,db.prepare('SELECT * FROM aftersales WHERE id=?').get(a.id));
+      }
+      const arate=p.match(/^\/api\/workflows\/aftersales\/([0-9a-f-]+)\/satisfaction$/);
+      if(arate&&req.method==='POST'){
+        const a=db.prepare('SELECT * FROM aftersales WHERE id=?').get(arate[1]);if(!a)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,a.customer_id))return json(res,403,{error:'forbidden'});
+        const b=await body(req),score=Math.min(5,Math.max(1,Number(b.satisfaction||0)));if(!score)return json(res,400,{error:'invalid_score'});
+        db.prepare('UPDATE aftersales SET satisfaction=?,satisfaction_note=?,updated_at=? WHERE id=?').run(score,b.note||null,now(),a.id);
+        audit(user,'rate','aftersales',a.id,req,{satisfaction:score});return json(res,200,db.prepare('SELECT * FROM aftersales WHERE id=?').get(a.id));
+      }
+    }
 
     // ---- Real file attachments: filesystem storage + document metadata ----
     if(p==='/api/files' && req.method==='GET'){
@@ -975,7 +1026,7 @@ const server = http.createServer(async (req,res)=>{
       if(req.method==='GET' && id){ const row=db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id); if(!row)return json(res,404,{error:'not_found'}); const cid=key==='customers'?row.id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); return json(res,200,protectRow(key,decodeRow(row,cfg),user)); }
       if(req.method==='POST' && !id){
         const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; } else { const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
-        if(table==='inquiries' && !payload.inquiry_no){cols.push('inquiry_no');vals.push(makeNo('INQ'));} if(table==='quotations'&&!payload.quote_no){cols.push('quote_no');vals.push(makeNo('QT'));} if(table==='contracts'&&!payload.contract_no){cols.push('contract_no');vals.push(makeNo('CT'));} if(table==='orders'&&!payload.order_no){cols.push('order_no');vals.push(makeNo('SO'));} if(table==='aftersales'&&!payload.ticket_no){cols.push('ticket_no');vals.push(makeNo('AS'));}
+        if(table==='inquiries' && !payload.inquiry_no){cols.push('inquiry_no');vals.push(makeNo('INQ'));} if(table==='quotations'&&!payload.quote_no){cols.push('quote_no');vals.push(makeNo('QT'));} if(table==='contracts'&&!payload.contract_no){cols.push('contract_no');vals.push(makeNo('CT'));} if(table==='orders'&&!payload.order_no){cols.push('order_no');vals.push(makeNo('SO'));} if(table==='aftersales'){if(!payload.ticket_no){cols.push('ticket_no');vals.push(makeNo('AS'));} if(!payload.opened_at){const opened=now();cols.push('opened_at');vals.push(opened);if(tableCols(table).includes('sla_due_at')){cols.push('sla_due_at');vals.push(aftersalesSlaDue(payload.severity||'normal',opened));}}}
         if(table==='users'){ const password=String(b.password||'ChangeMe@123'); cols.push('password_hash');vals.push(hashPassword(password)); }
         db.prepare(`INSERT INTO ${table}(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`).run(...vals); audit(user,'create',key,newId,req,payload); return json(res,201,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(newId),cfg));
       }
