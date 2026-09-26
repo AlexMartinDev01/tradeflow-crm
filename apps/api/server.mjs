@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS price_list_items(id TEXT PRIMARY KEY, price_list_id T
 CREATE TABLE IF NOT EXISTS product_market_rules(id TEXT PRIMARY KEY, product_id TEXT NOT NULL, country TEXT, rule_type TEXT NOT NULL, required_certifications TEXT NOT NULL DEFAULT '[]', notes TEXT, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(product_id) REFERENCES products(id) ON DELETE CASCADE);
 
 CREATE TABLE IF NOT EXISTS contracts(id TEXT PRIMARY KEY, contract_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, quotation_id TEXT, amount REAL, currency TEXT DEFAULT 'USD', signed_at TEXT, effective_from TEXT, effective_to TEXT, status TEXT DEFAULT 'draft', terms TEXT, attachments TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS contract_versions(id TEXT PRIMARY KEY, contract_id TEXT NOT NULL, version INTEGER NOT NULL, amount REAL, currency TEXT, effective_from TEXT, effective_to TEXT, terms TEXT, snapshot TEXT NOT NULL DEFAULT '{}', created_by TEXT, created_at TEXT NOT NULL, UNIQUE(contract_id,version), FOREIGN KEY(contract_id) REFERENCES contracts(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY, order_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, quotation_id TEXT, contract_id TEXT, customer_po TEXT, status TEXT NOT NULL DEFAULT 'pending', currency TEXT DEFAULT 'USD', incoterm TEXT, payment_terms TEXT, total REAL NOT NULL DEFAULT 0, requested_delivery TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS order_changes(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, field_name TEXT NOT NULL, old_value TEXT, new_value TEXT, changed_by TEXT, note TEXT, created_at TEXT NOT NULL, FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS order_items(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, product_id TEXT, product_name TEXT NOT NULL, quantity REAL NOT NULL, unit TEXT, unit_price REAL NOT NULL, amount REAL NOT NULL, delivery_date TEXT, FOREIGN KEY(order_id) REFERENCES orders(id) ON DELETE CASCADE);
@@ -82,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("ALTER TABLE contracts ADD COLUMN current_version INTEGER NOT NULL DEFAULT 1");}catch{}
 try{db.exec("ALTER TABLE products ADD COLUMN floor_price REAL");}catch{}
 try{db.exec("ALTER TABLE contacts ADD COLUMN anniversary TEXT");}catch{}
 try{db.exec("ALTER TABLE tasks ADD COLUMN automation_key TEXT");}catch{}
@@ -1379,6 +1381,60 @@ const server = http.createServer(async (req,res)=>{
         if(old)db.prepare('UPDATE credit_profiles SET rating=?,credit_limit=?,currency=?,payment_days=?,insured_limit=?,notes=?,updated_at=? WHERE customer_id=?').run(b.rating||null,Number(b.credit_limit||0),b.currency||'USD',Number(b.payment_days||0),Number(b.insured_limit||0),b.notes||null,now(),customerId);
         else db.prepare('INSERT INTO credit_profiles(id,customer_id,rating,credit_limit,currency,payment_days,insured_limit,notes,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run(id,customerId,b.rating||null,Number(b.credit_limit||0),b.currency||'USD',Number(b.payment_days||0),Number(b.insured_limit||0),b.notes||null,now());
         audit(user,'upsert','credit_profile',id,req,{customer_id:customerId});return json(res,200,db.prepare('SELECT * FROM credit_profiles WHERE customer_id=?').get(customerId));
+      }
+    }
+
+    // ---- Contract workbench / versioning ----
+    {
+      const qcontract=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/to-contract$/);
+      if(qcontract&&req.method==='POST'){
+        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qcontract[1]);if(!q)return json(res,404,{error:'quotation_not_found'});
+        if(!['approved','sent','accepted'].includes(q.status))return json(res,409,{error:'quotation_not_approved'});
+        if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
+        const existing=db.prepare('SELECT * FROM contracts WHERE quotation_id=? ORDER BY created_at DESC LIMIT 1').get(q.id);
+        if(existing)return json(res,200,existing);
+        const b=await body(req),id=randomUUID(),no=makeNo('CT'),terms=b.terms||q.payment_terms||'';
+        db.prepare('INSERT INTO contracts(id,contract_no,customer_id,quotation_id,amount,currency,effective_from,effective_to,status,terms,attachments,current_version,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(id,no,q.customer_id,q.id,q.total,q.currency,b.effective_from||null,b.effective_to||null,'draft',terms,'[]',1,now(),now());
+        db.prepare('INSERT INTO contract_versions(id,contract_id,version,amount,currency,effective_from,effective_to,terms,snapshot,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+          .run(randomUUID(),id,1,q.total,q.currency,b.effective_from||null,b.effective_to||null,terms,JSON.stringify({quotation_id:q.id,quote_no:q.quote_no,quotation_version:q.version}),user.user_id,now());
+        audit(user,'create_contract_from_quotation','contracts',id,req,{quotation_id:q.id});
+        return json(res,201,db.prepare('SELECT * FROM contracts WHERE id=?').get(id));
+      }
+
+      const cfull=p.match(/^\/api\/workflows\/contracts\/([0-9a-f-]+)\/full$/);
+      if(cfull&&req.method==='GET'){
+        const c=db.prepare('SELECT ct.*,cu.name customer_name,cu.english_name customer_english_name,q.quote_no FROM contracts ct JOIN customers cu ON cu.id=ct.customer_id LEFT JOIN quotations q ON q.id=ct.quotation_id WHERE ct.id=?').get(cfull[1]);
+        if(!c)return json(res,404,{error:'contract_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,c.customer_id))return json(res,403,{error:'forbidden'});
+        const versions=db.prepare('SELECT cv.*,u.display_name created_by_name FROM contract_versions cv LEFT JOIN users u ON u.id=cv.created_by WHERE cv.contract_id=? ORDER BY cv.version DESC').all(c.id).map(v=>({...v,snapshot:parseJSON(v.snapshot,{})}));
+        const orders=db.prepare('SELECT * FROM orders WHERE contract_id=? ORDER BY created_at DESC').all(c.id);
+        const documents=db.prepare("SELECT * FROM documents WHERE entity_type='contract' AND entity_id=? ORDER BY created_at DESC").all(c.id);
+        return json(res,200,{...c,versions,orders,documents});
+      }
+
+      const cver=p.match(/^\/api\/workflows\/contracts\/([0-9a-f-]+)\/new-version$/);
+      if(cver&&req.method==='POST'){
+        const c=db.prepare('SELECT * FROM contracts WHERE id=?').get(cver[1]);if(!c)return json(res,404,{error:'contract_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,c.customer_id))return json(res,403,{error:'forbidden'});
+        if(!canWriteResource(user.role,'contracts'))return json(res,403,{error:'forbidden'});
+        const b=await body(req),next=Number(c.current_version||1)+1;
+        const amount=b.amount===undefined?c.amount:Number(b.amount),currency=b.currency||c.currency,effectiveFrom=b.effective_from===undefined?c.effective_from:(b.effective_from||null),effectiveTo=b.effective_to===undefined?c.effective_to:(b.effective_to||null),terms=b.terms===undefined?c.terms:b.terms;
+        db.prepare("UPDATE contracts SET amount=?,currency=?,effective_from=?,effective_to=?,terms=?,current_version=?,status='draft',updated_at=? WHERE id=?").run(amount,currency,effectiveFrom,effectiveTo,terms,next,now(),c.id);
+        db.prepare('INSERT INTO contract_versions(id,contract_id,version,amount,currency,effective_from,effective_to,terms,snapshot,created_by,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+          .run(randomUUID(),c.id,next,amount,currency,effectiveFrom,effectiveTo,terms,JSON.stringify({previous_version:c.current_version||1}),user.user_id,now());
+        audit(user,'new_version','contracts',c.id,req,{version:next});return json(res,201,db.prepare('SELECT * FROM contracts WHERE id=?').get(c.id));
+      }
+
+      const cstatus=p.match(/^\/api\/workflows\/contracts\/([0-9a-f-]+)\/status$/);
+      if(cstatus&&req.method==='POST'){
+        const c=db.prepare('SELECT * FROM contracts WHERE id=?').get(cstatus[1]);if(!c)return json(res,404,{error:'contract_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,c.customer_id))return json(res,403,{error:'forbidden'});
+        const b=await body(req),next=String(b.status||''),allowed=['draft','pending_signature','signed','active','expired','terminated'];
+        if(!allowed.includes(next))return json(res,400,{error:'invalid_status'});
+        const signedAt=next==='signed'||next==='active'?(b.signed_at||c.signed_at||now()):c.signed_at;
+        db.prepare('UPDATE contracts SET status=?,signed_at=?,updated_at=? WHERE id=?').run(next,signedAt,now(),c.id);
+        audit(user,'change_status','contracts',c.id,req,{from:c.status,to:next});return json(res,200,db.prepare('SELECT * FROM contracts WHERE id=?').get(c.id));
       }
     }
 
