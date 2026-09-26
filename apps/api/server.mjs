@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS brands(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL
 CREATE TABLE IF NOT EXISTS customer_brands(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, brand_id TEXT NOT NULL, relation_type TEXT NOT NULL, authorized_regions TEXT NOT NULL DEFAULT '[]', exclusive INTEGER NOT NULL DEFAULT 0, start_date TEXT, end_date TEXT, sales_share REAL, price_band TEXT, notes TEXT, created_at TEXT NOT NULL, UNIQUE(customer_id, brand_id, relation_type), FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(brand_id) REFERENCES brands(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS tags(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, category TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS customer_tags(customer_id TEXT NOT NULL, tag_id TEXT NOT NULL, PRIMARY KEY(customer_id,tag_id), FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(tag_id) REFERENCES tags(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS customer_collaborators(customer_id TEXT NOT NULL, user_id TEXT NOT NULL, added_by TEXT, created_at TEXT NOT NULL, PRIMARY KEY(customer_id,user_id), FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS public_pool_events(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, action TEXT NOT NULL, from_owner_id TEXT, to_owner_id TEXT, reason TEXT, operated_by TEXT, created_at TEXT NOT NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE);
+
 CREATE TABLE IF NOT EXISTS custom_field_defs(id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, field_key TEXT NOT NULL, label TEXT NOT NULL, data_type TEXT NOT NULL, options TEXT NOT NULL DEFAULT '[]', group_name TEXT, required INTEGER NOT NULL DEFAULT 0, unique_value INTEGER NOT NULL DEFAULT 0, searchable INTEGER NOT NULL DEFAULT 1, visible_roles TEXT NOT NULL DEFAULT '[]', sort_order INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, UNIQUE(entity_type, field_key));
 CREATE TABLE IF NOT EXISTS activities(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, contact_id TEXT, type TEXT NOT NULL, subject TEXT, content TEXT NOT NULL, result TEXT, next_action TEXT, occurred_at TEXT NOT NULL, created_by TEXT, attachments TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE, FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS tasks(id TEXT PRIMARY KEY, customer_id TEXT, title TEXT NOT NULL, description TEXT, due_at TEXT, status TEXT NOT NULL DEFAULT 'todo', priority TEXT NOT NULL DEFAULT 'normal', assigned_to TEXT, created_by TEXT, reminder_at TEXT, recurring_rule TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -91,6 +94,11 @@ try{db.exec("ALTER TABLE campaigns ADD COLUMN subject TEXT");}catch{}
 try{db.exec("ALTER TABLE campaigns ADD COLUMN template_id TEXT");}catch{}
 try{db.exec("ALTER TABLE campaigns ADD COLUMN segment_id TEXT");}catch{}
 try{db.exec("ALTER TABLE campaigns ADD COLUMN sent_at TEXT");}catch{}
+try{db.exec("ALTER TABLE customers ADD COLUMN pool_status TEXT NOT NULL DEFAULT 'assigned'");}catch{}
+try{db.exec("ALTER TABLE customers ADD COLUMN pool_entered_at TEXT");}catch{}
+try{db.exec("ALTER TABLE customers ADD COLUMN pool_reason TEXT");}catch{}
+try{db.exec("CREATE INDEX IF NOT EXISTS idx_customers_pool ON customers(pool_status,pool_entered_at)");}catch{}
+try{db.exec("CREATE INDEX IF NOT EXISTS idx_customer_collaborators_user ON customer_collaborators(user_id,customer_id)");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_campaign_recipients_campaign ON campaign_recipients(campaign_id,status)");}catch{}
 try{db.exec("CREATE INDEX IF NOT EXISTS idx_marketing_consents_lookup ON marketing_consents(customer_id,contact_id,channel,updated_at)");}catch{}
 
@@ -123,6 +131,9 @@ const automationDefaults=[
 for(const [key,name,enabled,config] of automationDefaults){
   db.prepare('INSERT OR IGNORE INTO automation_rules(key,name,enabled,config,updated_at) VALUES(?,?,?,?,?)').run(key,name,enabled,JSON.stringify(config),now());
 }
+db.prepare("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('public_pool_rule',?,?)")
+  .run(JSON.stringify({enabled:true,inactive_days:90,protect_grades:['A'],eligible_statuses:['potential','contacted','following','dormant']}),now());
+
 function autoTask(key,customerId,title,description,dueAt,priority='normal',assignedTo=null){
   const exists=db.prepare('SELECT id FROM tasks WHERE automation_key=? LIMIT 1').get(key); if(exists)return false;
   db.prepare('INSERT INTO tasks(id,customer_id,title,description,due_at,status,priority,assigned_to,created_by,automation_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
@@ -365,9 +376,32 @@ function canWriteResource(role,key){
   const p=writePolicy[role]??new Set(); return p==='*'||p.has(key);
 }
 function scopedRole(user){return ['sales','followup'].includes(user.role);}
+function customerIsOwner(user,customerId){
+  if(!customerId)return false;
+  if(!scopedRole(user))return true;
+  return !!db.prepare('SELECT 1 ok FROM customers WHERE id=? AND owner_id=? AND deleted_at IS NULL').get(customerId,user.user_id);
+}
 function customerOwnedBy(user,customerId){
   if(!customerId||!scopedRole(user)) return true;
-  return !!db.prepare('SELECT 1 ok FROM customers WHERE id=? AND owner_id=? AND deleted_at IS NULL').get(customerId,user.user_id);
+  return !!db.prepare(`SELECT 1 ok FROM customers c WHERE c.id=? AND c.deleted_at IS NULL
+    AND (c.owner_id=? OR EXISTS(SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=c.id AND cc.user_id=?))`).get(customerId,user.user_id,user.user_id);
+}
+function getPublicPoolRule(){
+  const row=db.prepare("SELECT value FROM settings WHERE key='public_pool_rule'").get();
+  return parseJSON(row?.value,{enabled:true,inactive_days:90,protect_grades:['A'],eligible_statuses:['potential','contacted','following','dormant']});
+}
+function hasActiveCustomerBusiness(customerId){
+  const opp=db.prepare("SELECT COUNT(*) c FROM opportunities WHERE customer_id=? AND stage NOT IN ('won','lost')").get(customerId).c;
+  const ord=db.prepare("SELECT COUNT(*) c FROM orders WHERE customer_id=? AND status NOT IN ('completed','cancelled')").get(customerId).c;
+  return Number(opp)>0||Number(ord)>0;
+}
+function moveCustomerToPool(customerId,reason,operatorId=null){
+  const c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(customerId);if(!c)return null;
+  db.prepare("UPDATE customers SET owner_id=NULL,pool_status='public',pool_entered_at=?,pool_reason=?,updated_at=? WHERE id=?").run(now(),reason||'manual',now(),customerId);
+  db.prepare('DELETE FROM customer_collaborators WHERE customer_id=?').run(customerId);
+  db.prepare('INSERT INTO public_pool_events(id,customer_id,action,from_owner_id,to_owner_id,reason,operated_by,created_at) VALUES(?,?,?,?,?,?,?,?)')
+    .run(randomUUID(),customerId,'release',c.owner_id||null,null,reason||'manual',operatorId||null,now());
+  return db.prepare('SELECT * FROM customers WHERE id=?').get(customerId);
 }
 function resourceCustomerId(key,payloadOrId,isId=false){
   try{
@@ -1258,10 +1292,100 @@ const server = http.createServer(async (req,res)=>{
         if(!owner) return json(res,400,{error:'invalid_owner'});
         const before=db.prepare('SELECT owner_id FROM customers WHERE id=? AND deleted_at IS NULL').get(transfer[1]);
         if(!before) return json(res,404,{error:'not_found'});
-        db.prepare('UPDATE customers SET owner_id=?,updated_at=? WHERE id=?').run(ownerId,now(),transfer[1]);
+        db.prepare("UPDATE customers SET owner_id=?,pool_status='assigned',pool_entered_at=NULL,pool_reason=NULL,updated_at=? WHERE id=?").run(ownerId,now(),transfer[1]);
         audit(user,'transfer_owner','customers',transfer[1],req,{from:before.owner_id,to:ownerId});
         return json(res,200,{ok:true,owner});
       }
+    }
+
+
+    // ---- Customer collaborators + public pool ----
+    {
+      const collab=p.match(/^\/api\/customers\/([0-9a-f-]+)\/collaborators$/);
+      if(collab&&req.method==='GET'){
+        const cid=collab[1];if(scopedRole(user)&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'});
+        return json(res,200,db.prepare(`SELECT cc.user_id,u.username,u.display_name,u.role,cc.added_by,cc.created_at
+          FROM customer_collaborators cc JOIN users u ON u.id=cc.user_id WHERE cc.customer_id=? ORDER BY u.display_name`).all(cid));
+      }
+      if(collab&&req.method==='POST'){
+        const cid=collab[1],c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(cid);if(!c)return json(res,404,{error:'not_found'});
+        if(!['admin','manager'].includes(user.role)&&c.owner_id!==user.user_id)return json(res,403,{error:'forbidden'});
+        const b=await body(req),uid=String(b.user_id||'');if(!uid||uid===c.owner_id)return json(res,400,{error:'invalid_collaborator'});
+        const target=db.prepare("SELECT id FROM users WHERE id=? AND enabled=1").get(uid);if(!target)return json(res,400,{error:'invalid_user'});
+        db.prepare('INSERT OR IGNORE INTO customer_collaborators(customer_id,user_id,added_by,created_at) VALUES(?,?,?,?)').run(cid,uid,user.user_id,now());
+        audit(user,'add_collaborator','customers',cid,req,{user_id:uid});return json(res,201,{ok:true});
+      }
+      const collabDel=p.match(/^\/api\/customers\/([0-9a-f-]+)\/collaborators\/([0-9a-f-]+)$/);
+      if(collabDel&&req.method==='DELETE'){
+        const cid=collabDel[1],c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(cid);if(!c)return json(res,404,{error:'not_found'});
+        if(!['admin','manager'].includes(user.role)&&c.owner_id!==user.user_id)return json(res,403,{error:'forbidden'});
+        db.prepare('DELETE FROM customer_collaborators WHERE customer_id=? AND user_id=?').run(cid,collabDel[2]);
+        audit(user,'remove_collaborator','customers',cid,req,{user_id:collabDel[2]});return json(res,200,{ok:true});
+      }
+
+      const release=p.match(/^\/api\/customers\/([0-9a-f-]+)\/release-to-pool$/);
+      if(release&&req.method==='POST'){
+        const cid=release[1],c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(cid);if(!c)return json(res,404,{error:'not_found'});
+        if(!['admin','manager'].includes(user.role)&&c.owner_id!==user.user_id)return json(res,403,{error:'forbidden'});
+        const b=await body(req),force=!!b.force;
+        if(hasActiveCustomerBusiness(cid)&&!(force&&['admin','manager'].includes(user.role)))return json(res,409,{error:'active_business_exists'});
+        const updated=moveCustomerToPool(cid,b.reason||'manual_release',user.user_id);audit(user,'release_to_pool','customers',cid,req,{reason:b.reason||'manual_release',force});return json(res,200,updated);
+      }
+    }
+
+    if(p==='/api/public-pool'&&req.method==='GET'){
+      const page=Math.max(1,Number(url.searchParams.get('page')||1)),size=Math.min(200,Math.max(1,Number(url.searchParams.get('size')||50))),offset=(page-1)*size;
+      const q=String(url.searchParams.get('q')||'').trim(),args=[],filters=["c.deleted_at IS NULL","c.pool_status='public'","c.owner_id IS NULL"];
+      if(q){filters.push('(c.name LIKE ? OR c.english_name LIKE ? OR c.country LIKE ? OR c.industry LIKE ?)');const like=`%${q}%`;args.push(like,like,like,like);}
+      const where=filters.join(' AND '),total=db.prepare(`SELECT COUNT(*) c FROM customers c WHERE ${where}`).get(...args).c;
+      const data=db.prepare(`SELECT c.*, (SELECT MAX(a.occurred_at) FROM activities a WHERE a.customer_id=c.id) last_activity
+        FROM customers c WHERE ${where} ORDER BY c.pool_entered_at DESC LIMIT ? OFFSET ?`).all(...args,size,offset).map(r=>decodeRow(r,resourceMap.customers));
+      return json(res,200,{data,total,page,size});
+    }
+    if(p==='/api/public-pool/rule'&&req.method==='GET')return json(res,200,getPublicPoolRule());
+    if(p==='/api/public-pool/rule'&&req.method==='PATCH'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const old=getPublicPoolRule(),b=await body(req),next={...old,...b,inactive_days:Math.max(1,Number(b.inactive_days??old.inactive_days))};
+      db.prepare("INSERT INTO settings(key,value,updated_at) VALUES('public_pool_rule',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(next),now());
+      audit(user,'update','public_pool_rule',null,req,next);return json(res,200,next);
+    }
+    {
+      const claim=p.match(/^\/api\/public-pool\/([0-9a-f-]+)\/claim$/);
+      if(claim&&req.method==='POST'){
+        if(!['admin','manager','sales'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const c=db.prepare("SELECT * FROM customers WHERE id=? AND deleted_at IS NULL AND pool_status='public' AND owner_id IS NULL").get(claim[1]);if(!c)return json(res,409,{error:'not_available'});
+        const b=await body(req),targetOwner=['admin','manager'].includes(user.role)&&b.owner_id?String(b.owner_id):user.user_id;
+        const owner=db.prepare("SELECT id,display_name,role FROM users WHERE id=? AND enabled=1").get(targetOwner);if(!owner)return json(res,400,{error:'invalid_owner'});
+        const changed=db.prepare("UPDATE customers SET owner_id=?,pool_status='assigned',pool_entered_at=NULL,pool_reason=NULL,updated_at=? WHERE id=? AND owner_id IS NULL AND pool_status='public'").run(targetOwner,now(),c.id);
+        if(!changed.changes)return json(res,409,{error:'already_claimed'});
+        db.prepare('INSERT INTO public_pool_events(id,customer_id,action,from_owner_id,to_owner_id,reason,operated_by,created_at) VALUES(?,?,?,?,?,?,?,?)').run(randomUUID(),c.id,'claim',null,targetOwner,'claim',user.user_id,now());
+        audit(user,'claim_from_pool','customers',c.id,req,{owner_id:targetOwner});return json(res,200,{ok:true,owner});
+      }
+    }
+    if(p==='/api/public-pool/run-recycle'&&req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const rule=getPublicPoolRule();if(!rule.enabled)return json(res,200,{enabled:false,recycled:0});
+      const cutoff=new Date(Date.now()-Number(rule.inactive_days||90)*86400000).toISOString(),statuses=Array.isArray(rule.eligible_statuses)&&rule.eligible_statuses.length?rule.eligible_statuses:['potential','contacted','following','dormant'],protect=new Set(Array.isArray(rule.protect_grades)?rule.protect_grades:[]);
+      const placeholders=statuses.map(()=>'?').join(',');
+      const candidates=db.prepare(`SELECT c.*,COALESCE(MAX(a.occurred_at),c.created_at) last_touch FROM customers c
+        LEFT JOIN activities a ON a.customer_id=c.id
+        WHERE c.deleted_at IS NULL AND c.owner_id IS NOT NULL AND COALESCE(c.pool_status,'assigned')!='public' AND c.status IN (${placeholders})
+        GROUP BY c.id HAVING COALESCE(MAX(a.occurred_at),c.created_at)<?`).all(...statuses,cutoff);
+      let recycled=0,skipped_active=0,skipped_protected=0;
+      for(const c of candidates){
+        if(protect.has(c.grade)){skipped_protected++;continue;}
+        if(hasActiveCustomerBusiness(c.id)){skipped_active++;continue;}
+        moveCustomerToPool(c.id,`inactive_${rule.inactive_days}_days`,user.user_id);recycled++;
+      }
+      audit(user,'run_recycle','public_pool',null,req,{recycled,skipped_active,skipped_protected,cutoff});
+      return json(res,200,{enabled:true,recycled,skipped_active,skipped_protected,cutoff});
+    }
+    if(p==='/api/public-pool/events'&&req.method==='GET'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      return json(res,200,db.prepare(`SELECT e.*,c.name customer_name,fu.display_name from_owner_name,tu.display_name to_owner_name,ou.display_name operated_by_name
+        FROM public_pool_events e JOIN customers c ON c.id=e.customer_id
+        LEFT JOIN users fu ON fu.id=e.from_owner_id LEFT JOIN users tu ON tu.id=e.to_owner_id LEFT JOIN users ou ON ou.id=e.operated_by
+        ORDER BY e.created_at DESC LIMIT 300`).all());
     }
 
     // ---- Sales workflow actions: inquiry -> opportunity -> quotation -> order / sample follow-up ----
@@ -1391,12 +1515,20 @@ const server = http.createServer(async (req,res)=>{
       if(req.method==='GET' && !id){
         const page=Math.max(1,Number(url.searchParams.get('page')||1)), size=Math.min(200,Math.max(1,Number(url.searchParams.get('size')||50))), offset=(page-1)*size;
         const customerId=url.searchParams.get('customer_id'); const contactId=url.searchParams.get('contact_id'); const orderId=url.searchParams.get('order_id'); const ownerId=url.searchParams.get('owner_id'); const tagId=url.searchParams.get('tag_id');
-        const filters=[]; const args=[]; if(customerId && tableCols(table).includes('customer_id')){filters.push('customer_id=?');args.push(customerId);} if(contactId&&tableCols(table).includes('contact_id')){filters.push('contact_id=?');args.push(contactId);} if(orderId&&tableCols(table).includes('order_id')){filters.push('order_id=?');args.push(orderId);} if(scopedRole(user)){ if(table==='customers'){filters.push('owner_id=?');args.push(user.user_id);} else if(tableCols(table).includes('customer_id')){filters.push('customer_id IN (SELECT id FROM customers WHERE owner_id=? AND deleted_at IS NULL)');args.push(user.user_id);} else if(key==='channels'){filters.push('contact_id IN (SELECT ct.id FROM contacts ct JOIN customers c ON c.id=ct.customer_id WHERE c.owner_id=? AND c.deleted_at IS NULL)');args.push(user.user_id);} else if(key==='quotationItems'){filters.push('quotation_id IN (SELECT q.id FROM quotations q JOIN customers c ON c.id=q.customer_id WHERE c.owner_id=? AND c.deleted_at IS NULL)');args.push(user.user_id);} else if(key==='orderItems'){filters.push('order_id IN (SELECT o.id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE c.owner_id=? AND c.deleted_at IS NULL)');args.push(user.user_id);} else if(key==='shipments'){filters.push('order_id IN (SELECT o.id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE c.owner_id=? AND c.deleted_at IS NULL)');args.push(user.user_id);} } if(table==='customers'){filters.push('deleted_at IS NULL'); const exacts=['owner_id','country','status','grade','source','industry']; for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`${k}=?`);args.push(v);}} const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('customer_types LIKE ?');args.push(`%"${customerType}"%`);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);}}
+        const filters=[]; const args=[]; if(customerId && tableCols(table).includes('customer_id')){filters.push('customer_id=?');args.push(customerId);} if(contactId&&tableCols(table).includes('contact_id')){filters.push('contact_id=?');args.push(contactId);} if(orderId&&tableCols(table).includes('order_id')){filters.push('order_id=?');args.push(orderId);} if(scopedRole(user)){
+          const accessibleCustomerSql="SELECT c.id FROM customers c WHERE c.deleted_at IS NULL AND (c.owner_id=? OR EXISTS(SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=c.id AND cc.user_id=?))";
+          if(table==='customers'){filters.push('(owner_id=? OR EXISTS(SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=customers.id AND cc.user_id=?))');args.push(user.user_id,user.user_id);}
+          else if(tableCols(table).includes('customer_id')){filters.push(`customer_id IN (${accessibleCustomerSql})`);args.push(user.user_id,user.user_id);}
+          else if(key==='channels'){filters.push(`contact_id IN (SELECT ct.id FROM contacts ct WHERE ct.customer_id IN (${accessibleCustomerSql}))`);args.push(user.user_id,user.user_id);}
+          else if(key==='quotationItems'){filters.push(`quotation_id IN (SELECT q.id FROM quotations q WHERE q.customer_id IN (${accessibleCustomerSql}))`);args.push(user.user_id,user.user_id);}
+          else if(key==='orderItems'){filters.push(`order_id IN (SELECT o.id FROM orders o WHERE o.customer_id IN (${accessibleCustomerSql}))`);args.push(user.user_id,user.user_id);}
+          else if(key==='shipments'){filters.push(`order_id IN (SELECT o.id FROM orders o WHERE o.customer_id IN (${accessibleCustomerSql}))`);args.push(user.user_id,user.user_id);}
+        } if(table==='customers'){filters.push('deleted_at IS NULL'); const exacts=['owner_id','country','status','grade','source','industry']; for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`${k}=?`);args.push(v);}} const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('customer_types LIKE ?');args.push(`%"${customerType}"%`);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);}}
         const where=filters.length?`WHERE ${filters.join(' AND ')}`:''; const total=db.prepare(`SELECT COUNT(*) c FROM ${table} ${where}`).get(...args).c; const data=db.prepare(`SELECT * FROM ${table} ${where} ORDER BY ${tableCols(table).includes('updated_at')?'updated_at':'rowid'} DESC LIMIT ? OFFSET ?`).all(...args,size,offset).map(r=>protectRow(key,decodeRow(r,cfg),user)); return json(res,200,{data,total,page,size});
       }
       if(req.method==='GET' && id){ const row=db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id); if(!row)return json(res,404,{error:'not_found'}); const cid=key==='customers'?row.id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); return json(res,200,protectRow(key,decodeRow(row,cfg),user)); }
       if(req.method==='POST' && !id){
-        const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; } else { const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
+        const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; if(tableCols(table).includes('pool_status'))payload.pool_status='assigned'; } else { const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
         if(table==='inquiries' && !payload.inquiry_no){cols.push('inquiry_no');vals.push(makeNo('INQ'));} if(table==='quotations'&&!payload.quote_no){cols.push('quote_no');vals.push(makeNo('QT'));} if(table==='contracts'&&!payload.contract_no){cols.push('contract_no');vals.push(makeNo('CT'));} if(table==='orders'&&!payload.order_no){cols.push('order_no');vals.push(makeNo('SO'));} if(table==='aftersales'){if(!payload.ticket_no){cols.push('ticket_no');vals.push(makeNo('AS'));} if(!payload.opened_at){const opened=now();cols.push('opened_at');vals.push(opened);if(tableCols(table).includes('sla_due_at')){cols.push('sla_due_at');vals.push(aftersalesSlaDue(payload.severity||'normal',opened));}}}
         if(table==='users'){ const password=String(b.password||'ChangeMe@123'); cols.push('password_hash');vals.push(hashPassword(password)); }
         db.prepare(`INSERT INTO ${table}(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`).run(...vals); audit(user,'create',key,newId,req,payload); return json(res,201,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(newId),cfg));
