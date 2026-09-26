@@ -131,7 +131,7 @@ test.describe('TradeFlow aftersales knowledge UI loop',()=>{
     const knowledgeDialog=page.getByRole('dialog',{name:'将已解决工单沉淀为知识'});
     await expect(knowledgeDialog).toBeVisible();
     await expect(knowledgeDialog.getByLabel('知识标题')).toHaveValue(subject);
-    await knowledgeDialog.getByRole('radio',{name:'直接发布'}).click();
+    await knowledgeDialog.locator('label.el-radio').filter({hasText:'直接发布'}).click();
     await knowledgeDialog.getByRole('button',{name:'确认沉淀'}).click();
 
     await expect(page.getByText('已发布到售后知识库')).toBeVisible();
