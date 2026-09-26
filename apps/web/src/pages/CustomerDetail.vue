@@ -1,16 +1,181 @@
 <script setup lang="ts">
-import {ref,reactive,onMounted} from 'vue';import {useRoute} from 'vue-router';import {ElMessage} from 'element-plus';import AppLayout from '../layouts/AppLayout.vue';import {api} from '../api/client';
-const route=useRoute(),id=String(route.params.id),customer=ref<any>({}),contacts=ref<any[]>([]),activities=ref<any[]>([]),tasks=ref<any[]>([]);const cDialog=ref(false),aDialog=ref(false),channelDialog=ref(false),selectedContact=ref<any>(null);
-const contact=reactive<any>({name:'',title:'',department:'',role:'',language:'English',is_primary:0});
+import {ref,reactive,onMounted,computed} from 'vue';
+import {useRoute} from 'vue-router';
+import {ElMessage,ElMessageBox} from 'element-plus';
+import AppLayout from '../layouts/AppLayout.vue';
+import {api} from '../api/client';
+
+const route=useRoute(),id=String(route.params.id);
+const customer=ref<any>({}),contacts=ref<any[]>([]),activities=ref<any[]>([]),tasks=ref<any[]>([]),brands=ref<any[]>([]),brandLinks=ref<any[]>([]),fieldDefs=ref<any[]>([]);
+const cDialog=ref(false),aDialog=ref(false),channelDialog=ref(false),editDialog=ref(false),brandDialog=ref(false),taskDialog=ref(false),fieldDialog=ref(false);
+const selectedContact=ref<any>(null);
+const contact=reactive<any>({name:'',title:'',department:'',role:'',language:'English',timezone:'',is_primary:0});
 const activity=reactive<any>({type:'whatsapp',subject:'',content:'',result:'',next_action:'',occurred_at:new Date().toISOString().slice(0,16)});
 const channel=reactive<any>({channel:'email',value:'',label:'',is_primary:0,preferred_time:''});
-async function load(){customer.value=(await api.get(`/customers/${id}`)).data;const cs=(await api.get('/contacts',{params:{customer_id:id,size:100}})).data.data;contacts.value=await Promise.all(cs.map(async(c:any)=>({...c,channels:(await api.get('/channels',{params:{contact_id:c.id,size:100}})).data.data})));activities.value=(await api.get('/activities',{params:{customer_id:id,size:100}})).data.data;tasks.value=(await api.get('/tasks',{params:{customer_id:id,size:100}})).data.data}
-async function addContact(){await api.post('/contacts',{...contact,customer_id:id});cDialog.value=false;await load();ElMessage.success('联系人已添加')}
-async function addActivity(){await api.post('/activities',{...activity,customer_id:id,occurred_at:new Date(activity.occurred_at).toISOString()});aDialog.value=false;await load();ElMessage.success('跟进已记录')}
+const editForm=reactive<any>({});
+const brandForm=reactive<any>({brand_id:'',relation_type:'Distributor',authorized_regions:[],exclusive:0,start_date:'',end_date:'',notes:''});
+const taskForm=reactive<any>({title:'',description:'',due_at:'',priority:'normal',status:'todo'});
+const customValues=reactive<any>({});
+
+const activeFields=computed(()=>fieldDefs.value.filter((x:any)=>x.entity_type==='customer'&&x.enabled!==0).sort((a:any,b:any)=>(a.sort_order||0)-(b.sort_order||0)));
+const brandName=(brandId:string)=>brands.value.find((b:any)=>b.id===brandId)?.name||brandId;
+
+function resetContact(){Object.assign(contact,{name:'',title:'',department:'',role:'',language:'English',timezone:'',is_primary:0})}
+function resetTask(){Object.assign(taskForm,{title:'',description:'',due_at:'',priority:'normal',status:'todo'})}
+async function load(){
+  customer.value=(await api.get(`/customers/${id}`)).data;
+  Object.assign(editForm,JSON.parse(JSON.stringify(customer.value)));
+  Object.keys(customValues).forEach(k=>delete customValues[k]); Object.assign(customValues,customer.value.custom_fields||{});
+  const cs=(await api.get('/contacts',{params:{customer_id:id,size:100}})).data.data;
+  contacts.value=await Promise.all(cs.map(async(c:any)=>({...c,channels:(await api.get('/channels',{params:{contact_id:c.id,size:100}})).data.data})));
+  activities.value=(await api.get('/activities',{params:{customer_id:id,size:100}})).data.data;
+  tasks.value=(await api.get('/tasks',{params:{customer_id:id,size:100}})).data.data;
+  brands.value=(await api.get('/brands',{params:{size:200}})).data.data;
+  brandLinks.value=(await api.get('/customerBrands',{params:{customer_id:id,size:200}})).data.data;
+  fieldDefs.value=(await api.get('/customFields',{params:{size:200}})).data.data;
+}
+async function saveCustomer(){
+  const payload={...editForm}; delete payload.id; delete payload.created_at; delete payload.updated_at; delete payload.deleted_at;
+  await api.patch(`/customers/${id}`,payload); editDialog.value=false; await load(); ElMessage.success('客户资料已更新');
+}
+async function saveCustomFields(){await api.patch(`/customers/${id}`,{custom_fields:{...customValues}});fieldDialog.value=false;await load();ElMessage.success('自定义属性已保存')}
+async function addContact(){if(!contact.name.trim())return ElMessage.warning('请输入联系人姓名');await api.post('/contacts',{...contact,customer_id:id});cDialog.value=false;resetContact();await load();ElMessage.success('联系人已添加')}
+async function removeContact(c:any){await ElMessageBox.confirm(`确认删除联系人“${c.name}”及其联系方式？`,'确认');await api.delete(`/contacts/${c.id}`);await load();ElMessage.success('联系人已删除')}
+async function addActivity(){if(!activity.content.trim())return ElMessage.warning('请输入沟通内容');await api.post('/activities',{...activity,customer_id:id,occurred_at:new Date(activity.occurred_at).toISOString()});aDialog.value=false;await load();ElMessage.success('跟进已记录')}
 function prepareChannel(c:any){selectedContact.value=c;Object.assign(channel,{channel:'email',value:'',label:'',is_primary:0,preferred_time:''});channelDialog.value=true}
-async function addChannel(){await api.post('/channels',{...channel,contact_id:selectedContact.value.id});channelDialog.value=false;await load();ElMessage.success('联系方式已添加')}
+async function addChannel(){if(!channel.value.trim())return ElMessage.warning('请输入账号、号码或链接');await api.post('/channels',{...channel,contact_id:selectedContact.value.id});channelDialog.value=false;await load();ElMessage.success('联系方式已添加')}
+async function removeChannel(ch:any){await ElMessageBox.confirm(`确认删除 ${ch.channel}：${ch.value}？`,'确认');await api.delete(`/channels/${ch.id}`);await load()}
 async function openChannel(ch:any){const {data}=await api.post('/tools/link',{channel:ch.channel,value:ch.value});if(data.target){window.open(data.target,'_blank','noopener,noreferrer')}else{await navigator.clipboard.writeText(ch.value);ElMessage.success('账号已复制')}}
 function openSite(){if(customer.value.website)window.open(/^https?:/.test(customer.value.website)?customer.value.website:`https://${customer.value.website}`,'_blank','noopener,noreferrer')}
+async function addBrand(){if(!brandForm.brand_id)return ElMessage.warning('请选择品牌');await api.post('/customerBrands',{...brandForm,customer_id:id});brandDialog.value=false;Object.assign(brandForm,{brand_id:'',relation_type:'Distributor',authorized_regions:[],exclusive:0,start_date:'',end_date:'',notes:''});await load();ElMessage.success('品牌关系已绑定')}
+async function removeBrand(link:any){await ElMessageBox.confirm(`确认解除与“${brandName(link.brand_id)}”的关系？`,'确认');await api.delete(`/customerBrands/${link.id}`);await load()}
+async function addTask(){if(!taskForm.title.trim())return ElMessage.warning('请输入任务标题');await api.post('/tasks',{...taskForm,customer_id:id,due_at:taskForm.due_at?new Date(taskForm.due_at).toISOString():null});taskDialog.value=false;resetTask();await load();ElMessage.success('任务已创建')}
+async function completeTask(t:any){await api.patch(`/tasks/${t.id}`,{status:t.status==='done'?'todo':'done'});await load()}
+function fieldInputType(def:any){return ['number','amount'].includes(def.data_type)?'number':['date'].includes(def.data_type)?'date':'text'}
 onMounted(load);
 </script>
-<template><AppLayout><div class="toolbar"><div><h2 style="margin:0">{{customer.name}}</h2><span class="muted">{{customer.english_name}} · {{customer.country}} {{customer.city}}</span></div><div><el-button @click="openSite" :disabled="!customer.website">打开官网</el-button><el-button type="primary" @click="aDialog=true">新增跟进</el-button></div></div><div class="grid" style="grid-template-columns:1fr 1.2fr"><div class="card"><h3 class="section-title">客户画像</h3><el-descriptions :column="2" border><el-descriptions-item label="类型">{{(customer.customer_types||[]).join(' / ')}}</el-descriptions-item><el-descriptions-item label="状态">{{customer.status}}</el-descriptions-item><el-descriptions-item label="等级">{{customer.grade}}</el-descriptions-item><el-descriptions-item label="来源">{{customer.source}}</el-descriptions-item><el-descriptions-item label="行业">{{customer.industry}}</el-descriptions-item><el-descriptions-item label="语言">{{customer.language}}</el-descriptions-item><el-descriptions-item label="主营业务" :span="2">{{customer.business_scope}}</el-descriptions-item></el-descriptions></div><div class="card"><div class="toolbar"><h3 class="section-title">联系人与多渠道联系方式</h3><el-button size="small" @click="cDialog=true">添加联系人</el-button></div><div v-for="c in contacts" :key="c.id" style="padding:12px 0;border-bottom:1px solid #edf1f6"><div style="display:flex;justify-content:space-between;gap:12px"><div><b>{{c.name}}</b> <span class="muted">{{c.title}} · {{c.role}}</span></div><el-button link type="primary" @click="prepareChannel(c)">+ 联系方式</el-button></div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><el-button v-for="ch in c.channels" :key="ch.id" size="small" @click="openChannel(ch)">{{ch.channel}}：{{ch.value}}</el-button><span v-if="!c.channels?.length" class="muted">暂无联系方式</span></div></div></div></div><div class="grid" style="grid-template-columns:2fr 1fr;margin-top:16px"><div class="card"><h3 class="section-title">跟进时间线</h3><el-timeline><el-timeline-item v-for="x in activities" :key="x.id" :timestamp="x.occurred_at" placement="top"><b>{{x.type}} · {{x.subject}}</b><div>{{x.content}}</div><small class="muted">结果：{{x.result||'-'}}　下一步：{{x.next_action||'-'}}</small></el-timeline-item></el-timeline></div><div class="card"><h3 class="section-title">客户任务</h3><el-table :data="tasks"><el-table-column prop="title" label="任务"/><el-table-column prop="status" label="状态" width="80"/></el-table></div></div><el-dialog v-model="cDialog" title="添加联系人"><el-form label-position="top"><el-form-item label="姓名"><el-input v-model="contact.name"/></el-form-item><el-form-item label="职位"><el-input v-model="contact.title"/></el-form-item><el-form-item label="部门"><el-input v-model="contact.department"/></el-form-item><el-form-item label="角色"><el-input v-model="contact.role"/></el-form-item></el-form><template #footer><el-button @click="cDialog=false">取消</el-button><el-button type="primary" @click="addContact">保存</el-button></template></el-dialog><el-dialog v-model="channelDialog" title="添加联系方式"><el-form label-position="top"><el-form-item label="渠道"><el-select v-model="channel.channel" style="width:100%"><el-option v-for="x in ['email','phone','whatsapp','wechat','line','vk','telegram','viber','kakaotalk','zalo','linkedin','facebook','messenger','instagram','x','skype','teams','zoom','website','store']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="账号 / 号码 / 链接"><el-input v-model="channel.value"/></el-form-item><el-form-item label="备注"><el-input v-model="channel.label"/></el-form-item><el-form-item label="最佳联系时间"><el-input v-model="channel.preferred_time" placeholder="例如 客户当地 09:00-11:00"/></el-form-item></el-form><template #footer><el-button @click="channelDialog=false">取消</el-button><el-button type="primary" @click="addChannel">保存</el-button></template></el-dialog><el-dialog v-model="aDialog" title="新增跟进"><el-form label-position="top"><el-form-item label="方式"><el-select v-model="activity.type" style="width:100%"><el-option v-for="x in ['email','phone','whatsapp','wechat','line','telegram','meeting','visit','exhibition']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="主题"><el-input v-model="activity.subject"/></el-form-item><el-form-item label="沟通内容"><el-input v-model="activity.content" type="textarea"/></el-form-item><el-form-item label="结果"><el-input v-model="activity.result"/></el-form-item><el-form-item label="下一步"><el-input v-model="activity.next_action"/></el-form-item><el-form-item label="时间"><el-input v-model="activity.occurred_at" type="datetime-local"/></el-form-item></el-form><template #footer><el-button @click="aDialog=false">取消</el-button><el-button type="primary" @click="addActivity">保存</el-button></template></el-dialog></AppLayout></template>
+
+<template><AppLayout>
+<div class="toolbar">
+  <div><h2 style="margin:0">{{customer.name}}</h2><span class="muted">{{customer.english_name||'-'}} · {{customer.country||'-'}} {{customer.city||''}}</span></div>
+  <div style="display:flex;gap:8px"><el-button @click="openSite" :disabled="!customer.website">打开官网</el-button><el-button @click="editDialog=true">编辑客户</el-button><el-button type="primary" @click="aDialog=true">新增跟进</el-button></div>
+</div>
+
+<div class="grid" style="grid-template-columns:1fr 1.25fr">
+  <div class="card">
+    <div class="toolbar"><h3 class="section-title">客户画像</h3><el-button link type="primary" @click="fieldDialog=true">编辑自定义属性</el-button></div>
+    <el-descriptions :column="2" border>
+      <el-descriptions-item label="类型">{{(customer.customer_types||[]).join(' / ')||'-'}}</el-descriptions-item><el-descriptions-item label="状态">{{customer.status||'-'}}</el-descriptions-item>
+      <el-descriptions-item label="等级">{{customer.grade||'-'}}</el-descriptions-item><el-descriptions-item label="来源">{{customer.source||'-'}}</el-descriptions-item>
+      <el-descriptions-item label="行业">{{customer.industry||'-'}}</el-descriptions-item><el-descriptions-item label="语言">{{customer.language||'-'}}</el-descriptions-item>
+      <el-descriptions-item label="时区">{{customer.timezone||'-'}}</el-descriptions-item><el-descriptions-item label="税号">{{customer.tax_no||'-'}}</el-descriptions-item>
+      <el-descriptions-item label="主营业务" :span="2">{{customer.business_scope||'-'}}</el-descriptions-item>
+    </el-descriptions>
+    <div v-if="activeFields.length" style="margin-top:16px"><h4 style="margin:0 0 10px">自定义属性</h4>
+      <el-descriptions :column="2" border><el-descriptions-item v-for="f in activeFields" :key="f.id" :label="f.label">{{customer.custom_fields?.[f.field_key]??'-'}}</el-descriptions-item></el-descriptions>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="toolbar"><h3 class="section-title">联系人与多渠道联系方式</h3><el-button size="small" type="primary" plain @click="cDialog=true">添加联系人</el-button></div>
+    <div v-for="c in contacts" :key="c.id" style="padding:12px 0;border-bottom:1px solid #edf1f6">
+      <div style="display:flex;justify-content:space-between;gap:12px">
+        <div><b>{{c.name}}</b> <el-tag v-if="c.is_primary" size="small" type="success">主要</el-tag> <span class="muted">{{c.title||''}} {{c.role?'· '+c.role:''}}</span></div>
+        <div><el-button link type="primary" @click="prepareChannel(c)">+ 联系方式</el-button><el-button link type="danger" @click="removeContact(c)">删除</el-button></div>
+      </div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+        <el-button v-for="ch in c.channels" :key="ch.id" size="small" @click="openChannel(ch)" @contextmenu.prevent="removeChannel(ch)">{{ch.channel}}：{{ch.value}}</el-button>
+        <span v-if="!c.channels?.length" class="muted">暂无联系方式</span>
+      </div>
+      <small v-if="c.channels?.some((x:any)=>x.preferred_time)" class="muted">最佳联系时间：{{c.channels.find((x:any)=>x.preferred_time)?.preferred_time}}</small>
+    </div>
+    <el-empty v-if="!contacts.length" description="暂无联系人"/>
+  </div>
+</div>
+
+<div class="grid" style="grid-template-columns:1fr 1fr;margin-top:16px">
+  <div class="card">
+    <div class="toolbar"><h3 class="section-title">品牌与渠道关系</h3><el-button size="small" type="primary" plain @click="brandDialog=true">绑定品牌</el-button></div>
+    <el-table :data="brandLinks" empty-text="暂无品牌关系">
+      <el-table-column label="品牌"><template #default="s">{{brandName(s.row.brand_id)}}</template></el-table-column>
+      <el-table-column prop="relation_type" label="关系"/>
+      <el-table-column label="授权区域"><template #default="s">{{(s.row.authorized_regions||[]).join(' / ')||'-'}}</template></el-table-column>
+      <el-table-column label="独家" width="70"><template #default="s">{{s.row.exclusive?'是':'否'}}</template></el-table-column>
+      <el-table-column label="操作" width="80"><template #default="s"><el-button link type="danger" @click="removeBrand(s.row)">解绑</el-button></template></el-table-column>
+    </el-table>
+  </div>
+
+  <div class="card">
+    <div class="toolbar"><h3 class="section-title">客户任务</h3><el-button size="small" type="primary" plain @click="taskDialog=true">新增任务</el-button></div>
+    <el-table :data="tasks" empty-text="暂无任务">
+      <el-table-column label="完成" width="65"><template #default="s"><el-checkbox :model-value="s.row.status==='done'" @change="completeTask(s.row)"/></template></el-table-column>
+      <el-table-column prop="title" label="任务"/>
+      <el-table-column prop="priority" label="优先级" width="85"/>
+      <el-table-column prop="due_at" label="截止时间" width="180"/>
+    </el-table>
+  </div>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <div class="toolbar"><h3 class="section-title">跟进时间线</h3><el-button size="small" @click="aDialog=true">记录沟通</el-button></div>
+  <el-timeline><el-timeline-item v-for="x in activities" :key="x.id" :timestamp="x.occurred_at" placement="top"><b>{{x.type}} · {{x.subject||'沟通记录'}}</b><div style="margin:5px 0">{{x.content}}</div><small class="muted">结果：{{x.result||'-'}}　下一步：{{x.next_action||'-'}}</small></el-timeline-item></el-timeline>
+  <el-empty v-if="!activities.length" description="暂无跟进记录"/>
+</div>
+
+<el-dialog v-model="editDialog" title="编辑客户资料" width="760">
+  <el-form label-position="top"><div class="grid" style="grid-template-columns:1fr 1fr">
+    <el-form-item label="客户名称"><el-input v-model="editForm.name"/></el-form-item><el-form-item label="英文名称"><el-input v-model="editForm.english_name"/></el-form-item>
+    <el-form-item label="国家"><el-input v-model="editForm.country"/></el-form-item><el-form-item label="城市"><el-input v-model="editForm.city"/></el-form-item>
+    <el-form-item label="官网"><el-input v-model="editForm.website"/></el-form-item><el-form-item label="行业"><el-input v-model="editForm.industry"/></el-form-item>
+    <el-form-item label="客户属性"><el-select v-model="editForm.customer_types" multiple allow-create filterable style="width:100%"><el-option v-for="x in ['Importer','Distributor','Wholesaler','Retailer','Brand','Agent','Manufacturer','End User','E-commerce']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+    <el-form-item label="状态"><el-select v-model="editForm.status" style="width:100%"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+    <el-form-item label="等级"><el-select v-model="editForm.grade" style="width:100%"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+    <el-form-item label="来源"><el-input v-model="editForm.source"/></el-form-item><el-form-item label="语言"><el-input v-model="editForm.language"/></el-form-item><el-form-item label="时区"><el-input v-model="editForm.timezone"/></el-form-item>
+  </div><el-form-item label="主营业务"><el-input v-model="editForm.business_scope" type="textarea"/></el-form-item><el-form-item label="备注"><el-input v-model="editForm.notes" type="textarea"/></el-form-item></el-form>
+  <template #footer><el-button @click="editDialog=false">取消</el-button><el-button type="primary" @click="saveCustomer">保存</el-button></template>
+</el-dialog>
+
+<el-dialog v-model="fieldDialog" title="客户自定义属性" width="650"><el-form label-position="top">
+  <el-form-item v-for="f in activeFields" :key="f.id" :label="f.label">
+    <el-select v-if="['select','multi_select'].includes(f.data_type)" v-model="customValues[f.field_key]" :multiple="f.data_type==='multi_select'" style="width:100%">
+      <el-option v-for="o in (f.options||[])" :key="o" :label="o" :value="o"/>
+    </el-select>
+    <el-switch v-else-if="f.data_type==='boolean'" v-model="customValues[f.field_key]"/>
+    <el-input v-else v-model="customValues[f.field_key]" :type="fieldInputType(f)"/>
+  </el-form-item>
+  <el-empty v-if="!activeFields.length" description="请先在“自定义字段”模块新增 customer 字段"/>
+</el-form><template #footer><el-button @click="fieldDialog=false">取消</el-button><el-button type="primary" @click="saveCustomFields">保存</el-button></template></el-dialog>
+
+<el-dialog v-model="cDialog" title="添加联系人"><el-form label-position="top"><div class="grid" style="grid-template-columns:1fr 1fr">
+  <el-form-item label="姓名"><el-input v-model="contact.name"/></el-form-item><el-form-item label="职位"><el-input v-model="contact.title"/></el-form-item>
+  <el-form-item label="部门"><el-input v-model="contact.department"/></el-form-item><el-form-item label="角色"><el-input v-model="contact.role"/></el-form-item>
+  <el-form-item label="语言"><el-input v-model="contact.language"/></el-form-item><el-form-item label="时区"><el-input v-model="contact.timezone"/></el-form-item>
+</div><el-form-item><el-checkbox v-model="contact.is_primary" :true-value="1" :false-value="0">设为主要联系人</el-checkbox></el-form-item></el-form>
+<template #footer><el-button @click="cDialog=false">取消</el-button><el-button type="primary" @click="addContact">保存</el-button></template></el-dialog>
+
+<el-dialog v-model="channelDialog" title="添加联系方式"><el-form label-position="top">
+  <el-form-item label="渠道"><el-select v-model="channel.channel" style="width:100%"><el-option v-for="x in ['email','phone','whatsapp','wechat','line','vk','telegram','viber','kakaotalk','zalo','linkedin','facebook','messenger','instagram','x','skype','teams','zoom','website','store']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+  <el-form-item label="账号 / 号码 / 链接"><el-input v-model="channel.value"/></el-form-item><el-form-item label="备注"><el-input v-model="channel.label"/></el-form-item><el-form-item label="最佳联系时间"><el-input v-model="channel.preferred_time" placeholder="例如 客户当地 09:00-11:00"/></el-form-item>
+  <el-form-item><el-checkbox v-model="channel.is_primary" :true-value="1" :false-value="0">设为首选联系方式</el-checkbox></el-form-item>
+</el-form><template #footer><el-button @click="channelDialog=false">取消</el-button><el-button type="primary" @click="addChannel">保存</el-button></template></el-dialog>
+
+<el-dialog v-model="brandDialog" title="绑定品牌"><el-form label-position="top">
+  <el-form-item label="品牌"><el-select v-model="brandForm.brand_id" filterable style="width:100%"><el-option v-for="b in brands" :key="b.id" :label="b.name" :value="b.id"/></el-select></el-form-item>
+  <el-form-item label="关系类型"><el-select v-model="brandForm.relation_type" style="width:100%"><el-option v-for="x in ['Own Brand','Agent','Distributor','Importer','Retailer','Competitor','Target','Historical']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+  <el-form-item label="授权区域"><el-select v-model="brandForm.authorized_regions" multiple allow-create filterable style="width:100%"/></el-form-item>
+  <el-form-item><el-checkbox v-model="brandForm.exclusive" :true-value="1" :false-value="0">独家合作</el-checkbox></el-form-item>
+  <div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="开始日期"><el-input v-model="brandForm.start_date" type="date"/></el-form-item><el-form-item label="结束日期"><el-input v-model="brandForm.end_date" type="date"/></el-form-item></div>
+  <el-form-item label="备注"><el-input v-model="brandForm.notes" type="textarea"/></el-form-item>
+</el-form><template #footer><el-button @click="brandDialog=false">取消</el-button><el-button type="primary" @click="addBrand">保存</el-button></template></el-dialog>
+
+<el-dialog v-model="taskDialog" title="新增客户任务"><el-form label-position="top">
+  <el-form-item label="任务标题"><el-input v-model="taskForm.title"/></el-form-item><el-form-item label="说明"><el-input v-model="taskForm.description" type="textarea"/></el-form-item>
+  <div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="截止时间"><el-input v-model="taskForm.due_at" type="datetime-local"/></el-form-item><el-form-item label="优先级"><el-select v-model="taskForm.priority" style="width:100%"><el-option v-for="x in ['low','normal','high','urgent']" :key="x" :label="x" :value="x"/></el-select></el-form-item></div>
+</el-form><template #footer><el-button @click="taskDialog=false">取消</el-button><el-button type="primary" @click="addTask">保存</el-button></template></el-dialog>
+
+<el-dialog v-model="aDialog" title="新增跟进"><el-form label-position="top">
+  <el-form-item label="方式"><el-select v-model="activity.type" style="width:100%"><el-option v-for="x in ['email','phone','whatsapp','wechat','line','telegram','meeting','visit','exhibition']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+  <el-form-item label="主题"><el-input v-model="activity.subject"/></el-form-item><el-form-item label="沟通内容"><el-input v-model="activity.content" type="textarea"/></el-form-item>
+  <el-form-item label="结果"><el-input v-model="activity.result"/></el-form-item><el-form-item label="下一步"><el-input v-model="activity.next_action"/></el-form-item><el-form-item label="时间"><el-input v-model="activity.occurred_at" type="datetime-local"/></el-form-item>
+</el-form><template #footer><el-button @click="aDialog=false">取消</el-button><el-button type="primary" @click="addActivity">保存</el-button></template></el-dialog>
+</AppLayout></template>
