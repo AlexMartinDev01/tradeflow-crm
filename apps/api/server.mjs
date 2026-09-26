@@ -547,7 +547,7 @@ function body(req) { return new Promise((resolve,reject)=>{ let raw=''; req.on('
 function columns(table) { return db.prepare(`PRAGMA table_info(${table})`).all().map(x=>x.name); }
 const colCache = new Map();
 function tableCols(table){ if(!colCache.has(table)) colCache.set(table,columns(table)); return colCache.get(table); }
-function decodeRow(row, cfg){ if(!row) return row; const r={...row}; for(const k of (cfg.json||[])) r[k]=parseJSON(r[k], Array.isArray(r[k])?[]: (k==='custom_fields'?{}:[])); if(cfg.table==='users') delete r.password_hash; return r; }
+function decodeRow(row, cfg){ if(!row) return row; const r={...row}; for(const k of (cfg.json||[])) r[k]=parseJSON(r[k], Array.isArray(r[k])?[]: (k==='custom_fields'?{}:[])); if(cfg.table==='users'){delete r.password_hash;delete r.totp_secret_enc;delete r.totp_last_counter;} return r; }
 
 function marketingSegmentCustomers(rules={},user=null,limit=1000){
   const filters=['c.deleted_at IS NULL',"c.status!='blacklist'"],args=[];
@@ -980,6 +980,9 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,{...session,user:sessionUserPayload(u)});
     }
     const user=auth(req); if(!user) return json(res,401,{error:'unauthorized'});
+    if(user.must_change_password && !['/api/auth/me','/api/auth/logout','/api/auth/security-status','/api/auth/change-password'].includes(p)){
+      return json(res,428,{error:'password_change_required',message:'必须先修改初始或重置密码'});
+    }
     if(p==='/api/auth/me') return json(res,200,{id:user.user_id,username:user.username,display_name:user.display_name,role:user.role,department_id:user.department_id||null,data_scope:userDataScope(user),must_change_password:!!user.must_change_password,two_factor_enabled:!!user.totp_enabled,password_changed_at:user.password_changed_at||null});
     if(p==='/api/auth/security-status' && req.method==='GET'){
       if(!user.user_id)return json(res,403,{error:'human_account_required'});
