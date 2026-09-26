@@ -3,6 +3,7 @@ import {ref,reactive,onMounted,computed} from 'vue';
 import {useRoute} from 'vue-router';
 import {ElMessage,ElMessageBox} from 'element-plus';
 import AppLayout from '../layouts/AppLayout.vue';
+import AttachmentsPanel from '../components/AttachmentsPanel.vue';
 import {api} from '../api/client';
 
 const route=useRoute(),id=String(route.params.id);
@@ -96,6 +97,8 @@ onMounted(load);
 <div class="card"><div class="toolbar"><h3 class="section-title">品牌与渠道关系</h3><el-button size="small" type="primary" plain @click="brandDialog=true">绑定品牌</el-button></div><el-table :data="brandLinks" empty-text="暂无品牌关系"><el-table-column label="品牌"><template #default="s">{{brandName(s.row.brand_id)}}</template></el-table-column><el-table-column prop="relation_type" label="关系"/><el-table-column label="授权区域"><template #default="s">{{(s.row.authorized_regions||[]).join(' / ')||'-'}}</template></el-table-column><el-table-column label="独家" width="70"><template #default="s">{{s.row.exclusive?'是':'否'}}</template></el-table-column><el-table-column label="操作" width="80"><template #default="s"><el-button link type="danger" @click="removeBrand(s.row)">解绑</el-button></template></el-table-column></el-table></div>
 <div class="card"><div class="toolbar"><h3 class="section-title">客户任务</h3><el-button size="small" type="primary" plain @click="taskDialog=true">新增任务</el-button></div><el-table :data="tasks" empty-text="暂无任务"><el-table-column label="完成" width="65"><template #default="s"><el-checkbox :model-value="s.row.status==='done'" @change="completeTask(s.row)"/></template></el-table-column><el-table-column prop="title" label="任务"/><el-table-column prop="priority" label="优先级" width="85"/><el-table-column prop="due_at" label="截止时间" width="180"/></el-table></div>
 </div>
+
+<div class="card" style="margin-top:16px"><AttachmentsPanel entity-type="customer" :entity-id="id" title="客户附件"/></div>
 
 <div class="card" style="margin-top:16px"><div class="toolbar"><div><h3 class="section-title">客户360°业务时间线</h3><span class="muted">客户创建、跟进、询盘、报价、订单、回款、出运、售后统一展示</span></div><el-button size="small" @click="aDialog=true">记录沟通</el-button></div><el-timeline><el-timeline-item v-for="x in timeline" :key="x.type+'-'+x.entity_id+'-'+x.time" :timestamp="x.time" placement="top"><div style="display:flex;gap:8px;align-items:center"><el-tag size="small">{{x.type}}</el-tag><b>{{x.title}}</b><el-tag v-if="x.status" size="small" type="info">{{x.status}}</el-tag></div><div v-if="x.summary" style="margin:5px 0">{{x.summary}}</div></el-timeline-item></el-timeline><el-empty v-if="!timeline.length" description="暂无业务事件"/></div>
 
