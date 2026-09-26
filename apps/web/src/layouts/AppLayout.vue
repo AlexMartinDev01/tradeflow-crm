@@ -3,7 +3,7 @@ import {computed} from 'vue';
 import {modules} from '../config/modules';
 import {useAuth} from '../stores/auth';
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
-const dedicated=['inquiries','opportunities','quotations','samples','orders','payments','creditProfiles','shipments','aftersales','customFields'];
+const dedicated=['inquiries','opportunities','quotations','samples','orders','payments','creditProfiles','shipments','aftersales','campaigns','customFields'];
 const allowedByRole:any={
   admin:'*',manager:'*',
   sales:['brands','products','contracts','tasks','activities','documents'],
@@ -26,7 +26,7 @@ const showAdmin=computed(()=>['admin','manager'].includes(role.value));
   <router-link class="nav" to="/"><span class="label">仪表盘</span></router-link>
   <router-link class="nav" to="/analytics"><span class="label">统计分析</span></router-link>
   <router-link class="nav" to="/search"><span class="label">全局搜索</span></router-link>
-  <router-link class="nav" to="/customers"><span class="label">客户360°</span></router-link>
+  <router-link class="nav" to="/customers"><span class="label">客户360°</span></router-link><router-link v-if="showAdmin" class="nav" to="/marketing"><span class="label">客户营销</span></router-link>
   <router-link v-if="showExcel" class="nav" to="/data/excel"><span class="label">Excel 导入导出</span></router-link>
 
   <template v-if="showSales">
@@ -49,7 +49,7 @@ const showAdmin=computed(()=>['admin','manager'].includes(role.value));
   <div class="nav-group">系统配置</div>
   <router-link v-if="showAdmin" class="nav" to="/settings/custom-fields"><span class="label">自定义字段</span></router-link>
   <router-link v-if="showAdmin" class="nav" to="/automation"><span class="label">自动化规则</span></router-link>
-  <router-link v-if="showAdmin" class="nav" to="/audit"><span class="label">审计日志</span></router-link>
+  <router-link v-if="showAdmin" class="nav" to="/integrations"><span class="label">系统集成</span></router-link><router-link v-if="showAdmin" class="nav" to="/audit"><span class="label">审计日志</span></router-link>
 </aside>
 <main class="main"><header class="top"><b>外贸客户管理系统</b><div><span class="muted">{{auth.user?.display_name}} · {{auth.user?.role}}</span>　<el-button size="small" @click="auth.logout">退出</el-button></div></header><div class="content"><slot/></div></main>
 </div></template>
