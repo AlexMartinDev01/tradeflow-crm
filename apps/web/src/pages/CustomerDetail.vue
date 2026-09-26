@@ -7,9 +7,9 @@ import AttachmentsPanel from '../components/AttachmentsPanel.vue';
 import {api} from '../api/client';
 
 const route=useRoute(),id=String(route.params.id);
-const customer=ref<any>({}),contacts=ref<any[]>([]),activities=ref<any[]>([]),timeline=ref<any[]>([]),tasks=ref<any[]>([]),brands=ref<any[]>([]),brandLinks=ref<any[]>([]),fieldDefs=ref<any[]>([]),tags=ref<any[]>([]),owners=ref<any[]>([]),me=ref<any>(null);
-const cDialog=ref(false),aDialog=ref(false),channelDialog=ref(false),editDialog=ref(false),brandDialog=ref(false),taskDialog=ref(false),fieldDialog=ref(false),tagDialog=ref(false),transferDialog=ref(false);
-const selectedContact=ref<any>(null),newTag=reactive<any>({name:'',category:''}),transfer=reactive<any>({owner_id:''});
+const customer=ref<any>({}),contacts=ref<any[]>([]),activities=ref<any[]>([]),timeline=ref<any[]>([]),tasks=ref<any[]>([]),brands=ref<any[]>([]),brandLinks=ref<any[]>([]),fieldDefs=ref<any[]>([]),tags=ref<any[]>([]),owners=ref<any[]>([]),collaborators=ref<any[]>([]),me=ref<any>(null);
+const cDialog=ref(false),aDialog=ref(false),channelDialog=ref(false),editDialog=ref(false),brandDialog=ref(false),taskDialog=ref(false),fieldDialog=ref(false),tagDialog=ref(false),transferDialog=ref(false),collabDialog=ref(false);
+const selectedContact=ref<any>(null),newTag=reactive<any>({name:'',category:''}),transfer=reactive<any>({owner_id:''}),collabForm=reactive<any>({user_id:''});
 const contact=reactive<any>({name:'',title:'',department:'',role:'',language:'English',timezone:'',is_primary:0});
 const activity=reactive<any>({type:'whatsapp',subject:'',content:'',result:'',next_action:'',occurred_at:new Date().toISOString().slice(0,16)});
 const channel=reactive<any>({channel:'email',value:'',label:'',is_primary:0,preferred_time:''});
@@ -22,6 +22,8 @@ const activeFields=computed(()=>fieldDefs.value.filter((x:any)=>x.entity_type===
 const brandName=(brandId:string)=>brands.value.find((b:any)=>b.id===brandId)?.name||brandId;
 const ownerName=computed(()=>owners.value.find((x:any)=>x.id===customer.value.owner_id)?.display_name||'未分配');
 const canTransfer=computed(()=>['admin','manager'].includes(me.value?.role));
+const canManageTeam=computed(()=>['admin','manager'].includes(me.value?.role)||customer.value.owner_id===me.value?.id);
+const availableCollaborators=computed(()=>owners.value.filter((x:any)=>x.id!==customer.value.owner_id&&!collaborators.value.some((c:any)=>c.user_id===x.id)));
 
 function resetContact(){Object.assign(contact,{name:'',title:'',department:'',role:'',language:'English',timezone:'',is_primary:0})}
 function resetTask(){Object.assign(taskForm,{title:'',description:'',due_at:'',priority:'normal',status:'todo'})}
@@ -40,6 +42,7 @@ async function load(){
   brandLinks.value=(await api.get('/customerBrands',{params:{customer_id:id,size:200}})).data.data;
   fieldDefs.value=(await api.get('/customFields',{params:{size:200}})).data.data;
   tags.value=(await api.get(`/customers/${id}/tags`)).data;
+  collaborators.value=(await api.get(`/customers/${id}/collaborators`)).data;
   transfer.owner_id=customer.value.owner_id||'';
 }
 async function saveCustomer(){const payload={...editForm};delete payload.id;delete payload.created_at;delete payload.updated_at;delete payload.deleted_at;await api.patch(`/customers/${id}`,payload);editDialog.value=false;await load();ElMessage.success('客户资料已更新')}
@@ -59,12 +62,19 @@ async function completeTask(t:any){await api.patch(`/tasks/${t.id}`,{status:t.st
 async function addTag(){if(!newTag.name.trim())return ElMessage.warning('请输入标签名称');await api.post(`/customers/${id}/tags`,newTag);Object.assign(newTag,{name:'',category:''});tagDialog.value=false;await load();ElMessage.success('标签已添加')}
 async function removeTag(t:any){await api.delete(`/customers/${id}/tags/${t.id}`);await load()}
 async function transferOwner(){if(!transfer.owner_id)return ElMessage.warning('请选择负责人');await api.post(`/customers/${id}/transfer`,transfer);transferDialog.value=false;await load();ElMessage.success('客户负责人已转移')}
+async function addCollaborator(){if(!collabForm.user_id)return ElMessage.warning('请选择协同人');await api.post(`/customers/${id}/collaborators`,collabForm);collabForm.user_id='';collabDialog.value=false;await load();ElMessage.success('协同人已添加')}
+async function removeCollaborator(c:any){await ElMessageBox.confirm(`移除协同人“${c.display_name}”？`,'确认');await api.delete(`/customers/${id}/collaborators/${c.user_id}`);await load()}
+async function releaseToPool(){
+  const {value}=await ElMessageBox.prompt('请输入释放到公海的原因','释放客户到公海',{confirmButtonText:'确认释放',cancelButtonText:'取消',inputValue:'长期未有效推进'});
+  try{await api.post(`/customers/${id}/release-to-pool`,{reason:value});ElMessage.success('客户已进入公海');location.hash='#/public-pool'}
+  catch(e:any){if(e.response?.data?.error==='active_business_exists')ElMessage.error('该客户存在开放商机或未完成订单，禁止直接释放；如确需强制释放请由管理员处理');else throw e}
+}
 function fieldInputType(def:any){return ['number','amount'].includes(def.data_type)?'number':['date'].includes(def.data_type)?'date':'text'}
 onMounted(load);
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">{{customer.name}}</h2><span class="muted">{{customer.english_name||'-'}} · {{customer.country||'-'}} {{customer.city||''}}</span></div><div style="display:flex;gap:8px"><el-button @click="openSite" :disabled="!customer.website">打开官网</el-button><el-button @click="editDialog=true">编辑客户</el-button><el-button type="primary" @click="aDialog=true">新增跟进</el-button></div></div>
+<div class="toolbar"><div><h2 style="margin:0">{{customer.name}}</h2><span class="muted">{{customer.english_name||'-'}} · {{customer.country||'-'}} {{customer.city||''}}</span></div><div style="display:flex;gap:8px"><el-button @click="openSite" :disabled="!customer.website">打开官网</el-button><el-button @click="editDialog=true">编辑客户</el-button><el-button v-if="canManageTeam" type="danger" plain @click="releaseToPool">释放到公海</el-button><el-button type="primary" @click="aDialog=true">新增跟进</el-button></div></div>
 
 <div class="grid" style="grid-template-columns:1fr 1.25fr">
 <div class="card">
@@ -74,6 +84,7 @@ onMounted(load);
     <el-descriptions-item label="等级">{{customer.grade||'-'}}</el-descriptions-item><el-descriptions-item label="来源">{{customer.source||'-'}}</el-descriptions-item>
     <el-descriptions-item label="行业">{{customer.industry||'-'}}</el-descriptions-item><el-descriptions-item label="语言">{{customer.language||'-'}}</el-descriptions-item>
     <el-descriptions-item label="负责人"><b>{{ownerName}}</b> <el-button v-if="canTransfer" link type="primary" @click="transferDialog=true">转移</el-button></el-descriptions-item>
+    <el-descriptions-item label="协同人" :span="2"><span v-if="!collaborators.length" class="muted">暂无</span><el-tag v-for="c in collaborators" :key="c.user_id" :closable="canManageTeam" @close="removeCollaborator(c)" style="margin:2px 6px 2px 0">{{c.display_name}} · {{c.role}}</el-tag><el-button v-if="canManageTeam" link type="primary" @click="collabDialog=true">+ 添加协同人</el-button></el-descriptions-item>
     <el-descriptions-item label="税号">{{customer.tax_no||'-'}}</el-descriptions-item>
     <el-descriptions-item label="主营业务" :span="2">{{customer.business_scope||'-'}}</el-descriptions-item>
   </el-descriptions>
@@ -104,6 +115,7 @@ onMounted(load);
 
 <el-dialog v-model="tagDialog" title="添加客户标签" width="480"><el-form label-position="top"><el-form-item label="标签名称"><el-input v-model="newTag.name" placeholder="例如：重点客户 / 德国市场 / 高潜"/></el-form-item><el-form-item label="标签分类"><el-input v-model="newTag.category" placeholder="例如：客户价值 / 市场 / 产品偏好"/></el-form-item></el-form><template #footer><el-button @click="tagDialog=false">取消</el-button><el-button type="primary" @click="addTag">添加</el-button></template></el-dialog>
 <el-dialog v-model="transferDialog" title="转移客户负责人" width="480"><el-form label-position="top"><el-form-item label="新负责人"><el-select v-model="transfer.owner_id" filterable style="width:100%"><el-option v-for="x in owners" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item></el-form><template #footer><el-button @click="transferDialog=false">取消</el-button><el-button type="primary" @click="transferOwner">确认转移</el-button></template></el-dialog>
+<el-dialog v-model="collabDialog" title="添加客户协同人" width="480"><el-form label-position="top"><el-form-item label="协同用户"><el-select v-model="collabForm.user_id" filterable style="width:100%"><el-option v-for="x in availableCollaborators" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item><el-alert type="info" :closable="false" title="协同人可参与该客户的业务操作，但客户唯一负责人不会改变。"/></el-form><template #footer><el-button @click="collabDialog=false">取消</el-button><el-button type="primary" @click="addCollaborator">添加</el-button></template></el-dialog>
 
 <el-dialog v-model="editDialog" title="编辑客户资料" width="760"><el-form label-position="top"><div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="客户名称"><el-input v-model="editForm.name"/></el-form-item><el-form-item label="英文名称"><el-input v-model="editForm.english_name"/></el-form-item><el-form-item label="国家"><el-input v-model="editForm.country"/></el-form-item><el-form-item label="城市"><el-input v-model="editForm.city"/></el-form-item><el-form-item label="官网"><el-input v-model="editForm.website"/></el-form-item><el-form-item label="行业"><el-input v-model="editForm.industry"/></el-form-item><el-form-item label="税号"><el-input v-model="editForm.tax_no"/></el-form-item><el-form-item label="注册号"><el-input v-model="editForm.registration_no"/></el-form-item><el-form-item label="客户属性"><el-select v-model="editForm.customer_types" multiple allow-create filterable style="width:100%"><el-option v-for="x in ['Importer','Distributor','Wholesaler','Retailer','Brand','Agent','Manufacturer','End User','E-commerce']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="状态"><el-select v-model="editForm.status" style="width:100%"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="等级"><el-select v-model="editForm.grade" style="width:100%"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="来源"><el-input v-model="editForm.source"/></el-form-item></div><el-form-item label="主营业务"><el-input v-model="editForm.business_scope" type="textarea"/></el-form-item></el-form><template #footer><el-button @click="editDialog=false">取消</el-button><el-button type="primary" @click="saveCustomer">保存</el-button></template></el-dialog>
 

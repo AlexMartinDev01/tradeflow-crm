@@ -26,7 +26,7 @@ const showAdmin=computed(()=>['admin','manager'].includes(role.value));
   <router-link class="nav" to="/"><span class="label">仪表盘</span></router-link>
   <router-link class="nav" to="/analytics"><span class="label">统计分析</span></router-link>
   <router-link class="nav" to="/search"><span class="label">全局搜索</span></router-link>
-  <router-link class="nav" to="/customers"><span class="label">客户360°</span></router-link><router-link class="nav" to="/products-pricing"><span class="label">产品与价格</span></router-link><router-link v-if="showAdmin" class="nav" to="/marketing"><span class="label">客户营销</span></router-link>
+  <router-link class="nav" to="/customers"><span class="label">客户360°</span></router-link><router-link v-if="['admin','manager','sales'].includes(role)" class="nav" to="/public-pool"><span class="label">客户公海</span></router-link><router-link class="nav" to="/products-pricing"><span class="label">产品与价格</span></router-link><router-link v-if="showAdmin" class="nav" to="/marketing"><span class="label">客户营销</span></router-link>
   <router-link v-if="showExcel" class="nav" to="/data/excel"><span class="label">Excel 导入导出</span></router-link>
 
   <template v-if="showSales">
