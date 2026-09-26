@@ -1,10 +1,87 @@
 import {createRouter,createWebHashHistory} from 'vue-router';
-import Dashboard from '../pages/Dashboard.vue';import Knowledge from '../pages/Knowledge.vue';import Reports from '../pages/Reports.vue';import DataQuality from '../pages/DataQuality.vue';import AttachmentBackup from '../pages/AttachmentBackup.vue';import OpsStatus from '../pages/OpsStatus.vue';import MobileQuickCreate from '../pages/MobileQuickCreate.vue';import PrivacySettings from '../pages/PrivacySettings.vue';import Backups from '../pages/Backups.vue';import RecycleBin from '../pages/RecycleBin.vue';import SecuritySettings from '../pages/SecuritySettings.vue';import TeamSettings from '../pages/TeamSettings.vue';import ExchangeRates from '../pages/ExchangeRates.vue';import BrandChannels from '../pages/BrandChannels.vue';import ChannelSettings from '../pages/ChannelSettings.vue';import Customs from '../pages/Customs.vue';import Contracts from '../pages/Contracts.vue';import PublicPool from '../pages/PublicPool.vue';import ProductsPricing from '../pages/ProductsPricing.vue';import Marketing from '../pages/Marketing.vue';import Integrations from '../pages/Integrations.vue';import Analytics from '../pages/Analytics.vue';import Aftersales from '../pages/Aftersales.vue';import Shipments from '../pages/Shipments.vue';import Finance from '../pages/Finance.vue';import Orders from '../pages/Orders.vue';import Automation from '../pages/Automation.vue';import ExcelData from '../pages/ExcelData.vue';import Login from '../pages/Login.vue';import Customers from '../pages/Customers.vue';import CustomerDetail from '../pages/CustomerDetail.vue';import GenericModule from '../pages/GenericModule.vue';import Audit from '../pages/Audit.vue';import CustomFields from '../pages/CustomFields.vue';import Search from '../pages/Search.vue';
-import Inquiries from '../pages/Inquiries.vue';import Opportunities from '../pages/Opportunities.vue';import Quotations from '../pages/Quotations.vue';import Samples from '../pages/Samples.vue';
+import Login from '../pages/Login.vue';
+
+const Dashboard=()=>import('../pages/Dashboard.vue');
+const Knowledge=()=>import('../pages/Knowledge.vue');
+const Reports=()=>import('../pages/Reports.vue');
+const DataQuality=()=>import('../pages/DataQuality.vue');
+const AttachmentBackup=()=>import('../pages/AttachmentBackup.vue');
+const OpsStatus=()=>import('../pages/OpsStatus.vue');
+const MobileQuickCreate=()=>import('../pages/MobileQuickCreate.vue');
+const PrivacySettings=()=>import('../pages/PrivacySettings.vue');
+const Backups=()=>import('../pages/Backups.vue');
+const RecycleBin=()=>import('../pages/RecycleBin.vue');
+const SecuritySettings=()=>import('../pages/SecuritySettings.vue');
+const TeamSettings=()=>import('../pages/TeamSettings.vue');
+const ExchangeRates=()=>import('../pages/ExchangeRates.vue');
+const BrandChannels=()=>import('../pages/BrandChannels.vue');
+const ChannelSettings=()=>import('../pages/ChannelSettings.vue');
+const Customs=()=>import('../pages/Customs.vue');
+const Contracts=()=>import('../pages/Contracts.vue');
+const PublicPool=()=>import('../pages/PublicPool.vue');
+const ProductsPricing=()=>import('../pages/ProductsPricing.vue');
+const Marketing=()=>import('../pages/Marketing.vue');
+const Integrations=()=>import('../pages/Integrations.vue');
+const Analytics=()=>import('../pages/Analytics.vue');
+const Aftersales=()=>import('../pages/Aftersales.vue');
+const Shipments=()=>import('../pages/Shipments.vue');
+const Finance=()=>import('../pages/Finance.vue');
+const Orders=()=>import('../pages/Orders.vue');
+const Automation=()=>import('../pages/Automation.vue');
+const ExcelData=()=>import('../pages/ExcelData.vue');
+const Customers=()=>import('../pages/Customers.vue');
+const CustomerDetail=()=>import('../pages/CustomerDetail.vue');
+const GenericModule=()=>import('../pages/GenericModule.vue');
+const Audit=()=>import('../pages/Audit.vue');
+const CustomFields=()=>import('../pages/CustomFields.vue');
+const Search=()=>import('../pages/Search.vue');
+const Inquiries=()=>import('../pages/Inquiries.vue');
+const Opportunities=()=>import('../pages/Opportunities.vue');
+const Quotations=()=>import('../pages/Quotations.vue');
+const Samples=()=>import('../pages/Samples.vue');
+
 const r=createRouter({history:createWebHashHistory(),routes:[
-{path:'/login',component:Login},{path:'/knowledge',component:Knowledge},{path:'/reports',component:Reports},{path:'/data-quality',component:DataQuality},{path:'/settings/attachment-backup',component:AttachmentBackup},{path:'/settings/ops',component:OpsStatus},{path:'/mobile/quick-create',component:MobileQuickCreate},{path:'/settings/privacy',component:PrivacySettings},{path:'/settings/backups',component:Backups},{path:'/recycle-bin/customers',component:RecycleBin},{path:'/settings/security',component:SecuritySettings},{path:'/',component:Dashboard},{path:'/settings/team',component:TeamSettings},{path:'/settings/exchange-rates',component:ExchangeRates},{path:'/brands-channels',component:BrandChannels},{path:'/settings/channels',component:ChannelSettings},{path:'/customs',component:Customs},{path:'/contracts',component:Contracts},{path:'/public-pool',component:PublicPool},{path:'/products-pricing',component:ProductsPricing},{path:'/marketing',component:Marketing},{path:'/integrations',component:Integrations},{path:'/analytics',component:Analytics},{path:'/aftersales',component:Aftersales},{path:'/shipments',component:Shipments},{path:'/finance',component:Finance},{path:'/orders',component:Orders},{path:'/automation',component:Automation},{path:'/data/excel',component:ExcelData},{path:'/search',component:Search},{path:'/customers',component:Customers},{path:'/customers/:id',component:CustomerDetail},
-{path:'/sales/inquiries',component:Inquiries},{path:'/sales/opportunities',component:Opportunities},{path:'/sales/quotations',component:Quotations},{path:'/sales/samples',component:Samples},
-{path:'/settings/custom-fields',component:CustomFields},{path:'/module/:key',component:GenericModule},{path:'/audit',component:Audit}]});
+  {path:'/login',component:Login},
+  {path:'/',component:Dashboard},
+  {path:'/knowledge',component:Knowledge},
+  {path:'/reports',component:Reports},
+  {path:'/data-quality',component:DataQuality},
+  {path:'/settings/attachment-backup',component:AttachmentBackup},
+  {path:'/settings/ops',component:OpsStatus},
+  {path:'/mobile/quick-create',component:MobileQuickCreate},
+  {path:'/settings/privacy',component:PrivacySettings},
+  {path:'/settings/backups',component:Backups},
+  {path:'/recycle-bin/customers',component:RecycleBin},
+  {path:'/settings/security',component:SecuritySettings},
+  {path:'/settings/team',component:TeamSettings},
+  {path:'/settings/exchange-rates',component:ExchangeRates},
+  {path:'/brands-channels',component:BrandChannels},
+  {path:'/settings/channels',component:ChannelSettings},
+  {path:'/customs',component:Customs},
+  {path:'/contracts',component:Contracts},
+  {path:'/public-pool',component:PublicPool},
+  {path:'/products-pricing',component:ProductsPricing},
+  {path:'/marketing',component:Marketing},
+  {path:'/integrations',component:Integrations},
+  {path:'/analytics',component:Analytics},
+  {path:'/aftersales',component:Aftersales},
+  {path:'/shipments',component:Shipments},
+  {path:'/finance',component:Finance},
+  {path:'/orders',component:Orders},
+  {path:'/automation',component:Automation},
+  {path:'/data/excel',component:ExcelData},
+  {path:'/search',component:Search},
+  {path:'/customers',component:Customers},
+  {path:'/customers/:id',component:CustomerDetail},
+  {path:'/sales/inquiries',component:Inquiries},
+  {path:'/sales/opportunities',component:Opportunities},
+  {path:'/sales/quotations',component:Quotations},
+  {path:'/sales/samples',component:Samples},
+  {path:'/settings/custom-fields',component:CustomFields},
+  {path:'/module/:key',component:GenericModule},
+  {path:'/audit',component:Audit}
+]});
+
 const roleRules=[
   {match:(p:string)=>p==='/settings/team',roles:['admin']},
   {match:(p:string)=>p==='/settings/backups',roles:['admin']},
@@ -36,4 +113,6 @@ r.beforeEach(to=>{
   const rule=roleRules.find(x=>x.match(to.path));
   if(rule&&user&&!rule.roles.includes(String(user.role||'')))return '/';
   return true;
-});export default r;
+});
+
+export default r;
