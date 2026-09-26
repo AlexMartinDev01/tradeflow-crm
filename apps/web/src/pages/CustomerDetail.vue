@@ -7,10 +7,10 @@ import AttachmentsPanel from '../components/AttachmentsPanel.vue';
 import {api} from '../api/client';
 
 const route=useRoute(),id=String(route.params.id);
-const customer=ref<any>({}),contacts=ref<any[]>([]),activities=ref<any[]>([]),timeline=ref<any[]>([]),tasks=ref<any[]>([]),brands=ref<any[]>([]),brandLinks=ref<any[]>([]),fieldDefs=ref<any[]>([]),tags=ref<any[]>([]),owners=ref<any[]>([]),collaborators=ref<any[]>([]),organization=ref<any>({parent:null,children:[]}),customerOptions=ref<any[]>([]),me=ref<any>(null);
+const customer=ref<any>({}),insights=ref<any>(null),contacts=ref<any[]>([]),activities=ref<any[]>([]),timeline=ref<any[]>([]),tasks=ref<any[]>([]),brands=ref<any[]>([]),brandLinks=ref<any[]>([]),fieldDefs=ref<any[]>([]),tags=ref<any[]>([]),owners=ref<any[]>([]),collaborators=ref<any[]>([]),organization=ref<any>({parent:null,children:[]}),customerOptions=ref<any[]>([]),me=ref<any>(null);
 const cDialog=ref(false),aDialog=ref(false),channelDialog=ref(false),editDialog=ref(false),brandDialog=ref(false),taskDialog=ref(false),fieldDialog=ref(false),tagDialog=ref(false),transferDialog=ref(false),collabDialog=ref(false),orgDialog=ref(false),mergeDialog=ref(false),departDialog=ref(false);
 const selectedContact=ref<any>(null),departingContact=ref<any>(null),newTag=reactive<any>({name:'',category:''}),transfer=reactive<any>({owner_id:''}),collabForm=reactive<any>({user_id:''}),orgForm=reactive<any>({parent_customer_id:'',organization_role:''}),mergeForm=reactive<any>({target_id:''}),departForm=reactive<any>({successor_contact_id:'',departed_at:new Date().toISOString().slice(0,16),note:''});
-const contact=reactive<any>({name:'',title:'',department:'',role:'',language:'English',timezone:'',is_primary:0});
+const contact=reactive<any>({name:'',title:'',department:'',role:'',language:'English',timezone:'',birthday:'',anniversary:'',is_primary:0});
 const activity=reactive<any>({type:'whatsapp',subject:'',content:'',result:'',next_action:'',occurred_at:new Date().toISOString().slice(0,16)});
 const channel=reactive<any>({channel:'email',value:'',label:'',is_primary:0,preferred_time:''});
 const editForm=reactive<any>({});
@@ -27,12 +27,13 @@ const availableCollaborators=computed(()=>owners.value.filter((x:any)=>x.id!==cu
 const activeContacts=computed(()=>contacts.value.filter((x:any)=>!x.is_departed));
 const mergeTargets=computed(()=>customerOptions.value.filter((x:any)=>x.id!==id));
 
-function resetContact(){Object.assign(contact,{name:'',title:'',department:'',role:'',language:'English',timezone:'',is_primary:0})}
+function resetContact(){Object.assign(contact,{name:'',title:'',department:'',role:'',language:'English',timezone:'',birthday:'',anniversary:'',is_primary:0})}
 function resetTask(){Object.assign(taskForm,{title:'',description:'',due_at:'',priority:'normal',status:'todo'})}
 async function load(){
   me.value=(await api.get('/auth/me')).data;
   owners.value=(await api.get('/users/lookup')).data;
   customer.value=(await api.get(`/customers/${id}`)).data;
+  insights.value=(await api.get(`/customers/${id}/insights`)).data;
   Object.assign(editForm,JSON.parse(JSON.stringify(customer.value)));
   Object.keys(customValues).forEach(k=>delete customValues[k]);Object.assign(customValues,customer.value.custom_fields||{});
   const cs=(await api.get('/contacts',{params:{customer_id:id,size:100}})).data.data;
@@ -93,6 +94,24 @@ onMounted(load);
 <template><AppLayout>
 <div class="toolbar"><div><h2 style="margin:0">{{customer.name}}</h2><span class="muted">{{customer.english_name||'-'}} · {{customer.country||'-'}} {{customer.city||''}}</span></div><div style="display:flex;gap:8px"><el-button @click="openSite" :disabled="!customer.website">打开官网</el-button><el-button @click="editDialog=true">编辑客户</el-button><el-button v-if="canManageTeam" type="danger" plain @click="releaseToPool">释放到公海</el-button><el-button type="primary" @click="aDialog=true">新增跟进</el-button></div></div>
 
+<div v-if="insights" class="grid stats" style="margin-bottom:16px">
+  <div class="stat"><span class="muted">资料完整度</span><b>{{insights.completeness.score}}%</b><small class="muted">缺失：{{insights.completeness.missing.slice(0,3).join('、')||'无'}}</small></div>
+  <div class="stat"><span class="muted">客户潜力评分</span><b>{{insights.potential.score}} / 100</b><small class="muted">规则评分，不是AI预测</small></div>
+  <div class="stat"><span class="muted">累计订单</span><b>{{insights.value.order_count}}</b><small class="muted">最近订单：{{insights.value.last_order_at?String(insights.value.last_order_at).slice(0,10):'-'}}</small></div>
+  <div class="stat"><span class="muted">最近跟进</span><b>{{insights.engagement.days_since_activity==null?'-':insights.engagement.days_since_activity+' 天前'}}</b><small class="muted">开放商机：{{insights.engagement.open_opportunities}}</small></div>
+</div>
+
+<div v-if="insights?.value?.lifetime_value_by_currency?.length" class="card" style="margin-bottom:16px">
+  <div class="toolbar"><div><h3 class="section-title">客户价值 / LTV</h3><span class="muted">按币种分别统计，避免跨币种直接相加</span></div></div>
+  <el-table :data="insights.value.lifetime_value_by_currency">
+    <el-table-column prop="currency" label="币种" width="100"/>
+    <el-table-column prop="order_count" label="订单数" width="100"/>
+    <el-table-column label="累计销售额"><template #default="s">{{Number(s.row.revenue||0).toLocaleString()}}</template></el-table-column>
+    <el-table-column label="平均订单额"><template #default="s">{{Number(s.row.avg_order_value||0).toLocaleString()}}</template></el-table-column>
+    <el-table-column prop="last_order_at" label="最近订单"/>
+  </el-table>
+</div>
+
 <div class="grid" style="grid-template-columns:1fr 1.25fr">
 <div class="card">
   <div class="toolbar"><h3 class="section-title">客户画像</h3><el-button link type="primary" @click="fieldDialog=true">编辑自定义属性</el-button></div>
@@ -114,7 +133,7 @@ onMounted(load);
 <div class="card">
   <div class="toolbar"><h3 class="section-title">联系人与多渠道联系方式</h3><el-button size="small" type="primary" plain @click="cDialog=true">添加联系人</el-button></div>
   <div v-for="c in contacts" :key="c.id" style="padding:12px 0;border-bottom:1px solid #edf1f6">
-    <div style="display:flex;justify-content:space-between"><div><b>{{c.name}}</b> <el-tag v-if="c.is_primary" size="small" type="success">主要</el-tag> <el-tag v-if="c.is_departed" size="small" type="info">已离职</el-tag> <span class="muted">{{c.title||''}} {{c.role?'· '+c.role:''}}</span></div><div><el-button v-if="!c.is_departed" link type="primary" @click="prepareChannel(c)">+ 联系方式</el-button><el-button v-if="!c.is_departed" link type="warning" @click="openDepart(c)">离职交接</el-button><el-button link type="danger" @click="removeContact(c)">删除</el-button></div></div>
+    <div style="display:flex;justify-content:space-between"><div><b>{{c.name}}</b> <el-tag v-if="c.is_primary" size="small" type="success">主要</el-tag> <el-tag v-if="c.is_departed" size="small" type="info">已离职</el-tag> <span class="muted">{{c.title||''}} {{c.role?'· '+c.role:''}}</span><span v-if="c.birthday" class="muted"> · 生日 {{c.birthday}}</span><span v-if="c.anniversary" class="muted"> · 纪念日 {{c.anniversary}}</span></div><div><el-button v-if="!c.is_departed" link type="primary" @click="prepareChannel(c)">+ 联系方式</el-button><el-button v-if="!c.is_departed" link type="warning" @click="openDepart(c)">离职交接</el-button><el-button link type="danger" @click="removeContact(c)">删除</el-button></div></div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px"><el-button v-for="ch in c.channels" :key="ch.id" size="small" @click="openChannel(ch)" @contextmenu.prevent="removeChannel(ch)">{{ch.channel}}：{{ch.value}}</el-button><span v-if="!c.channels?.length" class="muted">暂无联系方式</span></div>
   </div>
   <el-empty v-if="!contacts.length" description="暂无联系人"/>
@@ -150,7 +169,7 @@ onMounted(load);
 
 <el-dialog v-model="fieldDialog" title="客户自定义属性" width="650"><el-form label-position="top"><el-form-item v-for="f in activeFields" :key="f.id" :label="f.label"><el-select v-if="['select','multi_select'].includes(f.data_type)" v-model="customValues[f.field_key]" :multiple="f.data_type==='multi_select'" style="width:100%"><el-option v-for="o in (f.options||[])" :key="o" :label="o" :value="o"/></el-select><el-switch v-else-if="f.data_type==='boolean'" v-model="customValues[f.field_key]"/><el-input v-else v-model="customValues[f.field_key]" :type="fieldInputType(f)"/></el-form-item></el-form><template #footer><el-button @click="fieldDialog=false">取消</el-button><el-button type="primary" @click="saveCustomFields">保存</el-button></template></el-dialog>
 
-<el-dialog v-model="cDialog" title="添加联系人"><el-form label-position="top"><div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="姓名"><el-input v-model="contact.name"/></el-form-item><el-form-item label="职位"><el-input v-model="contact.title"/></el-form-item><el-form-item label="部门"><el-input v-model="contact.department"/></el-form-item><el-form-item label="角色"><el-input v-model="contact.role"/></el-form-item><el-form-item label="语言"><el-input v-model="contact.language"/></el-form-item><el-form-item label="时区"><el-input v-model="contact.timezone"/></el-form-item></div><el-form-item><el-checkbox v-model="contact.is_primary" :true-value="1" :false-value="0">设为主要联系人</el-checkbox></el-form-item></el-form><template #footer><el-button @click="cDialog=false">取消</el-button><el-button type="primary" @click="addContact">保存</el-button></template></el-dialog>
+<el-dialog v-model="cDialog" title="添加联系人"><el-form label-position="top"><div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="姓名"><el-input v-model="contact.name"/></el-form-item><el-form-item label="职位"><el-input v-model="contact.title"/></el-form-item><el-form-item label="部门"><el-input v-model="contact.department"/></el-form-item><el-form-item label="角色"><el-input v-model="contact.role"/></el-form-item><el-form-item label="语言"><el-input v-model="contact.language"/></el-form-item><el-form-item label="时区"><el-input v-model="contact.timezone"/></el-form-item><el-form-item label="生日"><el-input v-model="contact.birthday" type="date"/></el-form-item><el-form-item label="客户纪念日"><el-input v-model="contact.anniversary" type="date"/></el-form-item></div><el-form-item><el-checkbox v-model="contact.is_primary" :true-value="1" :false-value="0">设为主要联系人</el-checkbox></el-form-item></el-form><template #footer><el-button @click="cDialog=false">取消</el-button><el-button type="primary" @click="addContact">保存</el-button></template></el-dialog>
 
 <el-dialog v-model="channelDialog" title="添加联系方式"><el-form label-position="top"><el-form-item label="渠道"><el-select v-model="channel.channel" style="width:100%"><el-option v-for="x in ['email','phone','whatsapp','wechat','line','vk','telegram','viber','kakaotalk','zalo','linkedin','facebook','messenger','instagram','x','skype','teams','zoom','website','store']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="账号 / 号码 / 链接"><el-input v-model="channel.value"/></el-form-item><el-form-item label="备注"><el-input v-model="channel.label"/></el-form-item><el-form-item label="最佳联系时间"><el-input v-model="channel.preferred_time"/></el-form-item><el-form-item><el-checkbox v-model="channel.is_primary" :true-value="1" :false-value="0">设为首选联系方式</el-checkbox></el-form-item></el-form><template #footer><el-button @click="channelDialog=false">取消</el-button><el-button type="primary" @click="addChannel">保存</el-button></template></el-dialog>
 
