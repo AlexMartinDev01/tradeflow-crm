@@ -53,3 +53,9 @@ npm run dev
 20. 系统配置与集成
 21. 移动端适配
 22. 数据安全与合规
+
+
+## GitHub Pages 演示
+仓库已提供 GitHub Pages 自动部署工作流。Pages 演示模式把数据保存在浏览器 localStorage，用于直接体验 UI 和业务流程；正式生产环境仍使用 Node.js API + 数据库。
+
+首次启用：Repository Settings → Pages → Build and deployment → Source 选择 **GitHub Actions**。之后每次 main 更新会自动部署。
