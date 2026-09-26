@@ -6,7 +6,7 @@ import {api} from '../api/client';
 
 const campaigns=ref<any[]>([]),segments=ref<any[]>([]),templates=ref<any[]>([]),customers=ref<any[]>([]),tags=ref<any[]>([]),owners=ref<any[]>([]);
 const campaignDialog=ref(false),segmentDialog=ref(false),templateDialog=ref(false),recipientsDialog=ref(false),statsDialog=ref(false);
-const recipients=ref<any[]>([]),stats=ref<any>({}),previewRows=ref<any[]>([]),previewDialog=ref(false),selectedCampaign=ref<any>(null);
+const recipients=ref<any[]>([]),stats=ref<any>({}),previewRows=ref<any[]>([]),previewDialog=ref(false),selectedCampaign=ref<any>(null),emailStatus=ref<any>({configured:false}),sendingCampaign=ref(''),sendingRecipient=ref('');
 
 const campaign=reactive<any>({name:'',type:'email',segment_id:'',segment_rule:{},subject:'',template_id:'',scheduled_at:'',content:'',status:'draft'});
 const segment=reactive<any>({name:'',is_shared:0,rules:{country:'',status:'',grade:'',source:'',industry:'',customer_type:'',tag_id:'',owner_id:''}});
@@ -21,6 +21,7 @@ async function load(){
     api.get('/customers',{params:{size:300}}),api.get('/tags',{params:{size:200}}),api.get('/users/lookup')
   ]);
   campaigns.value=c.data.data;segments.value=s.data;templates.value=t.data;customers.value=cu.data.data;tags.value=tg.data.data;owners.value=ow.data;
+  try{emailStatus.value=(await api.get('/email/status')).data}catch{emailStatus.value={configured:false}}
 }
 async function saveCampaign(){
   if(!campaign.name.trim())return ElMessage.warning('请输入活动名称');
@@ -32,6 +33,21 @@ async function prepareCampaign(c:any){
 }
 async function openRecipients(c:any){selectedCampaign.value=c;recipients.value=(await api.get(`/marketing/campaigns/${c.id}/recipients`)).data;recipientsDialog.value=true}
 async function markSent(r:any){await api.post(`/marketing/recipients/${r.id}/mark-sent`,{});await openRecipients(selectedCampaign.value)}
+async function sendRecipient(r:any){
+  sendingRecipient.value=r.id;
+  try{await api.post(`/marketing/recipients/${r.id}/send`,{});ElMessage.success('邮件已通过 SMTP 发送');await openRecipients(selectedCampaign.value);await load()}
+  catch(e:any){ElMessage.error(e.response?.data?.message||e.response?.data?.error||'发送失败');await openRecipients(selectedCampaign.value)}
+  finally{sendingRecipient.value=''}
+}
+async function sendCampaign(c:any){
+  if(!emailStatus.value.configured)return ElMessage.warning('请先在“系统集成”配置并启用 SMTP');
+  await ElMessageBox.confirm('本次最多发送 20 封 prepared/failed 邮件。发送前系统会再次检查退订状态。确认继续？','实际发送邮件',{type:'warning',confirmButtonText:'发送下一批 20 封'});
+  sendingCampaign.value=c.id;
+  try{
+    const {data}=await api.post(`/marketing/campaigns/${c.id}/send`,{limit:20});await load();
+    ElMessage[data.failed?'warning':'success'](`本批：成功 ${data.sent}，失败 ${data.failed}，跳过 ${data.skipped}，剩余 ${data.remaining}`);
+  }finally{sendingCampaign.value=''}
+}
 async function optOut(r:any){await ElMessageBox.confirm(`确认将 ${r.customer_name} 标记为邮件退订？`,'确认');await api.post('/marketing/consent',{customer_id:r.customer_id,contact_id:r.contact_id,channel:'email',status:'opt_out',source:'campaign'});ElMessage.success('已记录退订');await openRecipients(selectedCampaign.value)}
 async function openStats(c:any){selectedCampaign.value=c;stats.value=(await api.get(`/marketing/campaigns/${c.id}/stats`)).data;statsDialog.value=true}
 
@@ -45,13 +61,15 @@ onMounted(load);
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">客户营销</h2><span class="muted">动态分群、模板、营销名单、退订控制和活动转化</span></div></div>
+<div class="toolbar"><div><h2 style="margin:0">客户营销</h2><span class="muted">动态分群、模板、营销名单、退订控制、SMTP 实际发送和活动转化</span></div></div>
+<el-alert v-if="emailStatus.configured" type="success" :closable="false" :title="`SMTP 已启用：${emailStatus.integration?.name||'SMTP'} · ${emailStatus.config?.from_email||''}`" style="margin-bottom:14px"/>
+<el-alert v-else type="warning" :closable="false" title="尚未启用 SMTP。可以先准备名单和模板，也可以在外部发送后手工标记；系统不会伪装成已实际发送。" style="margin-bottom:14px"/>
 <el-tabs>
 <el-tab-pane label="营销活动">
-  <div class="toolbar"><span class="muted">不会在未配置外部邮件服务时自动发送；系统先生成合规名单和个性化内容。</span><el-button type="primary" @click="campaignDialog=true">新建活动</el-button></div>
+  <div class="toolbar"><span class="muted">先准备名单；真实 SMTP 发送需手工确认，每批最多 20 封，发送前再次检查退订。</span><el-button type="primary" @click="campaignDialog=true">新建活动</el-button></div>
   <div class="card"><el-table :data="campaigns">
     <el-table-column prop="name" label="活动" min-width="180"/><el-table-column prop="type" label="类型" width="90"/><el-table-column prop="subject" label="主题" min-width="180"/><el-table-column prop="status" label="状态" width="110"/><el-table-column prop="scheduled_at" label="计划时间" width="190"/>
-    <el-table-column label="操作" width="250"><template #default="s"><el-button link type="primary" @click="prepareCampaign(s.row)">准备名单</el-button><el-button link @click="openRecipients(s.row)">收件人</el-button><el-button link @click="openStats(s.row)">转化统计</el-button></template></el-table-column>
+    <el-table-column label="操作" width="350"><template #default="s"><el-button link type="primary" @click="prepareCampaign(s.row)">准备名单</el-button><el-button v-if="emailStatus.configured&&['prepared','sending','partial_failed'].includes(s.row.status)" link type="success" :loading="sendingCampaign===s.row.id" @click="sendCampaign(s.row)">发送下一批</el-button><el-button link @click="openRecipients(s.row)">收件人</el-button><el-button link @click="openStats(s.row)">转化统计</el-button></template></el-table-column>
   </el-table></div>
 </el-tab-pane>
 
@@ -91,7 +109,11 @@ onMounted(load);
 
 <el-dialog v-model="previewDialog" title="分群预览" width="820"><el-table :data="previewRows" max-height="520"><el-table-column prop="name" label="客户" min-width="180"/><el-table-column prop="country" label="国家"/><el-table-column prop="contact_name" label="联系人"/><el-table-column prop="email" label="邮箱" min-width="200"/><el-table-column prop="consent" label="营销许可"/></el-table></el-dialog>
 
-<el-dialog v-model="recipientsDialog" title="营销收件人" width="980"><el-table :data="recipients" max-height="560"><el-table-column prop="customer_name" label="客户" min-width="160"/><el-table-column prop="contact_name" label="联系人"/><el-table-column prop="address" label="邮箱" min-width="190"/><el-table-column prop="status" label="状态"/><el-table-column prop="reason" label="跳过原因"/><el-table-column label="操作" width="150"><template #default="s"><el-button v-if="s.row.status==='prepared'" link @click="markSent(s.row)">标记已发送</el-button><el-button link type="danger" @click="optOut(s.row)">退订</el-button></template></el-table-column></el-table></el-dialog>
+<el-dialog v-model="recipientsDialog" title="营销收件人" width="1180"><el-table :data="recipients" max-height="560">
+<el-table-column prop="customer_name" label="客户" min-width="150"/><el-table-column prop="contact_name" label="联系人" width="120"/><el-table-column prop="address" label="邮箱" min-width="190"/><el-table-column prop="status" label="状态" width="100"/>
+<el-table-column prop="attempt_count" label="尝试" width="70"/><el-table-column prop="provider_message_id" label="Message-ID" min-width="190" show-overflow-tooltip/><el-table-column prop="send_error" label="发送错误" min-width="180" show-overflow-tooltip/><el-table-column prop="reason" label="跳过原因" width="120"/>
+<el-table-column label="操作" width="210" fixed="right"><template #default="s"><el-button v-if="emailStatus.configured&&['prepared','failed'].includes(s.row.status)" link type="success" :loading="sendingRecipient===s.row.id" @click="sendRecipient(s.row)">{{s.row.status==='failed'?'重试':'实际发送'}}</el-button><el-button v-else-if="!emailStatus.configured&&s.row.status==='prepared'" link @click="markSent(s.row)">标记外部已发送</el-button><el-button link type="danger" @click="optOut(s.row)">退订</el-button></template></el-table-column>
+</el-table></el-dialog>
 
-<el-dialog v-model="statsDialog" title="活动转化统计" width="620"><el-descriptions :column="2" border><el-descriptions-item label="总名单">{{stats.total||0}}</el-descriptions-item><el-descriptions-item label="已发送">{{stats.sent||0}}</el-descriptions-item><el-descriptions-item label="跳过">{{stats.skipped||0}}</el-descriptions-item><el-descriptions-item label="转化客户">{{stats.converted||0}}</el-descriptions-item><el-descriptions-item label="转化率">{{Number(stats.conversion_rate||0).toFixed(1)}}%</el-descriptions-item><el-descriptions-item label="归因订单收入">{{Number(stats.revenue||0).toLocaleString()}}</el-descriptions-item></el-descriptions></el-dialog>
+<el-dialog v-model="statsDialog" title="活动转化统计" width="620"><el-descriptions :column="2" border><el-descriptions-item label="总名单">{{stats.total||0}}</el-descriptions-item><el-descriptions-item label="已发送">{{stats.sent||0}}</el-descriptions-item><el-descriptions-item label="发送失败">{{stats.failed||0}}</el-descriptions-item><el-descriptions-item label="跳过">{{stats.skipped||0}}</el-descriptions-item><el-descriptions-item label="转化客户">{{stats.converted||0}}</el-descriptions-item><el-descriptions-item label="转化率">{{Number(stats.conversion_rate||0).toFixed(1)}}%</el-descriptions-item><el-descriptions-item label="归因订单收入">{{Number(stats.revenue||0).toLocaleString()}}</el-descriptions-item></el-descriptions></el-dialog>
 </AppLayout></template>
