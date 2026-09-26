@@ -132,12 +132,17 @@ test.describe('TradeFlow complex mobile workbenches',()=>{
     await page.getByRole('button',{name:'详情'}).first().click();
     const quoteDrawer=page.getByRole('dialog',{name:'报价详情'});
     await expect(quoteDrawer).toBeVisible();
-    let box=await quoteDrawer.boundingBox();
-    expect(box).toBeTruthy();
-    expect(box.x).toBeGreaterThanOrEqual(-1);
-    expect(box.x+box.width).toBeLessThanOrEqual(391);
+    const expectDrawerInsideViewport=async(drawer,label)=>{
+      await expect.poll(async()=>{
+        const box=await drawer.boundingBox();
+        if(!box)return 9999;
+        return Math.max(Math.abs(Math.min(0,box.x)),Math.max(0,box.x+box.width-390));
+      },{message:label+' should finish its slide-in animation inside the phone viewport',timeout:3000}).toBeLessThanOrEqual(1);
+    };
+    await expectDrawerInsideViewport(quoteDrawer,'quotation detail');
     await expectNoPageOverflow(page,'quotation detail');
     await page.keyboard.press('Escape');
+    await expect(quoteDrawer).toBeHidden();
 
     await page.goto('/#/orders');
     await expect(page.getByRole('heading',{name:'订单执行'})).toBeVisible();
@@ -145,12 +150,10 @@ test.describe('TradeFlow complex mobile workbenches',()=>{
     await page.getByRole('button',{name:'详情'}).first().click();
     const orderDrawer=page.getByRole('dialog',{name:'订单执行详情'});
     await expect(orderDrawer).toBeVisible();
-    box=await orderDrawer.boundingBox();
-    expect(box).toBeTruthy();
-    expect(box.x).toBeGreaterThanOrEqual(-1);
-    expect(box.x+box.width).toBeLessThanOrEqual(391);
+    await expectDrawerInsideViewport(orderDrawer,'order detail');
     await expectNoPageOverflow(page,'order detail');
     await page.keyboard.press('Escape');
+    await expect(orderDrawer).toBeHidden();
 
     await page.goto('/#/aftersales');
     await expect(page.getByRole('heading',{name:'售后与投诉'})).toBeVisible();
@@ -158,10 +161,7 @@ test.describe('TradeFlow complex mobile workbenches',()=>{
     await page.getByRole('button',{name:'详情'}).first().click();
     const afterDrawer=page.getByRole('dialog',{name:'售后工单详情'});
     await expect(afterDrawer).toBeVisible();
-    box=await afterDrawer.boundingBox();
-    expect(box).toBeTruthy();
-    expect(box.x).toBeGreaterThanOrEqual(-1);
-    expect(box.x+box.width).toBeLessThanOrEqual(391);
+    await expectDrawerInsideViewport(afterDrawer,'aftersales detail');
     await expectNoPageOverflow(page,'aftersales detail');
     await page.keyboard.press('Escape');
 
