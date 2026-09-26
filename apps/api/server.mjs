@@ -606,6 +606,37 @@ async function deliverEmail(row,{to,subject,text}){
   }finally{try{transport.close()}catch{}}
 }
 
+async function sendMarketingRecipient(recipientId){
+  const r=db.prepare(`SELECT cr.*,c.name customer_name,ct.name contact_name,ca.name campaign_name
+    FROM campaign_recipients cr JOIN customers c ON c.id=cr.customer_id LEFT JOIN contacts ct ON ct.id=cr.contact_id JOIN campaigns ca ON ca.id=cr.campaign_id WHERE cr.id=?`).get(recipientId);
+  if(!r)throw new Error('recipient_not_found');
+  if(!['prepared','failed'].includes(r.status))return {ok:false,skipped:true,reason:`status_${r.status}`,recipient_id:r.id};
+  const consent=marketingConsent(r.customer_id,r.contact_id,'email');
+  if(['opt_out','blocked'].includes(consent)){
+    db.prepare("UPDATE campaign_recipients SET status='skipped',reason=?,send_error=NULL WHERE id=?").run(consent,r.id);
+    return {ok:false,skipped:true,reason:consent,recipient_id:r.id};
+  }
+  if(!validEmail(r.address)){
+    db.prepare("UPDATE campaign_recipients SET status='skipped',reason='invalid_email',send_error=NULL WHERE id=?").run(r.id);
+    return {ok:false,skipped:true,reason:'invalid_email',recipient_id:r.id};
+  }
+  const integration=smtpIntegration();if(!integration)throw new Error('smtp_not_configured');
+  db.prepare('UPDATE campaign_recipients SET attempt_count=COALESCE(attempt_count,0)+1 WHERE id=?').run(r.id);
+  try{
+    const info=await deliverEmail(integration,{to:r.address,subject:r.personalized_subject||r.campaign_name,text:r.personalized_body||''});
+    db.prepare("UPDATE campaign_recipients SET status='sent',sent_at=?,provider_message_id=?,send_error=NULL,reason=NULL WHERE id=?").run(now(),info.message_id,r.id);
+    db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)')
+      .run(randomUUID(),integration.id,'email.send','success',250,String(info.response||info.message_id||'sent').slice(0,500),now());
+    return {ok:true,recipient_id:r.id,address:r.address,message_id:info.message_id};
+  }catch(e){
+    const msg=String(e?.message||e).slice(0,500);
+    db.prepare("UPDATE campaign_recipients SET status='failed',send_error=? WHERE id=?").run(msg,r.id);
+    db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)')
+      .run(randomUUID(),integration.id,'email.send','failed',null,msg,now());
+    return {ok:false,recipient_id:r.id,address:r.address,error:msg};
+  }
+}
+
 async function emitIntegrationEvent(event,payload){
   const rows=db.prepare("SELECT * FROM integrations WHERE enabled=1 AND type='webhook'").all();
   for(const row of rows){
@@ -1727,7 +1758,33 @@ const server = http.createServer(async (req,res)=>{
         const rs=db.prepare('SELECT * FROM campaign_recipients WHERE campaign_id=?').all(campaign.id);
         let converted=0,revenue=0;
         for(const r of rs){const o=db.prepare('SELECT COALESCE(SUM(total),0) revenue,COUNT(*) c FROM orders WHERE customer_id=? AND created_at>=?').get(r.customer_id,campaign.created_at);if(Number(o.c)>0){converted++;revenue+=Number(o.revenue||0);if(!r.converted_at)db.prepare('UPDATE campaign_recipients SET converted_at=? WHERE id=?').run(now(),r.id);}}
-        return json(res,200,{total:rs.length,prepared:rs.filter(x=>x.status==='prepared').length,sent:rs.filter(x=>x.status==='sent').length,skipped:rs.filter(x=>x.status==='skipped').length,converted,revenue,conversion_rate:rs.length?converted/rs.length*100:0});
+        return json(res,200,{total:rs.length,prepared:rs.filter(x=>x.status==='prepared').length,sent:rs.filter(x=>x.status==='sent').length,failed:rs.filter(x=>x.status==='failed').length,skipped:rs.filter(x=>x.status==='skipped').length,converted,revenue,conversion_rate:rs.length?converted/rs.length*100:0});
+      }
+      const sendCampaign=p.match(/^\/api\/marketing\/campaigns\/([0-9a-f-]+)\/send$/);
+      if(sendCampaign&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        if(!smtpIntegration())return json(res,503,{error:'smtp_not_configured',message:'尚未配置并启用 SMTP 邮件集成'});
+        const campaign=db.prepare('SELECT * FROM campaigns WHERE id=?').get(sendCampaign[1]);if(!campaign)return json(res,404,{error:'not_found'});
+        const b=await body(req),limit=Math.max(1,Math.min(50,Number(b.limit||20)));
+        const rows=db.prepare("SELECT id FROM campaign_recipients WHERE campaign_id=? AND status IN ('prepared','failed') ORDER BY created_at LIMIT ?").all(campaign.id,limit);
+        const result={attempted:0,sent:0,failed:0,skipped:0,errors:[]};
+        if(rows.length)db.prepare("UPDATE campaigns SET status='sending',updated_at=? WHERE id=?").run(now(),campaign.id);
+        for(const x of rows){
+          result.attempted++;const r=await sendMarketingRecipient(x.id);
+          if(r.ok)result.sent++;else if(r.skipped)result.skipped++;else{result.failed++;result.errors.push({recipient_id:x.id,error:r.error});}
+        }
+        const remaining=Number(db.prepare("SELECT COUNT(*) c FROM campaign_recipients WHERE campaign_id=? AND status IN ('prepared','failed')").get(campaign.id)?.c||0);
+        const nextStatus=remaining===0?'sent':(result.failed?'partial_failed':'sending');
+        db.prepare('UPDATE campaigns SET status=?,sent_at=CASE WHEN ?=0 THEN COALESCE(sent_at,?) ELSE sent_at END,updated_at=? WHERE id=?').run(nextStatus,remaining,now(),now(),campaign.id);
+        audit(user,'send_batch','campaign',campaign.id,req,{...result,remaining});
+        return json(res,result.failed?207:200,{...result,remaining,campaign_status:nextStatus});
+      }
+      const sendOne=p.match(/^\/api\/marketing\/recipients\/([0-9a-f-]+)\/send$/);
+      if(sendOne&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        if(!smtpIntegration())return json(res,503,{error:'smtp_not_configured',message:'尚未配置并启用 SMTP 邮件集成'});
+        const result=await sendMarketingRecipient(sendOne[1]);audit(user,'send','campaign_recipient',sendOne[1],req,result);
+        return json(res,result.ok?200:(result.skipped?409:502),result);
       }
       const sent=p.match(/^\/api\/marketing\/recipients\/([0-9a-f-]+)\/mark-sent$/);
       if(sent&&req.method==='POST'){
