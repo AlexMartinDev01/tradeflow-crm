@@ -1431,6 +1431,57 @@ const server = http.createServer(async (req,res)=>{
       }
     }
 
+    // ---- Business card OCR connector ----
+    if(p==='/api/ocr/status' && req.method==='GET'){
+      const row=db.prepare("SELECT id,name,provider,base_url,updated_at FROM integrations WHERE enabled=1 AND type='ocr' ORDER BY updated_at DESC LIMIT 1").get();
+      return json(res,200,{configured:!!row,integration:row||null});
+    }
+    if(p==='/api/ocr/business-card' && req.method==='POST'){
+      if(!['admin','manager','sales','followup'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const row=db.prepare("SELECT * FROM integrations WHERE enabled=1 AND type='ocr' ORDER BY updated_at DESC LIMIT 1").get();
+      if(!row)return json(res,503,{error:'ocr_not_configured',message:'管理员尚未配置 OCR 服务'});
+      const b=await body(req),image=String(b.image_base64||''),mime=String(b.mime_type||'image/jpeg');
+      if(!image||!/^image\//i.test(mime))return json(res,400,{error:'image_required'});
+      if(image.length>12_000_000)return json(res,413,{error:'image_too_large',message:'名片图片不能超过约 8MB'});
+      const cfg=parseJSON(row.config,{})||{},target=row.base_url||cfg.url;if(!target)return json(res,400,{error:'ocr_endpoint_missing'});
+      const headers={'content-type':'application/json','user-agent':'TradeFlow-CRM/1.0'};
+      const secret=row.secret_env?process.env[row.secret_env]||'':'';
+      if(secret){
+        const header=String(cfg.auth_header||'authorization').toLowerCase(),prefix=cfg.auth_prefix===undefined?'Bearer':String(cfg.auth_prefix||'');
+        headers[header]=prefix?`${prefix} ${secret}`:secret;
+      }
+      const bodyText=JSON.stringify({mode:'business_card',image_base64:image,mime_type:mime});
+      let statusCode=null,responseText='',status='failed';
+      try{
+        const resp=await fetch(target,{method:'POST',headers,body:bodyText,signal:AbortSignal.timeout(Number(cfg.timeout_ms||15000))});
+        statusCode=resp.status;responseText=(await resp.text()).slice(0,100_000);status=resp.ok?'success':'failed';
+        db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)')
+          .run(randomUUID(),row.id,'ocr.business_card',status,statusCode,responseText.slice(0,500),now());
+        if(!resp.ok)return json(res,502,{error:'ocr_provider_failed',status:resp.status,message:'OCR 服务调用失败'});
+        let parsed;try{parsed=JSON.parse(responseText)}catch{return json(res,502,{error:'ocr_invalid_response',message:'OCR 服务未返回 JSON'});}
+        const d=parsed?.data||parsed?.result||parsed||{},pick=(...vals)=>vals.find(v=>v!==undefined&&v!==null&&String(v).trim()!=='')||'';
+        const normalized={
+          company_name:pick(d.company_name,d.companyName,d.company,d.organization,d.organisation),
+          contact_name:pick(d.contact_name,d.contactName,d.person_name,d.personName,d.name),
+          title:pick(d.title,d.job_title,d.jobTitle,d.position),
+          department:pick(d.department,d.dept),
+          email:pick(d.email,d.mail),
+          phone:pick(d.phone,d.mobile,d.tel,d.telephone),
+          whatsapp:pick(d.whatsapp,d.whats_app),
+          website:pick(d.website,d.web,d.url),
+          country:pick(d.country,d.country_name),
+          city:pick(d.city),
+          address:pick(d.address,d.full_address),
+          confidence:d.confidence??parsed?.confidence??null
+        };
+        audit(user,'ocr_business_card','integration',row.id,req,{provider:row.provider||row.name,status:'success'});
+        return json(res,200,{provider:{id:row.id,name:row.name,provider:row.provider},fields:normalized});
+      }catch(e){
+        try{db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),row.id,'ocr.business_card','failed',statusCode,String(e?.message||e).slice(0,500),now());}catch{}
+        return json(res,502,{error:'ocr_provider_unreachable',message:String(e?.message||e)});
+      }
+    }
+
     // ---- Integration configuration, webhook testing and API tokens ----
     if(p==='/api/integrations' && req.method==='GET'){
       if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
