@@ -1,3 +1,16 @@
-import {createRouter,createWebHistory} from 'vue-router'; import Dashboard from '../pages/Dashboard.vue'; import Login from '../pages/Login.vue'; import Customers from '../pages/Customers.vue'; import CustomerDetail from '../pages/CustomerDetail.vue'; import GenericModule from '../pages/GenericModule.vue'; import Audit from '../pages/Audit.vue';
-const r=createRouter({history:createWebHistory(),routes:[{path:'/login',component:Login},{path:'/',component:Dashboard},{path:'/customers',component:Customers},{path:'/customers/:id',component:CustomerDetail},{path:'/module/:key',component:GenericModule},{path:'/audit',component:Audit}]});
-r.beforeEach(to=>{if(to.path!='/login'&&!localStorage.getItem('token'))return '/login'}); export default r;
+import {createRouter,createWebHistory} from 'vue-router';
+import Dashboard from '../pages/Dashboard.vue';
+import Login from '../pages/Login.vue';
+import Customers from '../pages/Customers.vue';
+import CustomerDetail from '../pages/CustomerDetail.vue';
+import GenericModule from '../pages/GenericModule.vue';
+import Audit from '../pages/Audit.vue';
+import CustomFields from '../pages/CustomFields.vue';
+
+const r=createRouter({history:createWebHistory(),routes:[
+  {path:'/login',component:Login},{path:'/',component:Dashboard},{path:'/customers',component:Customers},
+  {path:'/customers/:id',component:CustomerDetail},{path:'/settings/custom-fields',component:CustomFields},
+  {path:'/module/:key',component:GenericModule},{path:'/audit',component:Audit}
+]});
+r.beforeEach(to=>{if(to.path!='/login'&&!localStorage.getItem('token'))return '/login'});
+export default r;
