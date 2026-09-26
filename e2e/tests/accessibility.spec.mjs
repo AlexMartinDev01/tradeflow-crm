@@ -48,10 +48,7 @@ test.describe('TradeFlow accessibility and keyboard usability',()=>{
     await expect(dialog).toBeVisible();
     await expectAccessible(page,'customer create dialog');
 
-    const focusInside=await page.evaluate(()=>{
-      const dialog=document.querySelector('[role="dialog"]');
-      return !!dialog&&!!document.activeElement&&dialog.contains(document.activeElement);
-    });
+    const focusInside=await dialog.evaluate(el=>!!document.activeElement&&el.contains(document.activeElement));
     expect(focusInside).toBe(true);
 
     await page.keyboard.press('Escape');
