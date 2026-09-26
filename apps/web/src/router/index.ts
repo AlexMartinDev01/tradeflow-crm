@@ -1,8 +1,8 @@
 import {createRouter,createWebHashHistory} from 'vue-router';
-import Dashboard from '../pages/Dashboard.vue';import ExcelData from '../pages/ExcelData.vue';import Login from '../pages/Login.vue';import Customers from '../pages/Customers.vue';import CustomerDetail from '../pages/CustomerDetail.vue';import GenericModule from '../pages/GenericModule.vue';import Audit from '../pages/Audit.vue';import CustomFields from '../pages/CustomFields.vue';import Search from '../pages/Search.vue';
+import Dashboard from '../pages/Dashboard.vue';import Automation from '../pages/Automation.vue';import ExcelData from '../pages/ExcelData.vue';import Login from '../pages/Login.vue';import Customers from '../pages/Customers.vue';import CustomerDetail from '../pages/CustomerDetail.vue';import GenericModule from '../pages/GenericModule.vue';import Audit from '../pages/Audit.vue';import CustomFields from '../pages/CustomFields.vue';import Search from '../pages/Search.vue';
 import Inquiries from '../pages/Inquiries.vue';import Opportunities from '../pages/Opportunities.vue';import Quotations from '../pages/Quotations.vue';import Samples from '../pages/Samples.vue';
 const r=createRouter({history:createWebHashHistory(),routes:[
-{path:'/login',component:Login},{path:'/',component:Dashboard},{path:'/data/excel',component:ExcelData},{path:'/search',component:Search},{path:'/customers',component:Customers},{path:'/customers/:id',component:CustomerDetail},
+{path:'/login',component:Login},{path:'/',component:Dashboard},{path:'/automation',component:Automation},{path:'/data/excel',component:ExcelData},{path:'/search',component:Search},{path:'/customers',component:Customers},{path:'/customers/:id',component:CustomerDetail},
 {path:'/sales/inquiries',component:Inquiries},{path:'/sales/opportunities',component:Opportunities},{path:'/sales/quotations',component:Quotations},{path:'/sales/samples',component:Samples},
 {path:'/settings/custom-fields',component:CustomFields},{path:'/module/:key',component:GenericModule},{path:'/audit',component:Audit}]});
 r.beforeEach(to=>{if(to.path!='/login'&&!localStorage.getItem('token'))return '/login'});export default r;
