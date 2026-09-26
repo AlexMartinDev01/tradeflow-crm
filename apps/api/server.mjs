@@ -407,6 +407,32 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,rows);
     }
 
+
+    // ---- Unified customer 360 timeline ----
+    {
+      const tl=p.match(/^\/api\/customers\/([0-9a-f-]+)\/timeline$/);
+      if(tl && req.method==='GET'){
+        const customerId=tl[1];
+        const c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(customerId);
+        if(!c) return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,customerId)) return json(res,403,{error:'forbidden'});
+        const events=[];
+        events.push({type:'customer',time:c.created_at,title:'客户创建',summary:c.name,entity_id:c.id,status:c.status});
+        for(const x of db.prepare('SELECT * FROM activities WHERE customer_id=?').all(customerId)) events.push({type:'activity',time:x.occurred_at||x.created_at,title:x.subject||`${x.type} 跟进`,summary:x.content,entity_id:x.id,status:x.result});
+        for(const x of db.prepare('SELECT * FROM inquiries WHERE customer_id=?').all(customerId)) events.push({type:'inquiry',time:x.received_at||x.created_at,title:`询盘 ${x.inquiry_no}`,summary:[(parseJSON(x.products,[])||[]).join('、'),x.quantity,x.target_price].filter(Boolean).join(' · '),entity_id:x.id,status:x.status});
+        for(const x of db.prepare('SELECT * FROM opportunities WHERE customer_id=?').all(customerId)) events.push({type:'opportunity',time:x.created_at,title:`商机：${x.name}`,summary:x.expected_amount?`${x.currency||''} ${x.expected_amount}`:'',entity_id:x.id,status:x.stage});
+        for(const x of db.prepare('SELECT * FROM quotations WHERE customer_id=?').all(customerId)) events.push({type:'quotation',time:x.created_at,title:`报价 ${x.quote_no} · V${x.version}`,summary:`${x.currency||''} ${Number(x.total||0).toFixed(2)}`,entity_id:x.id,status:x.status});
+        for(const x of db.prepare('SELECT * FROM samples WHERE customer_id=?').all(customerId)) events.push({type:'sample',time:x.sent_at||x.created_at,title:`样品：${x.product}`,summary:[x.courier,x.tracking_no].filter(Boolean).join(' · '),entity_id:x.id,status:x.status});
+        for(const x of db.prepare('SELECT * FROM contracts WHERE customer_id=?').all(customerId)) events.push({type:'contract',time:x.signed_at||x.created_at,title:`合同 ${x.contract_no}`,summary:`${x.currency||''} ${Number(x.amount||0).toFixed(2)}`,entity_id:x.id,status:x.status});
+        for(const x of db.prepare('SELECT * FROM orders WHERE customer_id=?').all(customerId)) events.push({type:'order',time:x.created_at,title:`订单 ${x.order_no}`,summary:`${x.currency||''} ${Number(x.total||0).toFixed(2)}`,entity_id:x.id,status:x.status});
+        for(const x of db.prepare('SELECT * FROM payments WHERE customer_id=?').all(customerId)) events.push({type:'payment',time:x.paid_at||x.due_at||x.created_at,title:`${x.type||'回款'} ${x.status==='paid'?'到账':'计划'}`,summary:`${x.currency||''} ${Number(x.amount||0).toFixed(2)}`,entity_id:x.id,status:x.status});
+        for(const x of db.prepare(`SELECT s.* FROM shipments s JOIN orders o ON o.id=s.order_id WHERE o.customer_id=?`).all(customerId)) events.push({type:'shipment',time:x.etd||x.created_at,title:`出运 ${x.booking_no||x.bl_no||''}`,summary:[x.carrier,x.container_no,x.destination_port].filter(Boolean).join(' · '),entity_id:x.id,status:x.status});
+        for(const x of db.prepare('SELECT * FROM aftersales WHERE customer_id=?').all(customerId)) events.push({type:'aftersales',time:x.opened_at,title:`售后：${x.subject}`,summary:x.category,entity_id:x.id,status:x.status});
+        events.sort((a,b)=>String(b.time||'').localeCompare(String(a.time||'')));
+        return json(res,200,events);
+      }
+    }
+
     // ---- Customer ownership, tags and duplicate/collision protection ----
     if(p==='/api/users/lookup' && req.method==='GET'){
       return json(res,200,db.prepare("SELECT id,username,display_name,role FROM users WHERE enabled=1 ORDER BY display_name").all());
