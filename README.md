@@ -64,3 +64,30 @@ npm run dev
 ## 生产部署
 
 生产环境推荐使用 Docker + Coolify 自托管。项目根目录已提供 `Dockerfile`、`docker-compose.prod.yml` 和 GitHub Actions 容器构建流程。详细步骤见 `docs/DEPLOY_COOLIFY.md`。
+
+
+## 免费预览：GitHub Codespaces
+
+仓库已配置 GitHub Codespaces，可用于不购买服务器的开发、演示和验收。
+
+### 一键启动
+
+1. 打开本仓库。
+2. 点击 **Code**。
+3. 进入 **Codespaces** 标签。
+4. 点击 **Create codespace on main**。
+5. 首次创建时等待依赖安装与前端构建完成。
+6. 系统会自动启动在 **8080** 端口，并自动弹出预览。
+
+Codespace 会自动完成：
+- 安装 Vue 前端依赖；
+- 构建前端；
+- 启动 Node API；
+- Vue 与 API 共用 8080 端口；
+- SQLite 数据保存在 `.data/tradeflow.db`；
+- 自动生成本地应用密钥并保存在 `.data/app.secret`；
+- 上传文件保存在 `uploads/`。
+
+如果需要把预览链接发给别人，请在 Codespaces 的 **Ports** 面板把 8080 的 Visibility 改为 **Public**。
+
+> Codespaces 适合开发、演示和验收，不是永久 24/7 免费托管。Codespace 停止后服务会停止，但在该 Codespace 仍存在期间，工作区文件和 SQLite 数据会保留。
