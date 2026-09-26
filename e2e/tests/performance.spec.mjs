@@ -35,3 +35,19 @@ test('static frontend assets are never consumed by API rate limiting',async({req
     expect(response.status(),`static asset request ${i+1} must not be rate-limited`).toBe(200);
   }
 });
+
+
+test('spreadsheet bundle is lazy-loaded only when Excel import/export is opened',async({page,request})=>{
+  const scripts=[];
+  page.on('request',request=>{if(request.resourceType()==='script')scripts.push(request.url())});
+  const {authenticatePage}=await import('./helpers.mjs');
+  await authenticatePage(page,request,'demo.manager');
+
+  await page.goto('/#/');
+  await expect(page.getByRole('heading',{name:'经营概览'})).toBeVisible();
+  expect(scripts.some(x=>x.includes('ExcelData')),'dashboard must not eagerly load spreadsheet tooling').toBe(false);
+
+  await page.goto('/#/data/excel');
+  await expect(page.getByRole('heading',{name:/Excel/})).toBeVisible();
+  await expect.poll(()=>scripts.some(x=>x.includes('ExcelData')),{message:'Excel route must load spreadsheet tooling on demand'}).toBe(true);
+});
