@@ -46,10 +46,10 @@ const showAdmin=computed(()=>['admin','manager'].includes(role.value));
   <div v-if="businessModules.length" class="nav-group">其他业务</div>
   <router-link v-for="m in businessModules" :key="m.key" class="nav" :to="`/module/${m.key}`"><span class="label">{{m.title}}</span></router-link>
 
-  <div class="nav-group">系统配置</div><router-link v-if="auth.user?.role==='admin'" class="nav" to="/settings/team"><span class="label">组织与账号</span></router-link>
+  <div class="nav-group">系统配置</div><router-link class="nav" to="/settings/security"><span class="label">账号安全</span></router-link><router-link v-if="auth.user?.role==='admin'" class="nav" to="/settings/team"><span class="label">组织与账号</span></router-link>
   <router-link v-if="showAdmin" class="nav" to="/settings/custom-fields"><span class="label">自定义字段</span></router-link>
   <router-link v-if="showAdmin" class="nav" to="/automation"><span class="label">自动化规则</span></router-link>
   <router-link v-if="showAdmin" class="nav" to="/integrations"><span class="label">系统集成</span></router-link><router-link v-if="showAdmin" class="nav" to="/audit"><span class="label">审计日志</span></router-link>
 </aside>
-<main class="main"><header class="top"><b>外贸客户管理系统</b><div><span class="muted">{{auth.user?.display_name}} · {{auth.user?.role}}</span>　<el-button size="small" @click="auth.logout">退出</el-button></div></header><div class="content"><slot/></div></main>
+<main class="main"><header class="top"><b>外贸客户管理系统</b><div><span class="muted">{{auth.user?.display_name}} · {{auth.user?.role}}</span>　<el-button size="small" @click="auth.logout">退出</el-button></div></header><div class="content"><el-alert v-if="auth.user?.must_change_password" type="error" :closable="false" title="当前账号必须先修改初始/重置密码。" style="margin-bottom:14px"/><slot/></div></main>
 </div></template>

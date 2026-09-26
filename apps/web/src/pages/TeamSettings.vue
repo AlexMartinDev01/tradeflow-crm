@@ -35,13 +35,19 @@ function roleChanged(){
   if(userForm.role==='sales'||userForm.role==='followup')userForm.data_scope='self';
   else if(userForm.role==='admin')userForm.data_scope='all';
 }
+function isLocked(r:any){return !!r.locked_until&&String(r.locked_until)>new Date().toISOString()}
+async function unlockUser(r:any){await api.patch(`/users/${r.id}`,{locked_until:null,failed_login_count:0});await load();ElMessage.success('账号已解锁')}
 async function saveUser(){
   if(!userForm.username.trim()||!userForm.display_name.trim())return ElMessage.warning('用户名和姓名必填');
-  if(!editingUser.value&&userForm.password.length<10)return ElMessage.warning('新用户初始密码至少 10 位');
+  if(userForm.password&&(userForm.password.length<10||!/[a-z]/.test(userForm.password)||!/[A-Z]/.test(userForm.password)||!/\d/.test(userForm.password)||!/[^A-Za-z0-9]/.test(userForm.password)))return ElMessage.warning('密码至少 10 位，并包含大小写字母、数字和特殊字符');
   const payload:any={username:userForm.username,display_name:userForm.display_name,role:userForm.role,department_id:userForm.department_id||null,data_scope:userForm.data_scope,enabled:userForm.enabled};
   if(userForm.password)payload.password=userForm.password;
-  if(editingUser.value)await api.patch(`/users/${editingUser.value.id}`,payload);else await api.post('/users',payload);
-  userDialog.value=false;await load();ElMessage.success('用户已保存');
+  try{
+    if(editingUser.value)await api.patch(`/users/${editingUser.value.id}`,payload);else await api.post('/users',payload);
+    userDialog.value=false;await load();ElMessage.success(userForm.password?'用户已保存；该用户下次登录将被要求修改密码':'用户已保存');
+  }catch(e:any){
+    if(e.response?.data?.error==='weak_password')ElMessage.error((e.response.data.details||[]).join('；'));else throw e;
+  }
 }
 onMounted(load);
 </script>
@@ -56,8 +62,10 @@ onMounted(load);
     <el-table-column prop="username" label="用户名" width="150"/><el-table-column prop="display_name" label="姓名" width="140"/><el-table-column prop="role" label="角色" width="110"/>
     <el-table-column label="部门" width="150"><template #default="s">{{departmentMap[s.row.department_id]||'-'}}</template></el-table-column>
     <el-table-column label="数据范围" min-width="190"><template #default="s">{{scopes.find(x=>x.value===(s.row.data_scope||(['admin','manager','finance','readonly'].includes(s.row.role)?'all':'self')))?.label}}</template></el-table-column>
-    <el-table-column label="启用" width="80"><template #default="s"><el-tag :type="s.row.enabled?'success':'info'">{{s.row.enabled?'是':'否'}}</el-tag></template></el-table-column>
-    <el-table-column label="操作" width="90"><template #default="s"><el-button link type="primary" @click="editUser(s.row)">编辑</el-button></template></el-table-column>
+    <el-table-column label="2FA" width="80"><template #default="s"><el-tag :type="s.row.totp_enabled?'success':'info'">{{s.row.totp_enabled?'开':'关'}}</el-tag></template></el-table-column>
+    <el-table-column label="强制改密" width="100"><template #default="s">{{s.row.must_change_password?'是':'否'}}</template></el-table-column>
+    <el-table-column label="账号状态" width="110"><template #default="s"><el-tag :type="isLocked(s.row)?'danger':s.row.enabled?'success':'info'">{{isLocked(s.row)?'已锁定':s.row.enabled?'正常':'停用'}}</el-tag></template></el-table-column>
+    <el-table-column label="操作" width="150"><template #default="s"><el-button link type="primary" @click="editUser(s.row)">编辑</el-button><el-button v-if="isLocked(s.row)" link type="warning" @click="unlockUser(s.row)">解锁</el-button></template></el-table-column>
   </el-table></div>
 </el-tab-pane>
 
@@ -76,7 +84,7 @@ onMounted(load);
   <el-form-item label="角色"><el-select v-model="userForm.role" style="width:100%" @change="roleChanged"><el-option v-for="x in roles" :key="x" :label="x" :value="x"/></el-select></el-form-item>
   <el-form-item label="部门"><el-select v-model="userForm.department_id" clearable filterable style="width:100%"><el-option v-for="d in departments.filter(x=>x.enabled)" :key="d.id" :label="d.name" :value="d.id"/></el-select></el-form-item>
   <el-form-item label="数据范围"><el-select v-model="userForm.data_scope" style="width:100%"><el-option v-for="x in scopes" :key="x.value" :label="x.label" :value="x.value"/></el-select></el-form-item>
-  <el-form-item :label="editingUser?'重置密码（留空不修改）':'初始密码'"><el-input v-model="userForm.password" type="password" show-password/></el-form-item>
+  <el-form-item :label="editingUser?'重置密码（留空不修改）':'初始密码'"><el-input v-model="userForm.password" type="password" show-password/><div class="muted" style="font-size:12px;margin-top:4px">管理员设置/重置密码后，用户下次登录必须自行修改。</div></el-form-item>
 </div><el-form-item><el-checkbox v-model="userForm.enabled" :true-value="1" :false-value="0">启用账号</el-checkbox></el-form-item></el-form>
 <template #footer><el-button @click="userDialog=false">取消</el-button><el-button type="primary" @click="saveUser">保存</el-button></template></el-dialog>
 
