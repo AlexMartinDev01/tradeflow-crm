@@ -12,9 +12,11 @@ const APP_SECRET = process.env.APP_SECRET || 'dev-only-change-me';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 const WEB_DIST = process.env.WEB_DIST || path.resolve('./apps/web/dist');
 const UPLOAD_DIR = process.env.UPLOAD_DIR || path.resolve('./uploads');
+const BACKUP_DIR = process.env.BACKUP_DIR || path.join(path.dirname(DB_FILE),'backups');
 
 fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(BACKUP_DIR, { recursive: true });
 const db = new DatabaseSync(DB_FILE);
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
 
@@ -998,6 +1000,33 @@ function removeStoredDocumentFile(d){
   if(file!==root&&file.startsWith(root+path.sep)&&fs.existsSync(file))fs.unlinkSync(file);
 }
 
+function backupInfo(file){
+  const full=path.join(BACKUP_DIR,file),st=fs.statSync(full);
+  return {file,size_bytes:st.size,created_at:st.mtime.toISOString(),kind:file.includes('-auto-')?'auto':'manual'};
+}
+function listDatabaseBackups(){
+  return fs.readdirSync(BACKUP_DIR).filter(x=>/^tradeflow-[A-Za-z0-9._-]+\.sqlite$/.test(x))
+    .map(x=>{try{return backupInfo(x)}catch{return null}}).filter(Boolean).sort((a,b)=>String(b.created_at).localeCompare(String(a.created_at)));
+}
+function pruneDatabaseBackups(maxFiles=30){
+  const rows=listDatabaseBackups();for(const x of rows.slice(maxFiles)){try{fs.unlinkSync(path.join(BACKUP_DIR,x.file))}catch{}}
+}
+function createDatabaseBackup(kind='manual'){
+  const safeKind=kind==='auto'?'auto':'manual',stamp=now().replace(/[:.]/g,'-'),file=`tradeflow-${safeKind}-${stamp}.sqlite`,full=path.join(BACKUP_DIR,file);
+  const sqlPath=full.replaceAll("'","''");db.exec(`PRAGMA wal_checkpoint(PASSIVE); VACUUM INTO '${sqlPath}';`);
+  pruneDatabaseBackups(30);return backupInfo(file);
+}
+function safeBackupFile(name=''){
+  const file=String(name||'');if(!/^tradeflow-[A-Za-z0-9._-]+\.sqlite$/.test(file))return null;
+  const full=path.resolve(BACKUP_DIR,file),root=path.resolve(BACKUP_DIR);if(!full.startsWith(root+path.sep))return null;return full;
+}
+function maybeAutomaticBackup(){
+  try{
+    const latest=listDatabaseBackups().find(x=>x.kind==='auto');
+    if(!latest||Date.now()-new Date(latest.created_at).getTime()>=23*3600_000)createDatabaseBackup('auto');
+  }catch(e){console.error('automatic backup failed',e);}
+}
+
 const rate = new Map();
 function rateLimit(req){ const ip=req.socket.remoteAddress||'x', t=Date.now(), w=60_000; const x=rate.get(ip)||{start:t,count:0}; if(t-x.start>w){x.start=t;x.count=0;} x.count++; rate.set(ip,x); return x.count<=300; }
 
@@ -1093,6 +1122,32 @@ const server = http.createServer(async (req,res)=>{
       audit(user,'two_factor_disabled','user',u.id,req);return json(res,200,{ok:true,two_factor_enabled:false});
     }
     if(p==='/api/auth/logout' && req.method==='POST'){ const token=(req.headers.authorization||'').slice(7); db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hashToken(token)); return json(res,200,{ok:true}); }
+
+    // ---- Database backup management ----
+    if(p==='/api/backups' && req.method==='GET'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      return json(res,200,{backup_dir:BACKUP_DIR,retention_files:30,rows:listDatabaseBackups(),uploads_separate:true});
+    }
+    if(p==='/api/backups/create' && req.method==='POST'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      const item=createDatabaseBackup('manual');audit(user,'create','database_backup',item.file,req,{size_bytes:item.size_bytes});return json(res,201,item);
+    }
+    {
+      const dl=p.match(/^\/api\/backups\/([^/]+)\/download$/);
+      if(dl&&req.method==='GET'){
+        if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+        const full=safeBackupFile(decodeURIComponent(dl[1]));if(!full||!fs.existsSync(full))return json(res,404,{error:'backup_not_found'});
+        const stat=fs.statSync(full),name=path.basename(full);
+        res.writeHead(200,{'content-type':'application/vnd.sqlite3','content-length':stat.size,'content-disposition':`attachment; filename="${name}"`,'cache-control':'no-store','x-content-type-options':'nosniff'});
+        return fs.createReadStream(full).pipe(res);
+      }
+      const del=p.match(/^\/api\/backups\/([^/]+)$/);
+      if(del&&req.method==='DELETE'){
+        if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+        const full=safeBackupFile(decodeURIComponent(del[1]));if(!full||!fs.existsSync(full))return json(res,404,{error:'backup_not_found'});
+        const name=path.basename(full);fs.unlinkSync(full);audit(user,'delete','database_backup',name,req);return json(res,200,{ok:true});
+      }
+    }
 
     // ---- Departments and data scopes ----
     if(p==='/api/departments' && req.method==='GET'){
