@@ -19,7 +19,7 @@ const db=new DatabaseSync(DB_FILE);
 db.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=10000; PRAGMA foreign_keys=ON;');
 
 const tableExists=t=>!!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(t);
-const cols=t=>tableExists(t)?db.prepare(\`PRAGMA table_info(\${t})\`).all().map(x=>x.name):[];
+const cols=t=>tableExists(t)?db.prepare(`PRAGMA table_info(${t})`).all().map(x=>x.name):[];
 const colCache=new Map();
 const tableCols=t=>{if(!colCache.has(t))colCache.set(t,cols(t));return colCache.get(t);};
 const now=()=>new Date().toISOString();
@@ -30,40 +30,40 @@ const dt=(offset=0,hour=9)=>{
   const x=new Date();x.setUTCDate(x.getUTCDate()+offset);x.setUTCHours(hour,0,0,0);return x.toISOString();
 };
 const j=v=>JSON.stringify(v);
-const hashPassword=(password,salt=randomBytes(16).toString('hex'))=>\`\${salt}:\${scryptSync(password,salt,64).toString('hex')}\`;
-const did=(group,index)=>\`d3adbeef-\${Number(group).toString(16).padStart(4,'0')}-4000-8000-\${Number(index).toString(16).padStart(12,'0')}\`;
+const hashPassword=(password,salt=randomBytes(16).toString('hex'))=>`${salt}:${scryptSync(password,salt,64).toString('hex')}`;
+const did=(group,index)=>`d3adbeef-${Number(group).toString(16).padStart(4,'0')}-4000-8000-${Number(index).toString(16).padStart(12,'0')}`;
 
 function insert(table,row){
   if(!tableExists(table))return null;
   const allowed=new Set(tableCols(table)),entries=Object.entries(row).filter(([k])=>allowed.has(k));
   if(!entries.length)return null;
   const names=entries.map(([k])=>k),values=entries.map(([,v])=>v);
-  db.prepare(\`INSERT INTO \${table}(\${names.join(',')}) VALUES(\${names.map(()=>'?').join(',')})\`).run(...values);
+  db.prepare(`INSERT INTO ${table}(${names.join(',')}) VALUES(${names.map(()=>'?').join(',')})`).run(...values);
   return row.id||null;
 }
 function update(table,id,patch){
   if(!tableExists(table))return;
   const allowed=new Set(tableCols(table)),entries=Object.entries(patch).filter(([k])=>allowed.has(k));
   if(!entries.length)return;
-  db.prepare(\`UPDATE \${table} SET \${entries.map(([k])=>k+'=?').join(',')} WHERE id=?\`).run(...entries.map(([,v])=>v),id);
+  db.prepare(`UPDATE ${table} SET ${entries.map(([k])=>k+'=?').join(',')} WHERE id=?`).run(...entries.map(([,v])=>v),id);
 }
 function ensureByUnique(table,uniqueField,value,row){
   if(!tableExists(table))return row.id||null;
-  const found=db.prepare(\`SELECT * FROM \${table} WHERE \${uniqueField}=? LIMIT 1\`).get(value);
+  const found=db.prepare(`SELECT * FROM ${table} WHERE ${uniqueField}=? LIMIT 1`).get(value);
   if(found)return found.id;
   insert(table,row);return row.id;
 }
 function count(table){
   if(!tableExists(table))return 0;
-  return Number(db.prepare(\`SELECT COUNT(*) c FROM \${table}\`).get().c||0);
+  return Number(db.prepare(`SELECT COUNT(*) c FROM ${table}`).get().c||0);
 }
 
 fs.mkdirSync(path.dirname(DB_FILE),{recursive:true});
 const backupDir=path.join(path.dirname(DB_FILE),'backups');
 fs.mkdirSync(backupDir,{recursive:true});
-const backup=path.join(backupDir,\`pre-full-demo-\${new Date().toISOString().replace(/[:.]/g,'-')}.sqlite\`);
+const backup=path.join(backupDir,`pre-full-demo-${new Date().toISOString().replace(/[:.]/g,'-')}.sqlite`);
 try{
-  db.exec(\`VACUUM INTO '\${backup.replaceAll("'","''")}'\`);
+  db.exec(`VACUUM INTO '${backup.replaceAll("'","''")}'`);
   console.log('[Seed] Backup created:',backup);
 }catch(e){
   console.warn('[Seed] Backup warning:',e.message);
@@ -80,14 +80,14 @@ const childTables=[
   'contact_channels','contacts','saved_views','report_definitions','automation_custom_rules','exchange_rates'
 ];
 for(const t of childTables){
-  if(tableExists(t)&&tableCols(t).includes('id')) db.prepare(\`DELETE FROM \${t} WHERE id LIKE ?\`).run(DEMO_ID_PREFIX+'%');
+  if(tableExists(t)&&tableCols(t).includes('id')) db.prepare(`DELETE FROM ${t} WHERE id LIKE ?`).run(DEMO_ID_PREFIX+'%');
 }
 if(tableExists('customer_tags'))db.prepare("DELETE FROM customer_tags WHERE customer_id LIKE ?").run(DEMO_ID_PREFIX+'%');
 if(tableExists('customer_collaborators'))db.prepare("DELETE FROM customer_collaborators WHERE customer_id LIKE ? OR user_id LIKE ?").run(DEMO_ID_PREFIX+'%',DEMO_ID_PREFIX+'%');
 if(tableExists('sessions'))db.prepare("DELETE FROM sessions WHERE user_id LIKE ?").run(DEMO_ID_PREFIX+'%');
 if(tableExists('auth_challenges'))db.prepare("DELETE FROM auth_challenges WHERE user_id LIKE ?").run(DEMO_ID_PREFIX+'%');
 for(const t of ['tags','brands','customers','departments','users']){
-  if(tableExists(t)&&tableCols(t).includes('id'))db.prepare(\`DELETE FROM \${t} WHERE id LIKE ?\`).run(DEMO_ID_PREFIX+'%');
+  if(tableExists(t)&&tableCols(t).includes('id'))db.prepare(`DELETE FROM ${t} WHERE id LIKE ?`).run(DEMO_ID_PREFIX+'%');
 }
 db.exec('PRAGMA foreign_keys=ON;');
 
@@ -183,10 +183,10 @@ const countries=[
 ];
 const customers=countries.map((x,i)=>({
   id:did(10,i+1),name:x[0],english_name:x[1],local_name:null,country:x[2],region:'',city:x[3],
-  address:(100+i)+' Demo Business Park, '+x[3],postal_code:'D'+String(10000+i),website:\`https://customer\${i+1}.example.com\`,
+  address:(100+i)+' Demo Business Park, '+x[3],postal_code:'D'+String(10000+i),website:`https://customer${i+1}.example.com`,
   industry:x[4],customer_types:j(x[5]),status:x[6],grade:x[7],source:x[8],timezone:x[9],language:x[10],owner_id:x[11],
   annual_sales:x[12],employee_count:x[13],business_scope:x[14],service_regions:j(x[15]),tax_no:x[16],registration_no:x[17],
-  notes:\`[\${BATCH}] 仿真业务客户，用于完整系统验收。禁止对示例联系方式进行真实营销发送。\`,
+  notes:`[${BATCH}] 仿真业务客户，用于完整系统验收。禁止对示例联系方式进行真实营销发送。`,
   custom_fields:j({demo_batch:BATCH,purchase_cycle:i%3===0?'Quarterly':'Project-based',price_sensitivity:i%4===0?'High':'Medium'}),
   created_at:dt(-140+i*4,8),updated_at:dt(-2+(i%7),10),deleted_at:null
 }));
@@ -197,19 +197,19 @@ const firstNames=['Anna','Markus','Claire','Luca','Sofia','Oliver','Emily','Mich
 const lastNames=['Schmidt','Keller','Martin','Rossi','Garcia','Brown','Chen','Walker','Al Mansoori','Al Saud','Tan','Wilson','Sato','Kim','Nguyen','Sukhum','Rojas','Mokoena'];
 const contacts=[];
 for(let i=0;i<customers.length;i++){
-  const primary={id:did(11,i*2+1),customer_id:customers[i].id,name:\`\${firstNames[i]} \${lastNames[i]}\`,title:i%3===0?'Procurement Director':'Purchasing Manager',department:'Procurement',role:'Decision Maker',language:customers[i].language,timezone:customers[i].timezone,is_primary:1,is_departed:0,birthday:\`198\${i%10}-\${String((i%12)+1).padStart(2,'0')}-\${String((i%20)+5).padStart(2,'0')}\`,influence_level:'high',attitude:i%5===0?'positive':'neutral',notes:'Primary purchasing contact',created_at:dt(-130+i*3),updated_at:dt(-3+i%4)};
+  const primary={id:did(11,i*2+1),customer_id:customers[i].id,name:`${firstNames[i]} ${lastNames[i]}`,title:i%3===0?'Procurement Director':'Purchasing Manager',department:'Procurement',role:'Decision Maker',language:customers[i].language,timezone:customers[i].timezone,is_primary:1,is_departed:0,birthday:`198${i%10}-${String((i%12)+1).padStart(2,'0')}-${String((i%20)+5).padStart(2,'0')}`,influence_level:'high',attitude:i%5===0?'positive':'neutral',notes:'Primary purchasing contact',created_at:dt(-130+i*3),updated_at:dt(-3+i%4)};
   contacts.push(primary);insert('contacts',primary);
-  const secondary={id:did(11,i*2+2),customer_id:customers[i].id,name:\`Alex \${lastNames[(i+5)%lastNames.length]}\`,title:i%2===0?'Technical Manager':'Finance Manager',department:i%2===0?'Engineering':'Finance',role:i%2===0?'Technical Influencer':'Finance Approver',language:customers[i].language,timezone:customers[i].timezone,is_primary:0,is_departed:0,birthday:null,influence_level:'medium',attitude:'neutral',notes:'Secondary stakeholder',created_at:dt(-120+i*3),updated_at:dt(-4+i%5)};
+  const secondary={id:did(11,i*2+2),customer_id:customers[i].id,name:`Alex ${lastNames[(i+5)%lastNames.length]}`,title:i%2===0?'Technical Manager':'Finance Manager',department:i%2===0?'Engineering':'Finance',role:i%2===0?'Technical Influencer':'Finance Approver',language:customers[i].language,timezone:customers[i].timezone,is_primary:0,is_departed:0,birthday:null,influence_level:'medium',attitude:'neutral',notes:'Secondary stakeholder',created_at:dt(-120+i*3),updated_at:dt(-4+i%5)};
   contacts.push(secondary);insert('contacts',secondary);
-  const domain=\`customer\${i+1}.example.com\`;
+  const domain=`customer${i+1}.example.com`;
   const channels=[
-    ['email',\`\${firstNames[i].toLowerCase()}.\${lastNames[i].toLowerCase().replace(/\\s/g,'')}@\${domain}\`,1,'Work email'],
-    ['phone',\`+1-555-\${String(2000+i).padStart(4,'0')}\`,0,'Office'],
-    ['whatsapp',\`+1555\${String(300000+i).padStart(6,'0')}\`,0,'WhatsApp'],
-    ['linkedin',\`https://www.linkedin.com/in/demo-\${i+1}\`,0,'LinkedIn']
+    ['email',`${firstNames[i].toLowerCase()}.${lastNames[i].toLowerCase().replace(/\\s/g,'')}@${domain}`,1,'Work email'],
+    ['phone',`+1-555-${String(2000+i).padStart(4,'0')}`,0,'Office'],
+    ['whatsapp',`+1555${String(300000+i).padStart(6,'0')}`,0,'WhatsApp'],
+    ['linkedin',`https://www.linkedin.com/in/demo-${i+1}`,0,'LinkedIn']
   ];
   channels.forEach((x,k)=>insert('contact_channels',{id:did(12,i*10+k+1),contact_id:primary.id,channel:x[0],value:x[1],label:x[3],is_primary:x[2],preferred_time:'09:00-16:00 local',created_at:dt(-110+i)}));
-  insert('contact_channels',{id:did(12,i*10+5),contact_id:secondary.id,channel:'email',value:\`alex.\${i+1}@\${domain}\`,label:'Work email',is_primary:1,preferred_time:'10:00-15:00 local',created_at:dt(-108+i)});
+  insert('contact_channels',{id:did(12,i*10+5),contact_id:secondary.id,channel:'email',value:`alex.${i+1}@${domain}`,label:'Work email',is_primary:1,preferred_time:'10:00-15:00 local',created_at:dt(-108+i)});
 }
 
 // Customer tags
@@ -223,7 +223,7 @@ for(const [ci,tis] of tagAssignments)for(const ti of tis)insert('customer_tags',
 [
   [0,0,'distributor',['Germany','Austria'],1],[1,0,'distributor',['Switzerland'],0],[3,1,'agent',['Italy'],1],[6,0,'importer',['Canada'],0],
   [8,2,'agent',['UAE','Oman'],1],[10,2,'distributor',['Singapore','Malaysia'],0],[12,1,'OEM/ODM',['Japan'],0],[13,2,'distributor',['South Korea'],0]
-].forEach((x,i)=>insert('customer_brands',{id:did(13,i+1),customer_id:customers[x[0]].id,brand_id:brandDefs[x[1]].id,relation_type:x[2],authorized_regions:j(x[3]),exclusive:x[4],start_date:d(-180),end_date:d(365),sales_share:20+i*5,price_band:i%2?'B':'A',notes:\`[\${BATCH}] Channel relationship\`,created_at:dt(-150+i)}));
+].forEach((x,i)=>insert('customer_brands',{id:did(13,i+1),customer_id:customers[x[0]].id,brand_id:brandDefs[x[1]].id,relation_type:x[2],authorized_regions:j(x[3]),exclusive:x[4],start_date:d(-180),end_date:d(365),sales_share:20+i*5,price_band:i%2?'B':'A',notes:`[${BATCH}] Channel relationship`,created_at:dt(-150+i)}));
 
 // Distribution network
 [
@@ -264,7 +264,7 @@ for(let i=0;i<customers.length;i++){
     [-(i%7+1),activityTypes[(i+1)%5],'Latest follow-up','Next-step owner and timeline confirmed',i%4===0?'Arrange management call':'Follow up next week']
   ];
   for(const e of events)insert('activities',{id:did(18,ai++),customer_id:customers[i].id,contact_id:pc.id,type:e[1],subject:e[2],content:e[3],result:'Positive progress',next_action:e[4],occurred_at:dt(e[0],10+i%5),created_by:owner,attachments:j([]),created_at:dt(e[0],10+i%5)});
-  if(i<14)insert('tasks',{id:did(19,ti++),customer_id:customers[i].id,title:i%3===0?'Follow up quotation decision':i%3===1?'Confirm technical parameters':'Schedule next customer call',description:\`[\${BATCH}] Generated realistic follow-up task\`,due_at:dt((i%6)-1,9),status:i%5===0?'done':'todo',priority:i%4===0?'high':'normal',assigned_to:owner,created_by:userDefs[0].id,reminder_at:dt((i%6)-1,8),recurring_rule:null,created_at:dt(-10),updated_at:now()});
+  if(i<14)insert('tasks',{id:did(19,ti++),customer_id:customers[i].id,title:i%3===0?'Follow up quotation decision':i%3===1?'Confirm technical parameters':'Schedule next customer call',description:`[${BATCH}] Generated realistic follow-up task`,due_at:dt((i%6)-1,9),status:i%5===0?'done':'todo',priority:i%4===0?'high':'normal',assigned_to:owner,created_by:userDefs[0].id,reminder_at:dt((i%6)-1,8),recurring_rule:null,created_at:dt(-10),updated_at:now()});
 }
 
 // Inquiries
@@ -284,7 +284,7 @@ const inquiryDefs=[
 ];
 const inquiries=[];
 inquiryDefs.forEach((x,i)=>{
-  const obj={id:did(20,i+1),inquiry_no:\`INQ-DEMO-\${String(i+1).padStart(3,'0')}\`,customer_id:customers[x[0]].id,contact_id:contacts[x[0]*2].id,source:x[1],status:x[2],products:j(x[3].map(p=>({product_id:productDefs[p].id,sku:productDefs[p].sku,name:productDefs[p].name}))),quantity:x[4],target_price:x[5],incoterm:x[6],destination_port:x[7],requested_delivery:d(x[8]),attachments:j([]),received_at:dt(x[9],8),first_response_at:x[10]===null?null:dt(x[10],12),owner_id:customers[x[0]].owner_id,notes:\`[\${BATCH}] Realistic inquiry scenario\`,created_at:dt(x[9],8),updated_at:dt(Math.min(-1,x[10]??x[9]),12)};
+  const obj={id:did(20,i+1),inquiry_no:`INQ-DEMO-${String(i+1).padStart(3,'0')}`,customer_id:customers[x[0]].id,contact_id:contacts[x[0]*2].id,source:x[1],status:x[2],products:j(x[3].map(p=>({product_id:productDefs[p].id,sku:productDefs[p].sku,name:productDefs[p].name}))),quantity:x[4],target_price:x[5],incoterm:x[6],destination_port:x[7],requested_delivery:d(x[8]),attachments:j([]),received_at:dt(x[9],8),first_response_at:x[10]===null?null:dt(x[10],12),owner_id:customers[x[0]].owner_id,notes:`[${BATCH}] Realistic inquiry scenario`,created_at:dt(x[9],8),updated_at:dt(Math.min(-1,x[10]??x[9]),12)};
   inquiries.push(obj);insert('inquiries',obj);
 });
 
@@ -303,7 +303,7 @@ const oppDefs=[
 ];
 const opportunities=[];
 oppDefs.forEach((x,i)=>{
-  const obj={id:did(21,i+1),customer_id:customers[x[0]].id,inquiry_id:inquiries[x[1]].id,name:x[2],stage:x[3],expected_amount:x[4],currency:x[5],expected_close_date:d(x[6]),probability:x[7],competitor:x[8],loss_reason:null,owner_id:customers[x[0]].owner_id,notes:\`[\${BATCH}] Pipeline opportunity\`,created_at:dt(-50+i*3),updated_at:dt(-i%5)};
+  const obj={id:did(21,i+1),customer_id:customers[x[0]].id,inquiry_id:inquiries[x[1]].id,name:x[2],stage:x[3],expected_amount:x[4],currency:x[5],expected_close_date:d(x[6]),probability:x[7],competitor:x[8],loss_reason:null,owner_id:customers[x[0]].owner_id,notes:`[${BATCH}] Pipeline opportunity`,created_at:dt(-50+i*3),updated_at:dt(-i%5)};
   opportunities.push(obj);insert('opportunities',obj);
 });
 
@@ -323,7 +323,7 @@ const quotations=[];
 quoteDefs.forEach((x,i)=>{
   const prod1=productDefs[x[5]],prod2=productDefs[x[6]],q1=x[7],p1=x[8],q2=Math.max(10,Math.round(q1*0.4)),p2=Number((prod2.base_price*0.9).toFixed(2));
   const subtotal=Number((q1*p1+q2*p2).toFixed(2)),discount=i%4===0?Number((subtotal*0.03).toFixed(2)):0,total=subtotal-discount;
-  const obj={id:did(22,i+1),quote_no:\`QT-DEMO-2026-\${String(i+1).padStart(3,'0')}\`,customer_id:customers[x[0]].id,contact_id:contacts[x[0]*2].id,opportunity_id:opportunities[x[1]].id,version:1,currency:x[2],incoterm:x[3],payment_terms:x[4],moq:'10 units',packaging:'Export carton/pallet',lead_time:'6-8 weeks',valid_until:d(x[11]),subtotal,discount,total,margin_rate:Number((x[9]*100).toFixed(1)),status:x[10],notes:\`[\${BATCH}] Commercial quotation\`,created_at:dt(-20+i),updated_at:dt(-5+i%3)};
+  const obj={id:did(22,i+1),quote_no:`QT-DEMO-2026-${String(i+1).padStart(3,'0')}`,customer_id:customers[x[0]].id,contact_id:contacts[x[0]*2].id,opportunity_id:opportunities[x[1]].id,version:1,currency:x[2],incoterm:x[3],payment_terms:x[4],moq:'10 units',packaging:'Export carton/pallet',lead_time:'6-8 weeks',valid_until:d(x[11]),subtotal,discount,total,margin_rate:Number((x[9]*100).toFixed(1)),status:x[10],notes:`[${BATCH}] Commercial quotation`,created_at:dt(-20+i),updated_at:dt(-5+i%3)};
   quotations.push(obj);insert('quotations',obj);
   insert('quotation_items',{id:did(23,i*2+1),quotation_id:obj.id,product_code:prod1.sku,product_name:prod1.name,quantity:q1,unit:'pcs',unit_price:p1,amount:Number((q1*p1).toFixed(2)),cost:Number((p1*(1-x[9])).toFixed(2)),spec:'Standard export configuration'});
   insert('quotation_items',{id:did(23,i*2+2),quotation_id:obj.id,product_code:prod2.sku,product_name:prod2.name,quantity:q2,unit:'pcs',unit_price:p2,amount:Number((q2*p2).toFixed(2)),cost:Number((p2*0.72).toFixed(2)),spec:'Accessory / supporting item'});
@@ -349,7 +349,7 @@ const contractDefs=[
 ];
 const contracts=[];
 contractDefs.forEach((x,i)=>{
-  const obj={id:did(26,i+1),contract_no:\`CT-DEMO-2026-\${String(i+1).padStart(3,'0')}\`,customer_id:customers[x[0]].id,quotation_id:quotations[x[1]].id,amount:x[2],currency:x[3],signed_at:x[5]===null?null:d(x[5]),effective_from:x[5]===null?null:d(x[5]),effective_to:d(x[6]),status:x[4],terms:'Quality acceptance per approved specification. Incoterm and payment terms follow accepted quotation.',attachments:j([]),current_version:1,created_at:dt(-80+i*8),updated_at:now()};
+  const obj={id:did(26,i+1),contract_no:`CT-DEMO-2026-${String(i+1).padStart(3,'0')}`,customer_id:customers[x[0]].id,quotation_id:quotations[x[1]].id,amount:x[2],currency:x[3],signed_at:x[5]===null?null:d(x[5]),effective_from:x[5]===null?null:d(x[5]),effective_to:d(x[6]),status:x[4],terms:'Quality acceptance per approved specification. Incoterm and payment terms follow accepted quotation.',attachments:j([]),current_version:1,created_at:dt(-80+i*8),updated_at:now()};
   contracts.push(obj);insert('contracts',obj);
   if(tableExists('contract_versions'))insert('contract_versions',{id:did(27,i+1),contract_id:obj.id,version:1,amount:obj.amount,currency:obj.currency,effective_from:obj.effective_from,effective_to:obj.effective_to,terms:obj.terms,snapshot:j({source:'demo_seed',contract_no:obj.contract_no}),created_by:userDefs[0].id,created_at:obj.created_at});
 });
@@ -366,7 +366,7 @@ const orderDefs=[
 ];
 const orders=[];
 orderDefs.forEach((x,i)=>{
-  const obj={id:did(28,i+1),order_no:x[3],customer_id:customers[x[0]].id,quotation_id:quotations[x[1]].id,contract_id:x[2]===null?null:contracts[x[2]].id,customer_po:x[4],status:x[5],currency:x[6],incoterm:x[7],payment_terms:'30% deposit, 70% before shipment',total:x[8],requested_delivery:d(x[9]),notes:\`[\${BATCH}] Sales order for end-to-end demo\`,created_at:dt(-60+i*5),updated_at:dt(-i%4)};
+  const obj={id:did(28,i+1),order_no:x[3],customer_id:customers[x[0]].id,quotation_id:quotations[x[1]].id,contract_id:x[2]===null?null:contracts[x[2]].id,customer_po:x[4],status:x[5],currency:x[6],incoterm:x[7],payment_terms:'30% deposit, 70% before shipment',total:x[8],requested_delivery:d(x[9]),notes:`[${BATCH}] Sales order for end-to-end demo`,created_at:dt(-60+i*5),updated_at:dt(-i%4)};
   orders.push(obj);insert('orders',obj);
   const pA=productDefs[i%productDefs.length],pB=productDefs[(i+2)%productDefs.length],qtyA=50+i*20,qtyB=20+i*10,priceA=Number((obj.total*0.72/qtyA).toFixed(2)),priceB=Number((obj.total*0.28/qtyB).toFixed(2));
   insert('order_items',{id:did(29,i*2+1),order_id:obj.id,product_id:pA.id,product_name:pA.name,quantity:qtyA,unit:'pcs',unit_price:priceA,amount:Number((qtyA*priceA).toFixed(2)),delivery_date:obj.requested_delivery});
@@ -381,12 +381,12 @@ if(tableExists('order_changes')){
 let payIndex=1;
 for(let i=0;i<orders.length;i++){
   const o=orders[i],deposit=Number((o.total*0.3).toFixed(2)),balance=Number((o.total-deposit).toFixed(2));
-  insert('payments',{id:did(31,payIndex++),customer_id:o.customer_id,order_id:o.id,type:'deposit',amount:deposit,currency:o.currency,due_at:dt(-45+i*5),paid_at:i===4?null:dt(-42+i*5),status:i===4?'overdue':'paid',bank_ref:i===4?null:\`BANK-DEMO-\${i+1}-D\`,notes:'30% deposit',created_at:dt(-50+i*5),updated_at:now()});
+  insert('payments',{id:did(31,payIndex++),customer_id:o.customer_id,order_id:o.id,type:'deposit',amount:deposit,currency:o.currency,due_at:dt(-45+i*5),paid_at:i===4?null:dt(-42+i*5),status:i===4?'overdue':'paid',bank_ref:i===4?null:`BANK-DEMO-${i+1}-D`,notes:'30% deposit',created_at:dt(-50+i*5),updated_at:now()});
   insert('payments',{id:did(31,payIndex++),customer_id:o.customer_id,order_id:o.id,type:'balance',amount:balance,currency:o.currency,due_at:dt(i===0?-20:15+i*6),paid_at:i===0?dt(-18):null,status:i===0?'paid':(i===6?'partial':'pending'),bank_ref:i===0?'BANK-DEMO-SG-B':null,notes:'Balance payment before shipment',created_at:dt(-40+i*5),updated_at:now()});
 }
 
 // Credit profiles
-for(let i=0;i<12;i++)insert('credit_profiles',{id:did(32,i+1),customer_id:customers[i].id,rating:i<4?'A':i<9?'B':'C',credit_limit:[250000,180000,120000][i%3],currency:i<6?'EUR':'USD',payment_days:i%3===0?30:15,insured_limit:i%2===0?100000:0,overdue_count:i===4?2:i===8?1:0,max_overdue_days:i===4?18:i===8?7:0,notes:\`[\${BATCH}] Credit profile\`,updated_at:now()});
+for(let i=0;i<12;i++)insert('credit_profiles',{id:did(32,i+1),customer_id:customers[i].id,rating:i<4?'A':i<9?'B':'C',credit_limit:[250000,180000,120000][i%3],currency:i<6?'EUR':'USD',payment_days:i%3===0?30:15,insured_limit:i%2===0?100000:0,overdue_count:i===4?2:i===8?1:0,max_overdue_days:i===4?18:i===8?7:0,notes:`[${BATCH}] Credit profile`,updated_at:now()});
 
 // Shipments
 const shipmentDefs=[
@@ -398,7 +398,7 @@ const shipmentDefs=[
 ];
 const shipments=[];
 shipmentDefs.forEach((x,i)=>{
-  const obj={id:did(33,i+1),order_id:orders[x[0]].id,booking_no:x[1],carrier:x[2],forwarder:x[3],vessel_voyage:x[4],container_type:x[5],container_no:x[6],bl_no:x[7],port_of_loading:x[8],destination_port:x[9],etd:d(x[10]),eta:d(x[11]),status:x[12],tracking_url:'https://tracking.example.com/'+x[1],notes:\`[\${BATCH}] Shipment\`,created_at:dt(-20+i*4),updated_at:now()};
+  const obj={id:did(33,i+1),order_id:orders[x[0]].id,booking_no:x[1],carrier:x[2],forwarder:x[3],vessel_voyage:x[4],container_type:x[5],container_no:x[6],bl_no:x[7],port_of_loading:x[8],destination_port:x[9],etd:d(x[10]),eta:d(x[11]),status:x[12],tracking_url:'https://tracking.example.com/'+x[1],notes:`[${BATCH}] Shipment`,created_at:dt(-20+i*4),updated_at:now()};
   shipments.push(obj);insert('shipments',obj);
   const oi=db.prepare('SELECT * FROM order_items WHERE order_id=? ORDER BY id').all(obj.order_id);
   oi.forEach((r,k)=>insert('shipment_items',{id:did(34,i*10+k+1),shipment_id:obj.id,order_item_id:r.id,product_name:r.product_name,quantity:i===4?Math.round(r.quantity*0.5):r.quantity,unit:r.unit,created_at:dt(-10+i)}));
@@ -407,7 +407,7 @@ shipmentDefs.forEach((x,i)=>{
 
 // Customs declarations
 for(let i=0;i<4;i++){
-  const sh=shipments[i],ord=orders[shipmentDefs[i][0]],decl={id:did(36,i+1),declaration_no:\`CUS-DEMO-2026-\${String(i+1).padStart(3,'0')}\`,order_id:ord.id,shipment_id:sh.id,export_country:'China',destination_country:customers[shipmentDefs[i][0]===0?10:shipmentDefs[i][0]===1?6:shipmentDefs[i][0]===2?8:3].country,customs_office:i%2?'Shanghai Customs':'Ningbo Customs',declaration_date:d(-3+i*3),trade_mode:'General Trade',incoterm:ord.incoterm,currency:ord.currency,total_value:ord.total,status:i===0?'released':i===1?'submitted':'draft',notes:\`[\${BATCH}] Customs declaration\`,created_by:userDefs[4].id,created_at:dt(-8+i),updated_at:now()};
+  const sh=shipments[i],ord=orders[shipmentDefs[i][0]],decl={id:did(36,i+1),declaration_no:`CUS-DEMO-2026-${String(i+1).padStart(3,'0')}`,order_id:ord.id,shipment_id:sh.id,export_country:'China',destination_country:customers[shipmentDefs[i][0]===0?10:shipmentDefs[i][0]===1?6:shipmentDefs[i][0]===2?8:3].country,customs_office:i%2?'Shanghai Customs':'Ningbo Customs',declaration_date:d(-3+i*3),trade_mode:'General Trade',incoterm:ord.incoterm,currency:ord.currency,total_value:ord.total,status:i===0?'released':i===1?'submitted':'draft',notes:`[${BATCH}] Customs declaration`,created_by:userDefs[4].id,created_at:dt(-8+i),updated_at:now()};
   insert('customs_declarations',decl);
   const items=db.prepare('SELECT * FROM order_items WHERE order_id=?').all(ord.id);
   items.forEach((r,k)=>{
@@ -426,10 +426,10 @@ const afterDefs=[
 ];
 const aftersales=[];
 afterDefs.forEach((x,i)=>{
-  const obj={id:did(38,i+1),ticket_no:\`AS-DEMO-2026-\${String(i+1).padStart(3,'0')}\`,customer_id:customers[x[0]].id,order_id:orders[x[1]].id,category:x[2],severity:x[3],subject:x[4],description:x[5],responsible_team:x[6],solution:x[7],status:x[8],satisfaction:x[9],opened_at:dt(x[10]),closed_at:x[11]===null?null:dt(x[11]),updated_at:now(),sla_due_at:dt(x[10]+(x[3]==='critical'?2:5))};
+  const obj={id:did(38,i+1),ticket_no:`AS-DEMO-2026-${String(i+1).padStart(3,'0')}`,customer_id:customers[x[0]].id,order_id:orders[x[1]].id,category:x[2],severity:x[3],subject:x[4],description:x[5],responsible_team:x[6],solution:x[7],status:x[8],satisfaction:x[9],opened_at:dt(x[10]),closed_at:x[11]===null?null:dt(x[11]),updated_at:now(),sla_due_at:dt(x[10]+(x[3]==='critical'?2:5))};
   aftersales.push(obj);insert('aftersales',obj);
 });
-for(let i=0;i<3;i++)insert('knowledge_articles',{id:did(39,i+1),title:[ 'Servo drive commissioning alarm troubleshooting','International shipment delay communication checklist','GCC bilingual document package checklist'][i],category:aftersales[i].category,summary:\`Validated resolution from \${aftersales[i].ticket_no}\`,content:aftersales[i].solution,tags:j([aftersales[i].category,'validated','demo']),status:'published',source_ticket_id:aftersales[i].id,use_count:[6,3,4][i],created_by:userDefs[6].id,created_at:dt(-20+i*3),updated_at:now()});
+for(let i=0;i<3;i++)insert('knowledge_articles',{id:did(39,i+1),title:[ 'Servo drive commissioning alarm troubleshooting','International shipment delay communication checklist','GCC bilingual document package checklist'][i],category:aftersales[i].category,summary:`Validated resolution from ${aftersales[i].ticket_no}`,content:aftersales[i].solution,tags:j([aftersales[i].category,'validated','demo']),status:'published',source_ticket_id:aftersales[i].id,use_count:[6,3,4][i],created_by:userDefs[6].id,created_at:dt(-20+i*3),updated_at:now()});
 
 // Marketing
 const segmentId=did(40,1),templateId=did(41,1),campaignId=did(42,1);
@@ -439,13 +439,13 @@ insert('campaigns',{id:campaignId,name:'2026 Q4 Europe Distributor Update（演�
 for(let i=0;i<8;i++){
   const c=customers[i],ct=contacts[i*2],email=db.prepare("SELECT value FROM contact_channels WHERE contact_id=? AND channel='email' LIMIT 1").get(ct.id)?.value||'';
   insert('marketing_consents',{id:did(43,i+1),customer_id:c.id,contact_id:ct.id,channel:'email',status:i===7?'opt_out':'opt_in',source:'demo_seed',updated_at:now()});
-  insert('campaign_recipients',{id:did(44,i+1),campaign_id:campaignId,customer_id:c.id,contact_id:ct.id,address:email,status:i===7?'skipped':'sent',reason:i===7?'opt_out':null,personalized_subject:\`\${c.name} - Q4 automation product update\`,personalized_body:'Demo campaign content',sent_at:i===7?null:dt(-7,10),converted_at:i===1?dt(-2):null,created_at:dt(-8),attempt_count:i===7?0:1,provider_message_id:i===7?null:\`<demo-\${i+1}@tradeflow.local>\`,send_error:null,open_count:i<5?2:0,click_count:i<3?1:0,first_opened_at:i<5?dt(-6,9):null,last_opened_at:i<5?dt(-5,10):null,first_clicked_at:i<3?dt(-5,11):null,last_clicked_at:i<3?dt(-5,11):null,unsubscribed_at:i===7?dt(-6):null});
+  insert('campaign_recipients',{id:did(44,i+1),campaign_id:campaignId,customer_id:c.id,contact_id:ct.id,address:email,status:i===7?'skipped':'sent',reason:i===7?'opt_out':null,personalized_subject:`${c.name} - Q4 automation product update`,personalized_body:'Demo campaign content',sent_at:i===7?null:dt(-7,10),converted_at:i===1?dt(-2):null,created_at:dt(-8),attempt_count:i===7?0:1,provider_message_id:i===7?null:`<demo-${i+1}@tradeflow.local>`,send_error:null,open_count:i<5?2:0,click_count:i<3?1:0,first_opened_at:i<5?dt(-6,9):null,last_opened_at:i<5?dt(-5,10):null,first_clicked_at:i<3?dt(-5,11):null,last_clicked_at:i<3?dt(-5,11):null,unsubscribed_at:i===7?dt(-6):null});
 }
 
 // Exchange rates
 [
  ['USD','CNY',7.12],['EUR','CNY',8.39],['GBP','CNY',9.64],['USD','EUR',0.848],['USD','GBP',0.738],['USD','JPY',149.8],['USD','CAD',1.36],['USD','AUD',1.51]
-].forEach((x,i)=>insert('exchange_rates',{id:did(45,i+1),base_currency:x[0],quote_currency:x[1],rate:x[2],rate_date:d(-1),source:'Demo Finance Reference',notes:\`[\${BATCH}] Non-live reference rate for system testing\`,created_by:userDefs[5].id,created_at:dt(-1),updated_at:now()}));
+].forEach((x,i)=>insert('exchange_rates',{id:did(45,i+1),base_currency:x[0],quote_currency:x[1],rate:x[2],rate_date:d(-1),source:'Demo Finance Reference',notes:`[${BATCH}] Non-live reference rate for system testing`,created_by:userDefs[5].id,created_at:dt(-1),updated_at:now()}));
 
 // Saved views / reports / custom automation
 insert('saved_views',{id:did(46,1),user_id:userDefs[0].id,entity_type:'customers',name:'欧洲重点客户（演示）',filters:j({grade:'A',customer_type:'Distributor'}),is_shared:1,created_at:dt(-10),updated_at:now()});
@@ -467,7 +467,7 @@ console.log('[Seed] Batch:',BATCH);
 console.log('[Seed] Database:',DB_FILE);
 console.log('[Seed] Backup:',backup);
 console.log('\\n[Seed] Demo login accounts (same password):',DEFAULT_PASSWORD);
-for(const u of userDefs)console.log(\`  \${u.username.padEnd(16)} \${u.role.padEnd(9)} \${u.display_name}\`);
+for(const u of userDefs)console.log(`  ${u.username.padEnd(16)} ${u.role.padEnd(9)} ${u.display_name}`);
 
 const summaryTables=['users','departments','customers','contacts','contact_channels','activities','tasks','inquiries','opportunities','quotations','quotation_items','products','contracts','orders','order_items','payments','credit_profiles','shipments','customs_declarations','aftersales','knowledge_articles','campaigns','campaign_recipients','report_definitions','automation_custom_rules'];
 console.log('\\n[Seed] Current table counts:');
