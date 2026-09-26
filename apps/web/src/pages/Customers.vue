@@ -29,7 +29,8 @@ async function save(){
   Object.assign(form,{name:'',english_name:'',country:'',city:'',website:'',industry:'',customer_types:['Importer'],status:'potential',grade:'B',source:'',language:'English',timezone:'',business_scope:''});
   await load();ElMessage.success('客户已创建');
 }
-function clearFilters(){Object.assign(filters,{keyword:'',country:'',status:'',grade:''});load()}\nfunction openCustomer(r:any){router.push(`/customers/${r.id}`)}
+function clearFilters(){Object.assign(filters,{keyword:'',country:'',status:'',grade:''});load()}
+function openCustomer(r:any){router.push(`/customers/${r.id}`)}
 onMounted(load);
 </script>
 
