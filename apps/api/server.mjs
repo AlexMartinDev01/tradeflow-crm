@@ -83,6 +83,7 @@ CREATE TABLE IF NOT EXISTS system_alerts(id TEXT PRIMARY KEY, alert_key TEXT UNI
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS exchange_rates(id TEXT PRIMARY KEY, base_currency TEXT NOT NULL, quote_currency TEXT NOT NULL, rate REAL NOT NULL, rate_date TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual', notes TEXT, created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(base_currency,quote_currency,rate_date,source));
 CREATE TABLE IF NOT EXISTS automation_rules(key TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS automation_custom_rules(id TEXT PRIMARY KEY, name TEXT NOT NULL, entity_type TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, conditions TEXT NOT NULL DEFAULT '[]', actions TEXT NOT NULL DEFAULT '[]', created_by TEXT NOT NULL, last_run_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS automation_logs(id TEXT PRIMARY KEY, rule_key TEXT NOT NULL, message TEXT NOT NULL, entity_type TEXT, entity_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS saved_views(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, entity_type TEXT NOT NULL, name TEXT NOT NULL, filters TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS report_definitions(id TEXT PRIMARY KEY, name TEXT NOT NULL, entity_type TEXT NOT NULL, dimension TEXT NOT NULL, metric TEXT NOT NULL, chart_type TEXT NOT NULL DEFAULT 'bar', filters TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE CASCADE);
@@ -419,6 +420,125 @@ for(const [key,name,enabled,config] of automationDefaults){
 db.prepare("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('public_pool_rule',?,?)")
   .run(JSON.stringify({enabled:true,inactive_days:90,protect_grades:['A'],eligible_statuses:['potential','contacted','following','dormant']}),now());
 
+
+function customAutomationCatalog(){
+  const commonOps=['eq','neq','gte','lte','contains'];
+  return {
+    customers:{label:'客户',fields:{
+      status:{label:'客户状态',kind:'string',operators:['eq','neq']},grade:{label:'客户等级',kind:'string',operators:['eq','neq']},country:{label:'国家',kind:'string',operators:['eq','neq','contains']},source:{label:'来源',kind:'string',operators:['eq','neq','contains']},days_since_activity:{label:'距上次跟进天数',kind:'number',operators:['gte','lte','eq']}
+    },actions:['create_task','set_customer_status','set_customer_grade','add_tag']},
+    opportunities:{label:'商机',fields:{
+      stage:{label:'商机阶段',kind:'string',operators:['eq','neq']},probability:{label:'成交概率%',kind:'number',operators:['gte','lte','eq']},expected_amount:{label:'预计金额',kind:'number',operators:['gte','lte','eq']},days_to_close:{label:'距预计成交日天数（负数=已逾期）',kind:'number',operators:['gte','lte','eq']}
+    },actions:['create_task','set_opportunity_stage']},
+    orders:{label:'订单',fields:{
+      status:{label:'订单状态',kind:'string',operators:['eq','neq']},total:{label:'订单金额',kind:'number',operators:['gte','lte','eq']},days_to_delivery:{label:'距要求交期天数（负数=已逾期）',kind:'number',operators:['gte','lte','eq']}
+    },actions:['create_task','set_order_status']},
+    quotations:{label:'报价',fields:{
+      status:{label:'报价状态',kind:'string',operators:['eq','neq']},total:{label:'报价金额',kind:'number',operators:['gte','lte','eq']},margin_rate:{label:'毛利率%',kind:'number',operators:['gte','lte','eq']},days_to_expiry:{label:'距报价到期天数（负数=已过期）',kind:'number',operators:['gte','lte','eq']}
+    },actions:['create_task','set_quotation_status']},
+    aftersales:{label:'售后',fields:{
+      status:{label:'工单状态',kind:'string',operators:['eq','neq']},severity:{label:'严重度',kind:'string',operators:['eq','neq']},days_to_sla:{label:'距 SLA 截止天数（负数=已超时）',kind:'number',operators:['gte','lte','eq']}
+    },actions:['create_task','set_aftersales_status']}
+  };
+}
+function customAutomationActionCatalog(){
+  return {
+    create_task:{label:'创建跟进任务',fields:['title','description','priority','due_days']},
+    set_customer_status:{label:'修改客户状态',fields:['value']},set_customer_grade:{label:'修改客户等级',fields:['value']},add_tag:{label:'添加客户标签',fields:['tag_id']},
+    set_opportunity_stage:{label:'推进商机阶段',fields:['value']},set_order_status:{label:'修改订单状态',fields:['value']},set_quotation_status:{label:'修改报价状态',fields:['value']},set_aftersales_status:{label:'修改售后状态',fields:['value']}
+  };
+}
+function normalizeCustomAutomationRule(input={}){
+  const catalog=customAutomationCatalog(),entity=String(input.entity_type||''),cfg=catalog[entity];if(!cfg)throw new Error('invalid_automation_entity');
+  const rawConditions=Array.isArray(input.conditions)?input.conditions:[],rawActions=Array.isArray(input.actions)?input.actions:[];
+  if(!rawConditions.length||rawConditions.length>8)throw new Error('automation_conditions_required');
+  if(!rawActions.length||rawActions.length>6)throw new Error('automation_actions_required');
+  const conditions=rawConditions.map(x=>{
+    const field=String(x.field||''),def=cfg.fields[field],operator=String(x.operator||'eq');if(!def||!def.operators.includes(operator))throw new Error('invalid_automation_condition');
+    const value=def.kind==='number'?Number(x.value):String(x.value??'').trim();if(def.kind==='number'&&!Number.isFinite(value))throw new Error('invalid_automation_condition_value');
+    return {field,operator,value};
+  });
+  const allowedStatuses={
+    customers:['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist'],
+    opportunities:['qualification','solution','quotation','sample','negotiation','won','lost'],
+    orders:['pending','confirmed','production','ready','partial_shipped','shipped','partial_delivered','completed','cancelled'],
+    quotations:['draft','pending_approval','approved','sent','accepted','rejected','expired'],
+    aftersales:['open','investigating','awaiting_customer','resolved','closed']
+  };
+  const actions=rawActions.map(x=>{
+    const type=String(x.type||'');if(!cfg.actions.includes(type))throw new Error('invalid_automation_action');
+    if(type==='create_task'){
+      const title=String(x.title||'').trim();if(!title)throw new Error('automation_task_title_required');
+      const priority=['low','normal','high','urgent'].includes(String(x.priority||''))?String(x.priority):'normal';
+      return {type,title,description:String(x.description||'').trim(),priority,due_days:Math.max(0,Math.min(365,Number(x.due_days||0)))};
+    }
+    if(type==='add_tag'){
+      const tagId=String(x.tag_id||'');if(!db.prepare('SELECT 1 FROM tags WHERE id=?').get(tagId))throw new Error('invalid_automation_tag');return {type,tag_id:tagId};
+    }
+    const value=String(x.value||'');
+    if(type==='set_customer_grade'){if(!['A','B','C','D'].includes(value.toUpperCase()))throw new Error('invalid_automation_action_value');return {type,value:value.toUpperCase()};}
+    const targetEntity=type==='set_customer_status'?'customers':type==='set_opportunity_stage'?'opportunities':type==='set_order_status'?'orders':type==='set_quotation_status'?'quotations':'aftersales';
+    if(!allowedStatuses[targetEntity].includes(value))throw new Error('invalid_automation_action_value');
+    return {type,value};
+  });
+  return {entity_type:entity,conditions,actions};
+}
+function daysFromNow(dateValue){
+  if(!dateValue)return 99999;const ms=new Date(String(dateValue)).getTime();if(!Number.isFinite(ms))return 99999;return Math.ceil((ms-Date.now())/86400000);
+}
+function customAutomationRows(entity){
+  if(entity==='customers')return db.prepare(`SELECT c.*,c.id entity_id,c.id customer_id,c.owner_id assigned_to,
+      COALESCE((SELECT MAX(a.occurred_at) FROM activities a WHERE a.customer_id=c.id),c.created_at) last_activity_at
+      FROM customers c WHERE c.deleted_at IS NULL LIMIT 5000`).all().map(x=>({...x,days_since_activity:Math.max(0,-daysFromNow(x.last_activity_at))}));
+  if(entity==='opportunities')return db.prepare(`SELECT e.*,e.id entity_id,e.customer_id,c.owner_id assigned_to,c.name customer_name FROM opportunities e JOIN customers c ON c.id=e.customer_id WHERE c.deleted_at IS NULL LIMIT 5000`).all().map(x=>({...x,days_to_close:daysFromNow(x.expected_close_date)}));
+  if(entity==='orders')return db.prepare(`SELECT e.*,e.id entity_id,e.customer_id,c.owner_id assigned_to,c.name customer_name FROM orders e JOIN customers c ON c.id=e.customer_id WHERE c.deleted_at IS NULL LIMIT 5000`).all().map(x=>({...x,days_to_delivery:daysFromNow(x.requested_delivery)}));
+  if(entity==='quotations')return db.prepare(`SELECT e.*,e.id entity_id,e.customer_id,c.owner_id assigned_to,c.name customer_name FROM quotations e JOIN customers c ON c.id=e.customer_id WHERE c.deleted_at IS NULL LIMIT 5000`).all().map(x=>({...x,days_to_expiry:daysFromNow(x.valid_until)}));
+  if(entity==='aftersales')return db.prepare(`SELECT e.*,e.id entity_id,e.customer_id,c.owner_id assigned_to,c.name customer_name FROM aftersales e JOIN customers c ON c.id=e.customer_id WHERE c.deleted_at IS NULL LIMIT 5000`).all().map(x=>({...x,days_to_sla:daysFromNow(x.sla_due_at)}));
+  return [];
+}
+function customConditionMatches(row,condition){
+  const actual=row[condition.field],expected=condition.value,op=condition.operator;
+  if(['gte','lte'].includes(op)){const a=Number(actual),b=Number(expected);if(!Number.isFinite(a)||!Number.isFinite(b))return false;return op==='gte'?a>=b:a<=b;}
+  if(op==='eq')return typeof expected==='number'?Number(actual)===expected:String(actual??'')===String(expected);
+  if(op==='neq')return typeof expected==='number'?Number(actual)!==expected:String(actual??'')!==String(expected);
+  if(op==='contains')return String(actual??'').toLowerCase().includes(String(expected??'').toLowerCase());
+  return false;
+}
+function customRuleMatches(row,conditions){return conditions.every(c=>customConditionMatches(row,c));}
+function previewCustomAutomationRule(rule){
+  const normalized=normalizeCustomAutomationRule(rule),rows=customAutomationRows(normalized.entity_type),matched=rows.filter(x=>customRuleMatches(x,normalized.conditions));
+  return {normalized,total_scanned:rows.length,matched_count:matched.length,sample:matched.slice(0,20).map(x=>({entity_id:x.entity_id,customer_id:x.customer_id,name:x.name||x.customer_name||x.order_no||x.quote_no||x.subject||x.entity_id,status:x.status||x.stage||null,owner_id:x.assigned_to||null}))};
+}
+function applyCustomAutomationRule(rule,result){
+  const normalized=normalizeCustomAutomationRule(rule),rows=customAutomationRows(normalized.entity_type),matched=rows.filter(x=>customRuleMatches(x,normalized.conditions));
+  let actionsApplied=0;
+  for(const row of matched){
+    normalized.actions.forEach((action,index)=>{
+      if(action.type==='create_task'){
+        const title=action.title.replaceAll('{name}',String(row.name||row.customer_name||row.order_no||row.quote_no||row.subject||'')).replaceAll('{id}',String(row.entity_id));
+        const desc=String(action.description||'').replaceAll('{name}',String(row.name||row.customer_name||'')).replaceAll('{id}',String(row.entity_id));
+        const due=new Date(Date.now()+Number(action.due_days||0)*86400000).toISOString(),key=`custom:${rule.id}:${row.entity_id}:${index}`;
+        if(autoTask(key,row.customer_id,title,desc,due,action.priority,row.assigned_to)){result.created++;actionsApplied++;automationLog(`custom:${rule.id}`,`自定义规则“${rule.name}”创建任务`,normalized.entity_type,row.entity_id);}
+        return;
+      }
+      if(action.type==='add_tag'){
+        const info=db.prepare('INSERT OR IGNORE INTO customer_tags(customer_id,tag_id) VALUES(?,?)').run(row.customer_id,action.tag_id);
+        if(Number(info.changes||0)>0){result.updated++;actionsApplied++;automationLog(`custom:${rule.id}`,`自定义规则“${rule.name}”添加标签`,normalized.entity_type,row.entity_id);}return;
+      }
+      const map={
+        set_customer_status:{table:'customers',field:'status'},set_customer_grade:{table:'customers',field:'grade'},set_opportunity_stage:{table:'opportunities',field:'stage'},
+        set_order_status:{table:'orders',field:'status'},set_quotation_status:{table:'quotations',field:'status'},set_aftersales_status:{table:'aftersales',field:'status'}
+      },target=map[action.type];if(!target)return;
+      const current=row[target.field];if(String(current??'')===String(action.value))return;
+      const cols=tableCols(target.table),sql=cols.includes('updated_at')?`UPDATE ${target.table} SET ${target.field}=?,updated_at=? WHERE id=?`:`UPDATE ${target.table} SET ${target.field}=? WHERE id=?`;
+      if(cols.includes('updated_at'))db.prepare(sql).run(action.value,now(),row.entity_id);else db.prepare(sql).run(action.value,row.entity_id);
+      result.updated++;actionsApplied++;automationLog(`custom:${rule.id}`,`自定义规则“${rule.name}”执行 ${action.type}`,normalized.entity_type,row.entity_id);
+    });
+  }
+  db.prepare('UPDATE automation_custom_rules SET last_run_at=?,updated_at=? WHERE id=?').run(now(),now(),rule.id);
+  return {matched:matched.length,actions_applied:actionsApplied};
+}
+
 function autoTask(key,customerId,title,description,dueAt,priority='normal',assignedTo=null){
   const exists=db.prepare('SELECT id FROM tasks WHERE automation_key=? LIMIT 1').get(key); if(exists)return false;
   db.prepare('INSERT INTO tasks(id,customer_id,title,description,due_at,status,priority,assigned_to,created_by,automation_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
@@ -491,6 +611,12 @@ function runAutomationSweep(){
     }
   }
 
+  result.custom_rules=[];
+  const customRules=db.prepare('SELECT * FROM automation_custom_rules WHERE enabled=1 ORDER BY created_at').all();
+  for(const rule of customRules){
+    try{const outcome=applyCustomAutomationRule({...rule,conditions:parseJSON(rule.conditions,[]),actions:parseJSON(rule.actions,[])},result);result.custom_rules.push({id:rule.id,name:rule.name,...outcome});}
+    catch(e){console.error('custom automation failed',rule.id,e);automationLog('custom:'+rule.id,'自定义规则执行失败：'+String(e.message||e),'rule',rule.id);}
+  }
   db.prepare("INSERT INTO settings(key,value,updated_at) VALUES('automation_last_run',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(result),now());
   return result;
 }
@@ -1793,6 +1919,46 @@ const server = http.createServer(async (req,res)=>{
         const members=Number(db.prepare('SELECT COUNT(*) c FROM users WHERE department_id=?').get(old.id).c||0),children=Number(db.prepare('SELECT COUNT(*) c FROM departments WHERE parent_id=?').get(old.id).c||0);
         if(members||children)return json(res,409,{error:'department_in_use',members,children});
         db.prepare('DELETE FROM departments WHERE id=?').run(old.id);audit(user,'delete','department',old.id,req);return json(res,200,{ok:true});
+      }
+    }
+
+    // ---- Configurable automation rule builder ----
+    if(p==='/api/automation/custom/catalog' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      return json(res,200,{entities:customAutomationCatalog(),actions:customAutomationActionCatalog()});
+    }
+    if(p==='/api/automation/custom' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const rows=db.prepare('SELECT r.*,u.display_name created_by_name FROM automation_custom_rules r LEFT JOIN users u ON u.id=r.created_by ORDER BY r.updated_at DESC').all()
+        .map(x=>({...x,conditions:parseJSON(x.conditions,[]),actions:parseJSON(x.actions,[])}));
+      return json(res,200,rows);
+    }
+    if(p==='/api/automation/custom' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role)||!user.user_id)return json(res,403,{error:'forbidden'});
+      const b=await body(req),name=String(b.name||'').trim();if(!name)return json(res,400,{error:'name_required'});
+      const rule=normalizeCustomAutomationRule(b),id=randomUUID();
+      db.prepare('INSERT INTO automation_custom_rules(id,name,entity_type,enabled,conditions,actions,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run(id,name,rule.entity_type,b.enabled?1:0,JSON.stringify(rule.conditions),JSON.stringify(rule.actions),user.user_id,now(),now());
+      audit(user,'create','automation_custom_rule',id,req,{name,...rule,enabled:!!b.enabled});return json(res,201,{id});
+    }
+    if(p==='/api/automation/custom/preview' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req),preview=previewCustomAutomationRule(b);return json(res,200,preview);
+    }
+    {
+      const cr=p.match(/^\/api\/automation\/custom\/([0-9a-f-]+)$/);
+      if(cr&&req.method==='PATCH'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM automation_custom_rules WHERE id=?').get(cr[1]);if(!old)return json(res,404,{error:'not_found'});
+        const b=await body(req),merged={...old,conditions:parseJSON(old.conditions,[]),actions:parseJSON(old.actions,[]),...b},rule=normalizeCustomAutomationRule(merged),name=String(b.name??old.name).trim()||old.name,enabled=b.enabled===undefined?old.enabled:(b.enabled?1:0);
+        db.prepare('UPDATE automation_custom_rules SET name=?,entity_type=?,enabled=?,conditions=?,actions=?,updated_at=? WHERE id=?')
+          .run(name,rule.entity_type,enabled,JSON.stringify(rule.conditions),JSON.stringify(rule.actions),now(),old.id);
+        audit(user,'update','automation_custom_rule',old.id,req,{name,...rule,enabled:!!enabled});return json(res,200,{ok:true});
+      }
+      if(cr&&req.method==='DELETE'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM automation_custom_rules WHERE id=?').get(cr[1]);if(!old)return json(res,404,{error:'not_found'});
+        db.prepare('DELETE FROM automation_custom_rules WHERE id=?').run(old.id);audit(user,'delete','automation_custom_rule',old.id,req);return json(res,200,{ok:true});
       }
     }
 
@@ -3554,6 +3720,6 @@ const server = http.createServer(async (req,res)=>{
     }
 
     return json(res,404,{error:'not_found',path:p});
-  } catch(e){ console.error(req.requestId,e); const known=['custom_field_validation_failed','weak_password','currency_filter_required','invalid_report_entity','invalid_report_dimension','invalid_report_metric']; const code=known.includes(e.message)?e.message:'request_failed'; return json(res,400,{error:code,message:e.message,details:e.details||undefined,request_id:req.requestId}); }
+  } catch(e){ console.error(req.requestId,e); const known=['custom_field_validation_failed','weak_password','currency_filter_required','invalid_report_entity','invalid_report_dimension','invalid_report_metric','invalid_automation_entity','automation_conditions_required','automation_actions_required','invalid_automation_condition','invalid_automation_condition_value','invalid_automation_action','automation_task_title_required','invalid_automation_tag','invalid_automation_action_value']; const code=known.includes(e.message)?e.message:'request_failed'; return json(res,400,{error:code,message:e.message,details:e.details||undefined,request_id:req.requestId}); }
 });
 server.listen(PORT,HOST,()=>console.log(`TradeFlow API listening on http://${HOST}:${PORT}/api`));
