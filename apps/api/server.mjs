@@ -183,13 +183,34 @@ function customerInsights(customerId){
   };
 }
 
+function chooseInquiryOwner(customerId,fallbackUserId){
+  if(customerId){
+    const owner=db.prepare("SELECT u.id FROM customers c JOIN users u ON u.id=c.owner_id WHERE c.id=? AND u.enabled=1").get(customerId);
+    if(owner?.id)return owner.id;
+  }
+  const row=db.prepare(`SELECT u.id,COUNT(i.id) open_count
+    FROM users u LEFT JOIN inquiries i ON i.owner_id=u.id AND i.status NOT IN ('converted','closed','lost')
+    WHERE u.enabled=1 AND u.role IN ('sales','followup')
+    GROUP BY u.id ORDER BY open_count ASC,u.display_name ASC LIMIT 1`).get();
+  return row?.id||fallbackUserId;
+}
+function inquirySlaInfo(row,hours){
+  const received=new Date(row.received_at||row.created_at).getTime();
+  const responded=row.first_response_at?new Date(row.first_response_at).getTime():null;
+  const deadline=received+Number(hours||4)*3600000;
+  const end=responded||Date.now();
+  const minutes=Math.max(0,Math.round((end-received)/60000));
+  return {...row,response_minutes:responded?minutes:null,sla_deadline:new Date(deadline).toISOString(),sla_status:responded?(responded<=deadline?'within_sla':'breached'):(Date.now()>deadline?'overdue':'pending')};
+}
+
 seed();
 const automationDefaults=[
   ['overdue_payment','逾期回款提醒',1,{priority:'urgent'}],
   ['quotation_expiry','报价到期提醒',1,{days:3,priority:'high'}],
   ['brand_expiry','品牌授权到期提醒',1,{days:30,priority:'high'}],
   ['dormant_customer','沉默客户识别',1,{days:60,priority:'normal'}],
-  ['contact_anniversary','联系人生日/纪念日提醒',1,{days:7,priority:'normal'}]
+  ['contact_anniversary','联系人生日/纪念日提醒',1,{days:7,priority:'normal'}],
+  ['inquiry_response_sla','询盘首次响应 SLA',1,{hours:4,priority:'high'}]
 ];
 for(const [key,name,enabled,config] of automationDefaults){
   db.prepare('INSERT OR IGNORE INTO automation_rules(key,name,enabled,config,updated_at) VALUES(?,?,?,?,?)').run(key,name,enabled,JSON.stringify(config),now());
@@ -239,6 +260,17 @@ function runAutomationSweep(){
     for(const x of rows){
       if(x.status!=='dormant'){db.prepare("UPDATE customers SET status='dormant',updated_at=? WHERE id=?").run(now(),x.id);result.updated++;}
       const key=`customer-dormant:${x.id}`;if(autoTask(key,x.id,`沉默客户需要重新激活：${x.name}`,`超过 ${days} 天没有有效跟进，请评估是否重新联系或转入公海。`,now(),dr.config.priority||'normal',x.owner_id)){result.created++;automationLog('dormant_customer','客户自动标记为沉默并生成任务','customer',x.id);}
+    }
+  }
+
+  const ir=getRule('inquiry_response_sla');
+  if(ir?.enabled){
+    const hours=Number(ir.config.hours||4),cutoff=new Date(Date.now()-hours*3600000).toISOString();
+    const rows=db.prepare(`SELECT i.*,c.name customer_name,c.owner_id customer_owner FROM inquiries i JOIN customers c ON c.id=i.customer_id
+      WHERE i.first_response_at IS NULL AND i.status NOT IN ('converted','closed','lost') AND i.received_at < ?`).all(cutoff);
+    for(const x of rows){
+      const key=`inquiry-sla:${x.id}`,assignee=x.owner_id||x.customer_owner;
+      if(autoTask(key,x.customer_id,`询盘响应超时：${x.inquiry_no}`,`${x.customer_name} 的询盘已超过 ${hours} 小时未记录首次响应，请立即跟进。`,now(),ir.config.priority||'high',assignee)){result.created++;automationLog('inquiry_response_sla','生成询盘响应超时任务','inquiry',x.id);}
     }
   }
 
@@ -1639,6 +1671,44 @@ const server = http.createServer(async (req,res)=>{
       }
     }
 
+    // ---- Inquiry assignment / first-response SLA / opportunity loss closure ----
+    if(p==='/api/inquiries/sla-dashboard' && req.method==='GET'){
+      const rule=getRule('inquiry_response_sla'),hours=Number(rule?.config?.hours||4);
+      const scope=scopedRole(user)?" AND (i.owner_id=? OR c.owner_id=? OR EXISTS (SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=c.id AND cc.user_id=?))":"";
+      const args=scopedRole(user)?[user.user_id,user.user_id,user.user_id]:[];
+      const rows=db.prepare(`SELECT i.*,c.name customer_name,u.display_name owner_name
+        FROM inquiries i JOIN customers c ON c.id=i.customer_id LEFT JOIN users u ON u.id=i.owner_id
+        WHERE c.deleted_at IS NULL${scope} ORDER BY i.received_at DESC LIMIT 500`).all(...args).map(x=>inquirySlaInfo(decodeRow(x,resourceMap.inquiries),hours));
+      const responded=rows.filter(x=>x.first_response_at),breached=rows.filter(x=>x.sla_status==='breached').length,overdue=rows.filter(x=>x.sla_status==='overdue').length;
+      const avg=responded.length?Math.round(responded.reduce((a,x)=>a+Number(x.response_minutes||0),0)/responded.length):0;
+      return json(res,200,{sla_hours:hours,summary:{total:rows.length,responded:responded.length,breached,overdue,avg_response_minutes:avg},rows});
+    }
+    {
+      const respond=p.match(/^\/api\/workflows\/inquiries\/([0-9a-f-]+)\/respond$/);
+      if(respond && req.method==='POST'){
+        const inquiry=db.prepare('SELECT * FROM inquiries WHERE id=?').get(respond[1]);if(!inquiry)return json(res,404,{error:'inquiry_not_found'});
+        if(scopedRole(user)&&inquiry.owner_id!==user.user_id&&!customerOwnedBy(user,inquiry.customer_id))return json(res,403,{error:'forbidden'});
+        const b=await body(req),responseAt=b.response_at||now();
+        db.prepare("UPDATE inquiries SET first_response_at=COALESCE(first_response_at,?),status=CASE WHEN status='new' THEN 'contacted' ELSE status END,updated_at=? WHERE id=?").run(responseAt,now(),inquiry.id);
+        const row=db.prepare('SELECT * FROM inquiries WHERE id=?').get(inquiry.id),hours=Number(getRule('inquiry_response_sla')?.config?.hours||4);
+        audit(user,'first_response','inquiries',inquiry.id,req,{response_at:responseAt});
+        return json(res,200,inquirySlaInfo(decodeRow(row,resourceMap.inquiries),hours));
+      }
+      const stage=p.match(/^\/api\/workflows\/opportunities\/([0-9a-f-]+)\/stage$/);
+      if(stage && req.method==='POST'){
+        const op=db.prepare('SELECT * FROM opportunities WHERE id=?').get(stage[1]);if(!op)return json(res,404,{error:'opportunity_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,op.customer_id))return json(res,403,{error:'forbidden'});
+        const b=await body(req),next=String(b.stage||''),allowed=['qualification','solution','quotation','sample','negotiation','won','lost'];
+        if(!allowed.includes(next))return json(res,400,{error:'invalid_stage'});
+        const lossReason=String(b.loss_reason||op.loss_reason||'').trim();
+        if(next==='lost'&&!lossReason)return json(res,400,{error:'loss_reason_required'});
+        const probability=next==='won'?100:next==='lost'?0:Number(b.probability??op.probability??0);
+        db.prepare('UPDATE opportunities SET stage=?,probability=?,loss_reason=?,updated_at=? WHERE id=?').run(next,probability,next==='lost'?lossReason:null,now(),op.id);
+        audit(user,'change_stage','opportunities',op.id,req,{from:op.stage,to:next,loss_reason:next==='lost'?lossReason:null});
+        return json(res,200,db.prepare('SELECT * FROM opportunities WHERE id=?').get(op.id));
+      }
+    }
+
     // ---- Sales workflow actions: inquiry -> opportunity -> quotation -> order / sample follow-up ----
     {
       const wm=p.match(/^\/api\/workflows\/inquiries\/([0-9a-f-]+)\/to-opportunity$/);
@@ -1779,7 +1849,7 @@ const server = http.createServer(async (req,res)=>{
       }
       if(req.method==='GET' && id){ const row=db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id); if(!row)return json(res,404,{error:'not_found'}); const cid=key==='customers'?row.id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); return json(res,200,protectRow(key,decodeRow(row,cfg),user)); }
       if(req.method==='POST' && !id){
-        const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ const cf=applyCustomerCustomFieldRules(b.custom_fields||{},user.role,null,{}); payload.custom_fields=JSON.stringify(cf); if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; if(tableCols(table).includes('pool_status'))payload.pool_status='assigned'; } else { const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
+        const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ const cf=applyCustomerCustomFieldRules(b.custom_fields||{},user.role,null,{}); payload.custom_fields=JSON.stringify(cf); if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; if(tableCols(table).includes('pool_status'))payload.pool_status='assigned'; } else if(table==='inquiries'){ if(!payload.owner_id) payload.owner_id=chooseInquiryOwner(payload.customer_id,user.user_id); const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } else { const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
         if(table==='inquiries' && !payload.inquiry_no){cols.push('inquiry_no');vals.push(makeNo('INQ'));} if(table==='quotations'&&!payload.quote_no){cols.push('quote_no');vals.push(makeNo('QT'));} if(table==='contracts'&&!payload.contract_no){cols.push('contract_no');vals.push(makeNo('CT'));} if(table==='orders'&&!payload.order_no){cols.push('order_no');vals.push(makeNo('SO'));} if(table==='aftersales'){if(!payload.ticket_no){cols.push('ticket_no');vals.push(makeNo('AS'));} if(!payload.opened_at){const opened=now();cols.push('opened_at');vals.push(opened);if(tableCols(table).includes('sla_due_at')){cols.push('sla_due_at');vals.push(aftersalesSlaDue(payload.severity||'normal',opened));}}}
         if(table==='users'){ const password=String(b.password||'ChangeMe@123'); cols.push('password_hash');vals.push(hashPassword(password)); }
         db.prepare(`INSERT INTO ${table}(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`).run(...vals); audit(user,'create',key,newId,req,payload); return json(res,201,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(newId),cfg));
