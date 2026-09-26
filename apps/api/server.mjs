@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS integration_deliveries(id TEXT PRIMARY KEY, integrati
 CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, role TEXT NOT NULL DEFAULT 'readonly', enabled INTEGER NOT NULL DEFAULT 1, expires_at TEXT, last_used_at TEXT, created_at TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, entity_type TEXT, entity_id TEXT, ip TEXT, request_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS system_alerts(id TEXT PRIMARY KEY, alert_key TEXT UNIQUE NOT NULL, severity TEXT NOT NULL DEFAULT 'warning', status TEXT NOT NULL DEFAULT 'open', title TEXT NOT NULL, message TEXT, detail TEXT NOT NULL DEFAULT '{}', first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, acknowledged_by TEXT, acknowledged_at TEXT, resolved_at TEXT);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS exchange_rates(id TEXT PRIMARY KEY, base_currency TEXT NOT NULL, quote_currency TEXT NOT NULL, rate REAL NOT NULL, rate_date TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual', notes TEXT, created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(base_currency,quote_currency,rate_date,source));
 CREATE TABLE IF NOT EXISTS automation_rules(key TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
@@ -1037,6 +1038,96 @@ function removeStoredDocumentFile(d){
   if(file!==root&&file.startsWith(root+path.sep)&&fs.existsSync(file))fs.unlinkSync(file);
 }
 
+const APP_STARTED_AT=Date.now();
+const opsMetrics={requests:0,responses4xx:0,responses5xx:0,total_latency_ms:0,statuses:{}};
+
+function getOpsPolicy(){
+  const row=db.prepare("SELECT value FROM settings WHERE key='ops_policy'").get(),raw=parseJSON(row?.value,{})||{};
+  return {
+    readiness_min_free_mb:Number(raw.readiness_min_free_mb??128),
+    disk_warn_free_mb:Number(raw.disk_warn_free_mb??1024),
+    backup_max_age_hours:Number(raw.backup_max_age_hours??36),
+    integration_failures_warn:Number(raw.integration_failures_warn??5),
+    http_5xx_rate_warn_percent:Number(raw.http_5xx_rate_warn_percent??5)
+  };
+}
+function diskUsageFor(target){
+  try{
+    const dir=fs.existsSync(target)&&fs.statSync(target).isDirectory()?target:path.dirname(target);
+    const st=fs.statfsSync(dir),block=Number(st.bsize||0),total=Number(st.blocks||0)*block,free=Number(st.bavail??st.bfree??0)*block;
+    return {ok:true,total_bytes:total,free_bytes:free,used_bytes:Math.max(0,total-free),free_percent:total?Number((free/total*100).toFixed(2)):null};
+  }catch(e){return {ok:false,error:String(e?.message||e)};}
+}
+function databaseProbe(fullCheck=false){
+  try{
+    const queryOk=db.prepare('SELECT 1 ok').get()?.ok===1;let quick='not_run';
+    if(fullCheck){const row=db.prepare('PRAGMA quick_check').get();quick=String(Object.values(row||{})[0]||'unknown');}
+    return {ok:queryOk&&(!fullCheck||quick==='ok'),query_ok:queryOk,quick_check:quick};
+  }catch(e){return {ok:false,query_ok:false,quick_check:'error',error:String(e?.message||e)};}
+}
+function latestAutomationRun(){
+  const row=db.prepare("SELECT value,updated_at FROM settings WHERE key='automation_last_run'").get();
+  return row?{...(parseJSON(row.value,{})||{}),updated_at:row.updated_at}:null;
+}
+function operationalSnapshot(){
+  const policy=getOpsPolicy(),database=databaseProbe(false),disk=diskUsageFor(DB_FILE),backups=listDatabaseBackups(),latestBackup=backups[0]||null;
+  const backupAgeHours=latestBackup?Number(((Date.now()-new Date(latestBackup.created_at).getTime())/3600000).toFixed(2)):null;
+  const since24=new Date(Date.now()-24*3600_000).toISOString();
+  const integrationFailures=Number(db.prepare("SELECT COUNT(*) c FROM integration_deliveries WHERE status='failed' AND created_at>=?").get(since24)?.c||0);
+  const lockedUsers=Number(db.prepare("SELECT COUNT(*) c FROM users WHERE enabled=1 AND locked_until IS NOT NULL AND locked_until>?").get(now())?.c||0);
+  const uploadBytes=Number(db.prepare("SELECT COALESCE(SUM(size_bytes),0) v FROM documents WHERE storage_path IS NOT NULL").get()?.v||0);
+  const openAlerts=Number(db.prepare("SELECT COUNT(*) c FROM system_alerts WHERE resolved_at IS NULL").get()?.c||0);
+  const mem=process.memoryUsage(),req=Math.max(1,opsMetrics.requests),rate5xx=opsMetrics.responses5xx/req*100;
+  return {
+    time:now(),
+    service:{name:'tradeflow-api',uptime_seconds:Math.floor((Date.now()-APP_STARTED_AT)/1000),node:process.version,pid:process.pid},
+    database:{...database,file_bytes:fs.existsSync(DB_FILE)?fs.statSync(DB_FILE).size:null},
+    disk,
+    uploads:{tracked_bytes:uploadBytes},
+    backup:{latest:latestBackup,age_hours:backupAgeHours,count:backups.length},
+    automation:{last_run:latestAutomationRun()},
+    integrations:{failures_24h:integrationFailures},
+    security:{locked_users:lockedUsers},
+    requests:{total:opsMetrics.requests,responses_4xx:opsMetrics.responses4xx,responses_5xx:opsMetrics.responses5xx,avg_latency_ms:opsMetrics.requests?Number((opsMetrics.total_latency_ms/opsMetrics.requests).toFixed(1)):0,http_5xx_rate_percent:Number(rate5xx.toFixed(2)),statuses:{...opsMetrics.statuses}},
+    memory:{rss_bytes:mem.rss,heap_used_bytes:mem.heapUsed,heap_total_bytes:mem.heapTotal},
+    alerts:{open:openAlerts},
+    policy
+  };
+}
+function readinessSnapshot(){
+  const policy=getOpsPolicy(),database=databaseProbe(false),disk=diskUsageFor(DB_FILE),reasons=[];
+  if(!database.ok)reasons.push('database_unavailable');
+  if(!disk.ok)reasons.push('disk_unavailable');
+  else if(disk.free_bytes<policy.readiness_min_free_mb*1024*1024)reasons.push('disk_space_critical');
+  return {ok:reasons.length===0,time:now(),checks:{database:{ok:database.ok},disk:{ok:disk.ok,free_bytes:disk.free_bytes??null}},reasons};
+}
+function setSystemAlert(key,active,severity,title,message,detail={}){
+  const old=db.prepare('SELECT * FROM system_alerts WHERE alert_key=?').get(key),t=now();
+  if(active){
+    if(old){
+      const status=old.resolved_at?'open':(old.status==='acknowledged'?'acknowledged':'open');
+      db.prepare('UPDATE system_alerts SET severity=?,status=?,title=?,message=?,detail=?,last_seen_at=?,resolved_at=NULL WHERE id=?')
+        .run(severity,status,title,message,JSON.stringify(detail||{}),t,old.id);
+    }else{
+      db.prepare('INSERT INTO system_alerts(id,alert_key,severity,status,title,message,detail,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?)')
+        .run(randomUUID(),key,severity,'open',title,message,JSON.stringify(detail||{}),t,t);
+    }
+  }else if(old&&!old.resolved_at){
+    db.prepare("UPDATE system_alerts SET status='resolved',resolved_at=?,last_seen_at=? WHERE id=?").run(t,t,old.id);
+  }
+}
+function evaluateOperationalAlerts(){
+  try{
+    const snap=operationalSnapshot(),p=snap.policy;
+    setSystemAlert('disk_space_low',snap.disk.ok&&snap.disk.free_bytes<p.disk_warn_free_mb*1024*1024,'critical','磁盘剩余空间不足',`数据库所在磁盘剩余空间低于 ${p.disk_warn_free_mb} MB`,{free_bytes:snap.disk.free_bytes});
+    setSystemAlert('backup_stale',!snap.backup.latest||snap.backup.age_hours>p.backup_max_age_hours,'warning','数据库备份过期',snap.backup.latest?`最近备份已过去 ${snap.backup.age_hours} 小时`:'尚未发现数据库备份',{latest:snap.backup.latest});
+    setSystemAlert('integration_failures',snap.integrations.failures_24h>=p.integration_failures_warn,'warning','外部集成失败次数偏高',`过去 24 小时有 ${snap.integrations.failures_24h} 次集成投递失败`,{failures_24h:snap.integrations.failures_24h});
+    setSystemAlert('http_5xx_rate',snap.requests.total>=20&&snap.requests.http_5xx_rate_percent>=p.http_5xx_rate_warn_percent,'critical','HTTP 5xx 错误率偏高',`当前进程累计 5xx 错误率为 ${snap.requests.http_5xx_rate_percent}%`,{requests:snap.requests});
+    setSystemAlert('database_unavailable',!snap.database.ok,'critical','数据库不可用','应用无法正常查询 SQLite 数据库',{database:snap.database});
+    return snap;
+  }catch(e){console.error('operational alert evaluation failed',e);return null;}
+}
+
 function backupInfo(file){
   const full=path.join(BACKUP_DIR,file),st=fs.statSync(full);
   return {file,size_bytes:st.size,created_at:st.mtime.toISOString(),kind:file.includes('-auto-')?'auto':'manual'};
@@ -1064,18 +1155,31 @@ function maybeAutomaticBackup(){
   }catch(e){console.error('automatic backup failed',e);}
 }
 
+setTimeout(maybeAutomaticBackup,60_000).unref();
+setInterval(maybeAutomaticBackup,24*3600_000).unref();
+setTimeout(evaluateOperationalAlerts,90_000).unref();
+setInterval(evaluateOperationalAlerts,5*60_000).unref();
+
 const rate = new Map();
 function rateLimit(req){ const ip=req.socket.remoteAddress||'x', t=Date.now(), w=60_000; const x=rate.get(ip)||{start:t,count:0}; if(t-x.start>w){x.start=t;x.count=0;} x.count++; rate.set(ip,x); return x.count<=300; }
 
 const server = http.createServer(async (req,res)=>{
   req.requestId=randomUUID();
+  const requestStarted=Date.now();opsMetrics.requests++;
+  res.on('finish',()=>{
+    const status=Number(res.statusCode||0);opsMetrics.total_latency_ms+=Date.now()-requestStarted;
+    opsMetrics.statuses[status]=(opsMetrics.statuses[status]||0)+1;
+    if(status>=400&&status<500)opsMetrics.responses4xx++;
+    if(status>=500)opsMetrics.responses5xx++;
+  });
   if(req.method==='OPTIONS') return json(res,204,{});
   res.setHeader('x-request-id',req.requestId); res.setHeader('x-content-type-options','nosniff'); res.setHeader('x-frame-options','DENY'); res.setHeader('referrer-policy','same-origin');
   if(!rateLimit(req)) return json(res,429,{error:'rate_limited'});
   const url=new URL(req.url,`http://${req.headers.host||'localhost'}`); const p=url.pathname;
   try {
     if(!p.startsWith('/api/')) return serveFrontend(req,res,p);
-    if(p==='/api/health') return json(res,200,{ok:true,service:'tradeflow-api',time:now()});
+    if(p==='/api/health') return json(res,200,{ok:true,service:'tradeflow-api',time:now(),uptime_seconds:Math.floor((Date.now()-APP_STARTED_AT)/1000)});
+    if(p==='/api/ready'){const ready=readinessSnapshot();return json(res,ready.ok?200:503,ready);}
     if(p==='/api/auth/login' && req.method==='POST'){
       const b=await body(req),username=String(b.username||'').trim(),u=db.prepare('SELECT * FROM users WHERE username=? AND enabled=1').get(username);
       if(!u)return json(res,401,{error:'invalid_credentials',message:'用户名或密码错误'});
@@ -1184,6 +1288,55 @@ const server = http.createServer(async (req,res)=>{
         const full=safeBackupFile(decodeURIComponent(del[1]));if(!full||!fs.existsSync(full))return json(res,404,{error:'backup_not_found'});
         const name=path.basename(full);fs.unlinkSync(full);audit(user,'delete','database_backup',name,req);return json(res,200,{ok:true});
       }
+    }
+
+    // ---- Operational monitoring and alerts ----
+    if(p==='/api/ops/status' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      return json(res,200,operationalSnapshot());
+    }
+    if(p==='/api/ops/check-database' && req.method==='POST'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      const result=databaseProbe(true);audit(user,'check','database',null,req,result);return json(res,result.ok?200:503,result);
+    }
+    if(p==='/api/ops/alerts' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const includeResolved=url.searchParams.get('include_resolved')==='1';
+      const rows=db.prepare(`SELECT a.*,u.display_name acknowledged_by_name FROM system_alerts a LEFT JOIN users u ON u.id=a.acknowledged_by ${includeResolved?'':"WHERE a.resolved_at IS NULL"} ORDER BY CASE a.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,a.last_seen_at DESC LIMIT 300`).all()
+        .map(x=>({...x,detail:parseJSON(x.detail,{})}));
+      return json(res,200,rows);
+    }
+    {
+      const ack=p.match(/^\/api\/ops\/alerts\/([0-9a-f-]+)\/acknowledge$/);
+      if(ack&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const a=db.prepare('SELECT * FROM system_alerts WHERE id=?').get(ack[1]);if(!a)return json(res,404,{error:'not_found'});
+        db.prepare("UPDATE system_alerts SET status='acknowledged',acknowledged_by=?,acknowledged_at=? WHERE id=? AND resolved_at IS NULL").run(user.user_id,now(),a.id);
+        audit(user,'acknowledge','system_alert',a.id,req,{alert_key:a.alert_key});return json(res,200,{ok:true});
+      }
+      const resolve=p.match(/^\/api\/ops\/alerts\/([0-9a-f-]+)\/resolve$/);
+      if(resolve&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const a=db.prepare('SELECT * FROM system_alerts WHERE id=?').get(resolve[1]);if(!a)return json(res,404,{error:'not_found'});
+        db.prepare("UPDATE system_alerts SET status='resolved',resolved_at=?,last_seen_at=? WHERE id=?").run(now(),now(),a.id);
+        audit(user,'resolve','system_alert',a.id,req,{alert_key:a.alert_key,manual:true});return json(res,200,{ok:true});
+      }
+    }
+    if(p==='/api/ops/policy' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      return json(res,200,getOpsPolicy());
+    }
+    if(p==='/api/ops/policy' && req.method==='PUT'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      const b=await body(req),policy={
+        readiness_min_free_mb:Math.max(32,Number(b.readiness_min_free_mb??128)),
+        disk_warn_free_mb:Math.max(64,Number(b.disk_warn_free_mb??1024)),
+        backup_max_age_hours:Math.max(1,Number(b.backup_max_age_hours??36)),
+        integration_failures_warn:Math.max(1,Number(b.integration_failures_warn??5)),
+        http_5xx_rate_warn_percent:Math.min(100,Math.max(.1,Number(b.http_5xx_rate_warn_percent??5)))
+      };
+      db.prepare("INSERT INTO settings(key,value,updated_at) VALUES('ops_policy',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(policy),now());
+      evaluateOperationalAlerts();audit(user,'update','ops_policy','ops_policy',req,policy);return json(res,200,policy);
     }
 
     // ---- Departments and data scopes ----
