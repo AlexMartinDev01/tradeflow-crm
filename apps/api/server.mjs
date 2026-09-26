@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS exchange_rates(id TEXT PRIMARY KEY, base_currency TEX
 CREATE TABLE IF NOT EXISTS automation_rules(key TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_logs(id TEXT PRIMARY KEY, rule_key TEXT NOT NULL, message TEXT NOT NULL, entity_type TEXT, entity_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS saved_views(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, entity_type TEXT NOT NULL, name TEXT NOT NULL, filters TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS report_definitions(id TEXT PRIMARY KEY, name TEXT NOT NULL, entity_type TEXT NOT NULL, dimension TEXT NOT NULL, metric TEXT NOT NULL, chart_type TEXT NOT NULL DEFAULT 'bar', filters TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_by TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS bulk_operation_previews(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, entity_type TEXT NOT NULL, entity_ids TEXT NOT NULL DEFAULT '[]', operations TEXT NOT NULL DEFAULT '{}', expires_at TEXT NOT NULL, applied_at TEXT, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
 CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_id);
@@ -897,6 +898,126 @@ function customerDataQuality(user){
     result.push({id:r.id,name:r.name,english_name:r.english_name,country:r.country,status:r.status,grade:r.grade,source:r.source,industry:r.industry,owner_id:r.owner_id,owner_name:r.owner_name,active_contact_count:Number(r.active_contact_count||0),active_channel_count:Number(r.active_channel_count||0),last_activity_at:r.last_activity_at,days_since_activity:days,quality_score:Math.max(0,score),issues,duplicate_reasons:duplicateReasons});
   }
   return result;
+}
+
+
+function reportCatalog(){
+  return {
+    customers:{
+      label:'客户',from:'customers c LEFT JOIN users u ON u.id=c.owner_id',date:'c.created_at',
+      dimensions:{
+        country:{label:'国家',sql:"COALESCE(c.country,'Unknown')"},
+        industry:{label:'行业',sql:"COALESCE(c.industry,'Unknown')"},
+        status:{label:'客户状态',sql:"COALESCE(c.status,'Unknown')"},
+        grade:{label:'客户等级',sql:"COALESCE(c.grade,'Unknown')"},
+        source:{label:'客户来源',sql:"COALESCE(c.source,'Unknown')"},
+        owner:{label:'负责人',sql:"COALESCE(u.display_name,'Unassigned')"},
+        month:{label:'创建月份',sql:"substr(c.created_at,1,7)"}
+      },
+      metrics:{
+        count:{label:'客户数',sql:'COUNT(DISTINCT c.id)'},
+        annual_sales:{label:'年销售额合计',sql:'COALESCE(SUM(c.annual_sales),0)'},
+        avg_annual_sales:{label:'平均年销售额',sql:'COALESCE(AVG(c.annual_sales),0)'}
+      },
+      filters:{country:'c.country',status:'c.status',grade:'c.grade',source:'c.source',industry:'c.industry',owner_id:'c.owner_id'}
+    },
+    orders:{
+      label:'订单',from:'orders e JOIN customers c ON c.id=e.customer_id LEFT JOIN users u ON u.id=c.owner_id',date:'e.created_at',
+      dimensions:{
+        status:{label:'订单状态',sql:"COALESCE(e.status,'Unknown')"},currency:{label:'币种',sql:"COALESCE(e.currency,'Unknown')"},
+        incoterm:{label:'Incoterm',sql:"COALESCE(e.incoterm,'Unknown')"},country:{label:'客户国家',sql:"COALESCE(c.country,'Unknown')"},
+        owner:{label:'负责人',sql:"COALESCE(u.display_name,'Unassigned')"},month:{label:'订单月份',sql:"substr(e.created_at,1,7)"}
+      },
+      metrics:{
+        count:{label:'订单数',sql:'COUNT(DISTINCT e.id)'},total:{label:'订单金额合计',sql:'COALESCE(SUM(e.total),0)'},avg_total:{label:'平均订单额',sql:'COALESCE(AVG(e.total),0)'}
+      },
+      filters:{country:'c.country',status:'e.status',currency:'e.currency',owner_id:'c.owner_id',incoterm:'e.incoterm'}
+    },
+    opportunities:{
+      label:'商机',from:'opportunities e JOIN customers c ON c.id=e.customer_id LEFT JOIN users u ON u.id=c.owner_id',date:'e.created_at',
+      dimensions:{
+        stage:{label:'销售阶段',sql:"COALESCE(e.stage,'Unknown')"},currency:{label:'币种',sql:"COALESCE(e.currency,'Unknown')"},
+        country:{label:'客户国家',sql:"COALESCE(c.country,'Unknown')"},owner:{label:'负责人',sql:"COALESCE(u.display_name,'Unassigned')"},
+        month:{label:'创建月份',sql:"substr(e.created_at,1,7)"},close_month:{label:'预计成交月份',sql:"substr(COALESCE(e.expected_close_date,e.created_at),1,7)"}
+      },
+      metrics:{
+        count:{label:'商机数',sql:'COUNT(DISTINCT e.id)'},expected:{label:'预计金额合计',sql:'COALESCE(SUM(e.expected_amount),0)'},
+        weighted:{label:'加权预测金额',sql:'COALESCE(SUM(COALESCE(e.expected_amount,0)*COALESCE(e.probability,0)/100.0),0)'}
+      },
+      filters:{country:'c.country',status:'e.stage',currency:'e.currency',owner_id:'c.owner_id'}
+    },
+    quotations:{
+      label:'报价',from:'quotations e JOIN customers c ON c.id=e.customer_id LEFT JOIN users u ON u.id=c.owner_id',date:'e.created_at',
+      dimensions:{
+        status:{label:'报价状态',sql:"COALESCE(e.status,'Unknown')"},currency:{label:'币种',sql:"COALESCE(e.currency,'Unknown')"},
+        incoterm:{label:'Incoterm',sql:"COALESCE(e.incoterm,'Unknown')"},country:{label:'客户国家',sql:"COALESCE(c.country,'Unknown')"},
+        owner:{label:'负责人',sql:"COALESCE(u.display_name,'Unassigned')"},month:{label:'报价月份',sql:"substr(e.created_at,1,7)"}
+      },
+      metrics:{
+        count:{label:'报价数',sql:'COUNT(DISTINCT e.id)'},total:{label:'报价金额合计',sql:'COALESCE(SUM(e.total),0)'},avg_margin:{label:'平均毛利率',sql:'COALESCE(AVG(e.margin_rate),0)'}
+      },
+      filters:{country:'c.country',status:'e.status',currency:'e.currency',owner_id:'c.owner_id',incoterm:'e.incoterm'}
+    },
+    payments:{
+      label:'回款/应收',from:'payments e JOIN customers c ON c.id=e.customer_id LEFT JOIN users u ON u.id=c.owner_id',date:'COALESCE(e.paid_at,e.due_at,e.created_at)',
+      dimensions:{
+        status:{label:'回款状态',sql:"COALESCE(e.status,'Unknown')"},type:{label:'款项类型',sql:"COALESCE(e.type,'Unknown')"},currency:{label:'币种',sql:"COALESCE(e.currency,'Unknown')"},
+        country:{label:'客户国家',sql:"COALESCE(c.country,'Unknown')"},owner:{label:'负责人',sql:"COALESCE(u.display_name,'Unassigned')"},
+        due_month:{label:'应付月份',sql:"substr(COALESCE(e.due_at,e.created_at),1,7)"}
+      },
+      metrics:{count:{label:'记录数',sql:'COUNT(DISTINCT e.id)'},amount:{label:'金额合计',sql:'COALESCE(SUM(e.amount),0)'}},
+      filters:{country:'c.country',status:'e.status',currency:'e.currency',owner_id:'c.owner_id',type:'e.type'}
+    },
+    aftersales:{
+      label:'售后/投诉',from:'aftersales e JOIN customers c ON c.id=e.customer_id LEFT JOIN users u ON u.id=c.owner_id',date:'e.opened_at',
+      dimensions:{
+        status:{label:'工单状态',sql:"COALESCE(e.status,'Unknown')"},category:{label:'问题分类',sql:"COALESCE(e.category,'Unknown')"},severity:{label:'严重度',sql:"COALESCE(e.severity,'Unknown')"},
+        team:{label:'责任部门',sql:"COALESCE(e.responsible_team,'Unknown')"},country:{label:'客户国家',sql:"COALESCE(c.country,'Unknown')"},owner:{label:'负责人',sql:"COALESCE(u.display_name,'Unassigned')"},
+        month:{label:'开启月份',sql:"substr(e.opened_at,1,7)"}
+      },
+      metrics:{count:{label:'工单数',sql:'COUNT(DISTINCT e.id)'},avg_satisfaction:{label:'平均满意度',sql:'COALESCE(AVG(e.satisfaction),0)'}},
+      filters:{country:'c.country',status:'e.status',owner_id:'c.owner_id',category:'e.category',severity:'e.severity'}
+    },
+    shipments:{
+      label:'出运',from:'shipments e JOIN orders o ON o.id=e.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN users u ON u.id=c.owner_id',date:'COALESCE(e.etd,e.created_at)',
+      dimensions:{
+        status:{label:'出运状态',sql:"COALESCE(e.status,'Unknown')"},carrier:{label:'船公司/承运人',sql:"COALESCE(e.carrier,'Unknown')"},
+        destination:{label:'目的港',sql:"COALESCE(e.destination_port,'Unknown')"},country:{label:'客户国家',sql:"COALESCE(c.country,'Unknown')"},
+        owner:{label:'负责人',sql:"COALESCE(u.display_name,'Unassigned')"},month:{label:'ETD月份',sql:"substr(COALESCE(e.etd,e.created_at),1,7)"}
+      },
+      metrics:{count:{label:'出运批次数',sql:'COUNT(DISTINCT e.id)'}},
+      filters:{country:'c.country',status:'e.status',owner_id:'c.owner_id',carrier:'e.carrier',destination:'e.destination_port'}
+    }
+  };
+}
+function reportPublicCatalog(){
+  const c=reportCatalog(),out={};
+  for(const [key,v] of Object.entries(c))out[key]={label:v.label,dimensions:Object.fromEntries(Object.entries(v.dimensions).map(([k,x])=>[k,x.label])),metrics:Object.fromEntries(Object.entries(v.metrics).map(([k,x])=>[k,x.label])),filters:Object.keys(v.filters)};
+  return out;
+}
+function normalizeReportSpec(input={}){
+  const catalog=reportCatalog(),entity=String(input.entity_type||''),cfg=catalog[entity];if(!cfg)throw new Error('invalid_report_entity');
+  const dimension=String(input.dimension||''),metric=String(input.metric||'');if(!cfg.dimensions[dimension])throw new Error('invalid_report_dimension');if(!cfg.metrics[metric])throw new Error('invalid_report_metric');
+  const chartType=['bar','line','pie','table'].includes(String(input.chart_type||''))?String(input.chart_type):'bar',filters={};
+  const raw=input.filters&&typeof input.filters==='object'?input.filters:{};
+  for(const key of Object.keys(cfg.filters))if(raw[key]!==undefined&&raw[key]!==null&&String(raw[key]).trim()!=='')filters[key]=String(raw[key]).trim();
+  if(raw.date_from)filters.date_from=String(raw.date_from).slice(0,10);if(raw.date_to)filters.date_to=String(raw.date_to).slice(0,10);
+  return {entity_type:entity,dimension,metric,chart_type:chartType,filters};
+}
+function runCustomReport(user,input={}){
+  const spec=normalizeReportSpec(input),cfg=reportCatalog()[spec.entity_type],dimension=cfg.dimensions[spec.dimension],metric=cfg.metrics[spec.metric];
+  const where=['c.deleted_at IS NULL'],args=[],access=customerScopeClause(user,'c');
+  if(access.sql){where.push(access.sql.replace(/^\s*AND\s*/,'').trim());args.push(...access.args);}
+  for(const [key,column] of Object.entries(cfg.filters)){
+    const value=spec.filters[key];if(value!==undefined){where.push(`${column}=?`);args.push(value);}
+  }
+  if(spec.filters.date_from){where.push(`${cfg.date}>=?`);args.push(spec.filters.date_from);}
+  if(spec.filters.date_to){where.push(`${cfg.date}<?`);const end=new Date(spec.filters.date_to+'T00:00:00Z');end.setUTCDate(end.getUTCDate()+1);args.push(end.toISOString().slice(0,10));}
+  const order=spec.dimension.includes('month')?'dimension_value ASC':'metric_value DESC,dimension_value ASC';
+  const rows=db.prepare(`SELECT ${dimension.sql} dimension_value,${metric.sql} metric_value FROM ${cfg.from} WHERE ${where.join(' AND ')} GROUP BY ${dimension.sql} ORDER BY ${order} LIMIT 200`).all(...args)
+    .map(x=>({dimension_value:x.dimension_value==null?'Unknown':String(x.dimension_value),metric_value:Number(x.metric_value||0)}));
+  const total=rows.reduce((a,x)=>a+x.metric_value,0);
+  return {spec,entity_label:cfg.label,dimension_label:dimension.label,metric_label:metric.label,rows,total};
 }
 
 function getPublicPoolRule(){
@@ -2038,6 +2159,50 @@ const server = http.createServer(async (req,res)=>{
       if(tok&&req.method==='DELETE'){
         if(user.role!=='admin')return json(res,403,{error:'forbidden'});
         db.prepare('DELETE FROM api_tokens WHERE id=?').run(tok[1]);audit(user,'revoke','api_token',tok[1],req);return json(res,200,{ok:true});
+      }
+    }
+
+    // ---- Safe custom report / BI designer ----
+    if(p==='/api/reports/catalog' && req.method==='GET')return json(res,200,reportPublicCatalog());
+    if(p==='/api/reports/run' && req.method==='POST'){
+      const b=await body(req);const result=runCustomReport(user,b);return json(res,200,result);
+    }
+    if(p==='/api/reports/export' && req.method==='POST'){
+      const b=await body(req),result=runCustomReport(user,b),quote=v=>`"${String(v??'').replaceAll('"','""')}"`,lines=[[result.dimension_label,result.metric_label],...result.rows.map(x=>[x.dimension_value,x.metric_value])];
+      const csv='\uFEFF'+lines.map(row=>row.map(quote).join(',')).join('\r\n'),name=`report_${result.spec.entity_type}_${result.spec.dimension}_${new Date().toISOString().slice(0,10)}.csv`;
+      audit(user,'export','custom_report',null,req,{entity_type:result.spec.entity_type,dimension:result.spec.dimension,metric:result.spec.metric,row_count:result.rows.length});
+      res.writeHead(200,{'content-type':'text/csv; charset=utf-8','content-disposition':`attachment; filename="${name}"`,'cache-control':'no-store'});return res.end(csv);
+    }
+    if(p==='/api/reports' && req.method==='GET'){
+      if(!user.user_id)return json(res,403,{error:'human_account_required'});
+      const rows=db.prepare(`SELECT r.*,u.display_name created_by_name FROM report_definitions r JOIN users u ON u.id=r.created_by
+        WHERE r.created_by=? OR r.is_shared=1 ORDER BY r.updated_at DESC`).all(user.user_id).map(x=>({...x,filters:parseJSON(x.filters,{})}));
+      return json(res,200,rows);
+    }
+    if(p==='/api/reports' && req.method==='POST'){
+      if(!user.user_id)return json(res,403,{error:'human_account_required'});
+      const b=await body(req),name=String(b.name||'').trim();if(!name)return json(res,400,{error:'name_required'});
+      const spec=normalizeReportSpec(b),isShared=b.is_shared&&['admin','manager'].includes(user.role)?1:0,id=randomUUID();
+      db.prepare('INSERT INTO report_definitions(id,name,entity_type,dimension,metric,chart_type,filters,is_shared,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)')
+        .run(id,name,spec.entity_type,spec.dimension,spec.metric,spec.chart_type,JSON.stringify(spec.filters),isShared,user.user_id,now(),now());
+      audit(user,'create','report_definition',id,req,{name,...spec,is_shared:isShared});return json(res,201,{id});
+    }
+    {
+      const rm=p.match(/^\/api\/reports\/([0-9a-f-]+)$/);
+      if(rm&&req.method==='PATCH'){
+        if(!user.user_id)return json(res,403,{error:'human_account_required'});
+        const old=db.prepare('SELECT * FROM report_definitions WHERE id=?').get(rm[1]);if(!old)return json(res,404,{error:'not_found'});
+        if(old.created_by!==user.user_id&&user.role!=='admin')return json(res,403,{error:'forbidden'});
+        const b=await body(req),spec=normalizeReportSpec({...old,filters:parseJSON(old.filters,{}),...b}),name=String(b.name??old.name).trim()||old.name,isShared=b.is_shared===undefined?old.is_shared:(b.is_shared&&['admin','manager'].includes(user.role)?1:0);
+        db.prepare('UPDATE report_definitions SET name=?,entity_type=?,dimension=?,metric=?,chart_type=?,filters=?,is_shared=?,updated_at=? WHERE id=?')
+          .run(name,spec.entity_type,spec.dimension,spec.metric,spec.chart_type,JSON.stringify(spec.filters),isShared,now(),old.id);
+        audit(user,'update','report_definition',old.id,req,{name,...spec,is_shared:isShared});return json(res,200,{ok:true});
+      }
+      if(rm&&req.method==='DELETE'){
+        if(!user.user_id)return json(res,403,{error:'human_account_required'});
+        const old=db.prepare('SELECT * FROM report_definitions WHERE id=?').get(rm[1]);if(!old)return json(res,404,{error:'not_found'});
+        if(old.created_by!==user.user_id&&user.role!=='admin')return json(res,403,{error:'forbidden'});
+        db.prepare('DELETE FROM report_definitions WHERE id=?').run(old.id);audit(user,'delete','report_definition',old.id,req);return json(res,200,{ok:true});
       }
     }
 
