@@ -59,3 +59,8 @@ npm run dev
 仓库已提供 GitHub Pages 自动部署工作流。Pages 演示模式把数据保存在浏览器 localStorage，用于直接体验 UI 和业务流程；正式生产环境仍使用 Node.js API + 数据库。
 
 首次启用：Repository Settings → Pages → Build and deployment → Source 选择 **GitHub Actions**。之后每次 main 更新会自动部署。
+
+
+## 生产部署
+
+生产环境推荐使用 Docker + Coolify 自托管。项目根目录已提供 `Dockerfile`、`docker-compose.prod.yml` 和 GitHub Actions 容器构建流程。详细步骤见 `docs/DEPLOY_COOLIFY.md`。

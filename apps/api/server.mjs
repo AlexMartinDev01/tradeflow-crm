@@ -6,12 +6,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const PORT = Number(process.env.PORT || 8787);
-const HOST = process.env.HOST || '127.0.0.1';
+const HOST = process.env.HOST || '0.0.0.0';
 const DB_FILE = process.env.DB_FILE || path.resolve('./tradeflow.db');
 const APP_SECRET = process.env.APP_SECRET || 'dev-only-change-me';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
+const WEB_DIST = process.env.WEB_DIST || path.resolve('./apps/web/dist');
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.resolve('./uploads');
 
-fs.mkdirSync(path.resolve('./uploads'), { recursive: true });
+fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 const db = new DatabaseSync(DB_FILE);
 db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
 
@@ -105,6 +108,38 @@ const resourceMap = {
   users:{table:'users', required:['username','display_name','role']}
 };
 
+const MIME_TYPES = {
+  '.html':'text/html; charset=utf-8','.js':'text/javascript; charset=utf-8','.css':'text/css; charset=utf-8',
+  '.json':'application/json; charset=utf-8','.svg':'image/svg+xml','.png':'image/png','.jpg':'image/jpeg',
+  '.jpeg':'image/jpeg','.webp':'image/webp','.ico':'image/x-icon','.woff':'font/woff','.woff2':'font/woff2'
+};
+function serveFrontend(req,res,pathname){
+  if(!['GET','HEAD'].includes(req.method)){
+    res.writeHead(405,{'content-type':'text/plain; charset=utf-8','allow':'GET, HEAD'}); return res.end('Method Not Allowed');
+  }
+  if(!fs.existsSync(WEB_DIST)){
+    res.writeHead(503,{'content-type':'text/plain; charset=utf-8'}); return res.end('Frontend build is not available');
+  }
+  let relative;
+  try { relative=decodeURIComponent(pathname==='/'?'index.html':pathname.replace(/^\/+/,'')); }
+  catch { relative='index.html'; }
+  const root=path.resolve(WEB_DIST);
+  let file=path.resolve(root,relative);
+  if(file!==root && !file.startsWith(root+path.sep)){
+    res.writeHead(400,{'content-type':'text/plain; charset=utf-8'}); return res.end('Bad Request');
+  }
+  if(!fs.existsSync(file) || fs.statSync(file).isDirectory()) file=path.join(root,'index.html');
+  const ext=path.extname(file).toLowerCase();
+  const isIndex=path.basename(file)==='index.html';
+  res.writeHead(200,{
+    'content-type':MIME_TYPES[ext]||'application/octet-stream',
+    'cache-control':isIndex?'no-cache':'public, max-age=31536000, immutable',
+    'x-content-type-options':'nosniff'
+  });
+  if(req.method==='HEAD') return res.end();
+  fs.createReadStream(file).pipe(res);
+}
+
 function json(res, status, data, extraHeaders={}) {
   res.writeHead(status, {'content-type':'application/json; charset=utf-8','access-control-allow-origin':CORS_ORIGIN,'access-control-allow-headers':'content-type, authorization','access-control-allow-methods':'GET,POST,PATCH,DELETE,OPTIONS',...extraHeaders});
   res.end(JSON.stringify(data));
@@ -134,6 +169,7 @@ const server = http.createServer(async (req,res)=>{
   if(!rateLimit(req)) return json(res,429,{error:'rate_limited'});
   const url=new URL(req.url,`http://${req.headers.host||'localhost'}`); const p=url.pathname;
   try {
+    if(!p.startsWith('/api/')) return serveFrontend(req,res,p);
     if(p==='/api/health') return json(res,200,{ok:true,service:'tradeflow-api',time:now()});
     if(p==='/api/auth/login' && req.method==='POST'){
       const b=await body(req); const u=db.prepare('SELECT * FROM users WHERE username=? AND enabled=1').get(b.username||'');

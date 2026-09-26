@@ -1,0 +1,29 @@
+services:
+  tradeflow:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: 8080
+      DB_FILE: /data/tradeflow.db
+      WEB_DIST: /app/apps/web/dist
+      UPLOAD_DIR: /app/uploads
+      APP_SECRET: ${APP_SECRET}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    expose:
+      - "8080"
+    volumes:
+      - tradeflow-data:/data
+      - tradeflow-uploads:/app/uploads
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 5
+
+volumes:
+  tradeflow-data:
+  tradeflow-uploads:
