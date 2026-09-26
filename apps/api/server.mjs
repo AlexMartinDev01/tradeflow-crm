@@ -90,6 +90,8 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("ALTER TABLE customers ADD COLUMN deleted_reason TEXT");}catch{}
+try{db.exec("ALTER TABLE customers ADD COLUMN deleted_by TEXT");}catch{}
 try{db.exec("ALTER TABLE users ADD COLUMN totp_last_counter INTEGER NOT NULL DEFAULT -1");}catch{}
 try{db.exec("ALTER TABLE users ADD COLUMN totp_secret_enc TEXT");}catch{}
 try{db.exec("ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0");}catch{}
@@ -764,11 +766,75 @@ function mergeCustomers(sourceId,targetId,operatorId){
       .run(JSON.stringify(mergedTypes),JSON.stringify(mergedRegions),JSON.stringify({...sourceCustom,...targetCustom}),
         [target.notes,source.notes?`[Merged from ${source.name}] ${source.notes}`:null].filter(Boolean).join('\n'),now(),targetId);
 
-    db.prepare(`UPDATE customers SET deleted_at=?,merged_into_id=?,owner_id=NULL,pool_status='merged',updated_at=? WHERE id=?`).run(now(),targetId,now(),sourceId);
+    db.prepare(`UPDATE customers SET deleted_at=?,deleted_reason='merged',merged_into_id=?,owner_id=NULL,pool_status='merged',updated_at=? WHERE id=?`).run(now(),targetId,now(),sourceId);
     db.exec('COMMIT');
     return {source_id:sourceId,target_id:targetId};
   }catch(e){db.exec('ROLLBACK');throw e;}
 }
+
+function customerDeletionImpact(customerId){
+  const one=(sql,...args)=>Number(db.prepare(sql).get(...args)?.c||0);
+  const orderIds=db.prepare('SELECT id FROM orders WHERE customer_id=?').all(customerId).map(x=>x.id);
+  const quotationIds=db.prepare('SELECT id FROM quotations WHERE customer_id=?').all(customerId).map(x=>x.id);
+  const contractIds=db.prepare('SELECT id FROM contracts WHERE customer_id=?').all(customerId).map(x=>x.id);
+  const shipmentCount=orderIds.length?one(`SELECT COUNT(*) c FROM shipments WHERE order_id IN (${orderIds.map(()=>'?').join(',')})`,...orderIds):0;
+  const customsCount=orderIds.length?one(`SELECT COUNT(*) c FROM customs_declarations WHERE order_id IN (${orderIds.map(()=>'?').join(',')})`,...orderIds):0;
+  return {
+    contacts:one('SELECT COUNT(*) c FROM contacts WHERE customer_id=?',customerId),
+    activities:one('SELECT COUNT(*) c FROM activities WHERE customer_id=?',customerId),
+    tasks:one('SELECT COUNT(*) c FROM tasks WHERE customer_id=?',customerId),
+    inquiries:one('SELECT COUNT(*) c FROM inquiries WHERE customer_id=?',customerId),
+    opportunities:one('SELECT COUNT(*) c FROM opportunities WHERE customer_id=?',customerId),
+    quotations:quotationIds.length,
+    samples:one('SELECT COUNT(*) c FROM samples WHERE customer_id=?',customerId),
+    contracts:contractIds.length,
+    orders:orderIds.length,
+    payments:one('SELECT COUNT(*) c FROM payments WHERE customer_id=?',customerId),
+    shipments:shipmentCount,
+    customs_declarations:customsCount,
+    aftersales:one('SELECT COUNT(*) c FROM aftersales WHERE customer_id=?',customerId),
+    marketing_recipients:one('SELECT COUNT(*) c FROM campaign_recipients WHERE customer_id=?',customerId),
+    documents:one("SELECT COUNT(*) c FROM documents WHERE (entity_type='customer' AND entity_id=?) OR (entity_type='order' AND entity_id IN (SELECT id FROM orders WHERE customer_id=?)) OR (entity_type='contract' AND entity_id IN (SELECT id FROM contracts WHERE customer_id=?)) OR (entity_type='aftersales' AND entity_id IN (SELECT id FROM aftersales WHERE customer_id=?)) OR (entity_type='customs' AND entity_id IN (SELECT cd.id FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id WHERE o.customer_id=?))",customerId,customerId,customerId,customerId,customerId)
+  };
+}
+function purgeCustomer(customerId){
+  const customer=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NOT NULL').get(customerId);if(!customer)throw new Error('recycle_customer_not_found');
+  const orderIds=db.prepare('SELECT id FROM orders WHERE customer_id=?').all(customerId).map(x=>x.id);
+  const shipmentIds=orderIds.length?db.prepare(`SELECT id FROM shipments WHERE order_id IN (${orderIds.map(()=>'?').join(',')})`).all(...orderIds).map(x=>x.id):[];
+  const quotationIds=db.prepare('SELECT id FROM quotations WHERE customer_id=?').all(customerId).map(x=>x.id);
+  const contractIds=db.prepare('SELECT id FROM contracts WHERE customer_id=?').all(customerId).map(x=>x.id);
+  const aftersalesIds=db.prepare('SELECT id FROM aftersales WHERE customer_id=?').all(customerId).map(x=>x.id);
+  const customsIds=orderIds.length?db.prepare(`SELECT id FROM customs_declarations WHERE order_id IN (${orderIds.map(()=>'?').join(',')})`).all(...orderIds).map(x=>x.id):[];
+  const entityPairs=[['customer',[customerId]],['order',orderIds],['contract',contractIds],['aftersales',aftersalesIds],['customs',customsIds],['shipment',shipmentIds]];
+  const docs=[];
+  for(const [type,ids] of entityPairs){if(ids.length)docs.push(...db.prepare(`SELECT * FROM documents WHERE entity_type=? AND entity_id IN (${ids.map(()=>'?').join(',')})`).all(type,...ids));}
+  db.exec('BEGIN IMMEDIATE');
+  try{
+    db.prepare('UPDATE customers SET parent_customer_id=NULL WHERE parent_customer_id=?').run(customerId);
+    db.prepare('UPDATE customers SET merged_into_id=NULL WHERE merged_into_id=?').run(customerId);
+    db.prepare('DELETE FROM campaign_recipients WHERE customer_id=?').run(customerId);
+    db.prepare('DELETE FROM marketing_consents WHERE customer_id=?').run(customerId);
+    db.prepare('DELETE FROM tasks WHERE customer_id=?').run(customerId);
+    db.prepare('DELETE FROM payments WHERE customer_id=?').run(customerId);
+    db.prepare('DELETE FROM credit_profiles WHERE customer_id=?').run(customerId);
+    db.prepare('DELETE FROM aftersales WHERE customer_id=?').run(customerId);
+    db.prepare('DELETE FROM samples WHERE customer_id=?').run(customerId);
+    if(shipmentIds.length)db.prepare(`DELETE FROM shipments WHERE id IN (${shipmentIds.map(()=>'?').join(',')})`).run(...shipmentIds);
+    if(orderIds.length)db.prepare(`DELETE FROM orders WHERE id IN (${orderIds.map(()=>'?').join(',')})`).run(...orderIds);
+    if(contractIds.length)db.prepare(`DELETE FROM contracts WHERE id IN (${contractIds.map(()=>'?').join(',')})`).run(...contractIds);
+    if(quotationIds.length)db.prepare(`DELETE FROM quotations WHERE id IN (${quotationIds.map(()=>'?').join(',')})`).run(...quotationIds);
+    db.prepare('DELETE FROM opportunities WHERE customer_id=?').run(customerId);
+    db.prepare('DELETE FROM inquiries WHERE customer_id=?').run(customerId);
+    db.prepare('DELETE FROM price_lists WHERE customer_id=?').run(customerId);
+    db.prepare('DELETE FROM documents WHERE entity_type=? AND entity_id=?').run('customer',customerId);
+    for(const [type,ids] of entityPairs.slice(1)){if(ids.length)db.prepare(`DELETE FROM documents WHERE entity_type=? AND entity_id IN (${ids.map(()=>'?').join(',')})`).run(type,...ids);}
+    db.prepare('DELETE FROM customers WHERE id=?').run(customerId);
+    db.exec('COMMIT');
+  }catch(e){db.exec('ROLLBACK');throw e;}
+  for(const d of docs)try{removeStoredDocumentFile(d);}catch{}
+  return {customer,impact:customerDeletionImpactAfterPurgePlaceholder(customerId)};
+}
+function customerDeletionImpactAfterPurgePlaceholder(){return {purged:true};}
 
 function resourceCustomerId(key,payloadOrId,isId=false){
   try{
@@ -2098,6 +2164,47 @@ const server = http.createServer(async (req,res)=>{
       }
     }
 
+    // ---- Customer recycle bin ----
+    if(p==='/api/recycle-bin/customers' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const access=customerScopeClause(user,'c'),q=String(url.searchParams.get('q')||'').trim(),filters=['c.deleted_at IS NOT NULL'],args=[...access.args];
+      if(access.sql)filters.push(access.sql.replace(/^\s*AND\s*/,'').trim());
+      if(q){filters.push('(c.name LIKE ? OR c.english_name LIKE ? OR c.country LIKE ?)');const like=`%${q}%`;args.push(like,like,like);}
+      const rows=db.prepare(`SELECT c.*,u.display_name owner_name,m.name merged_into_name FROM customers c LEFT JOIN users u ON u.id=c.owner_id LEFT JOIN customers m ON m.id=c.merged_into_id WHERE ${filters.join(' AND ')} ORDER BY c.deleted_at DESC LIMIT 500`).all(...args).map(r=>decodeRow(r,resourceMap.customers));
+      return json(res,200,rows);
+    }
+    {
+      const impact=p.match(/^\/api\/recycle-bin\/customers\/([0-9a-f-]+)\/impact$/);
+      if(impact&&req.method==='GET'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NOT NULL').get(impact[1]);if(!c)return json(res,404,{error:'not_found'});
+        if(userDataScope(user)!=='all'){
+          const owner=c.owner_id?db.prepare('SELECT department_id FROM users WHERE id=?').get(c.owner_id):null;
+          if(c.owner_id!==user.user_id&&!(userDataScope(user)==='department'&&user.department_id&&owner?.department_id===user.department_id))return json(res,403,{error:'forbidden'});
+        }
+        return json(res,200,{customer:decodeRow(c,resourceMap.customers),impact:customerDeletionImpact(c.id),restorable:!c.merged_into_id&&c.deleted_reason!=='merged'});
+      }
+      const restore=p.match(/^\/api\/recycle-bin\/customers\/([0-9a-f-]+)\/restore$/);
+      if(restore&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NOT NULL').get(restore[1]);if(!c)return json(res,404,{error:'not_found'});
+        if(c.merged_into_id||c.deleted_reason==='merged')return json(res,409,{error:'merged_customer_not_restorable',merged_into_id:c.merged_into_id});
+        if(userDataScope(user)!=='all'){
+          const owner=c.owner_id?db.prepare('SELECT department_id FROM users WHERE id=?').get(c.owner_id):null;
+          if(c.owner_id!==user.user_id&&!(userDataScope(user)==='department'&&user.department_id&&owner?.department_id===user.department_id))return json(res,403,{error:'forbidden'});
+        }
+        db.prepare("UPDATE customers SET deleted_at=NULL,deleted_by=NULL,deleted_reason=NULL,pool_status=CASE WHEN owner_id IS NULL THEN 'public' ELSE 'assigned' END,updated_at=? WHERE id=?").run(now(),c.id);
+        audit(user,'restore','customers',c.id,req,{deleted_at:c.deleted_at});return json(res,200,decodeRow(db.prepare('SELECT * FROM customers WHERE id=?').get(c.id),resourceMap.customers));
+      }
+      const purge=p.match(/^\/api\/recycle-bin\/customers\/([0-9a-f-]+)\/purge$/);
+      if(purge&&req.method==='POST'){
+        if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+        const c=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NOT NULL').get(purge[1]);if(!c)return json(res,404,{error:'not_found'});
+        const b=await body(req);if(String(b.confirm_name||'').trim()!==String(c.name||'').trim())return json(res,400,{error:'confirmation_name_mismatch'});
+        const impact=customerDeletionImpact(c.id);purgeCustomer(c.id);audit(user,'purge','customers',c.id,req,{name:c.name,impact});return json(res,200,{ok:true,purged_customer:{id:c.id,name:c.name},impact});
+      }
+    }
+
     // ---- Customer ownership, tags and duplicate/collision protection ----
     if(p==='/api/users/lookup' && req.method==='GET'){
       return json(res,200,db.prepare(`SELECT u.id,u.username,u.display_name,u.role,u.department_id,u.data_scope,d.name department_name FROM users u LEFT JOIN departments d ON d.id=u.department_id WHERE u.enabled=1 ORDER BY u.display_name`).all().map(x=>({...x,data_scope:x.data_scope||defaultDataScope(x.role)})));
@@ -2527,7 +2634,7 @@ const server = http.createServer(async (req,res)=>{
         }
         if(payload.data_scope&&!['self','department','all'].includes(payload.data_scope))return json(res,400,{error:'invalid_data_scope'});
       } if(tableCols(table).includes('updated_at')) payload.updated_at=now(); const entries=Object.entries(payload); if(!entries.length) return json(res,400,{error:'no_fields'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); db.prepare(`UPDATE ${table} SET ${entries.map(([k])=>`${k}=?`).join(',')} WHERE id=?`).run(...entries.map(([,v])=>v),id); audit(user,'update',key,id,req,payload); return json(res,200,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),cfg)); }
-      if(req.method==='DELETE' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); if(table==='customers') db.prepare('UPDATE customers SET deleted_at=?,updated_at=? WHERE id=?').run(now(),now(),id); else db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); audit(user,'delete',key,id,req); return json(res,200,{ok:true}); }
+      if(req.method==='DELETE' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); if(table==='customers') db.prepare("UPDATE customers SET deleted_at=?,deleted_by=?,deleted_reason='manual_delete',updated_at=? WHERE id=?").run(now(),user.user_id,now(),id); else db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); audit(user,'delete',key,id,req); return json(res,200,{ok:true}); }
     }
 
     return json(res,404,{error:'not_found',path:p});
