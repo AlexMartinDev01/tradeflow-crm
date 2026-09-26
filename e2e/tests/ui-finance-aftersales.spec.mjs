@@ -109,10 +109,13 @@ test.describe('TradeFlow aftersales knowledge UI loop',()=>{
     const solution=drawer.getByLabel('解决方案');
     await expect(solution).toHaveValue(/Firmware parameter mismatch/);
 
-    const statusSelect=drawer.locator('.toolbar .el-select').first();
+    const statusSelect=drawer.getByLabel('工单状态');
     await expect(statusSelect).toBeVisible();
     await statusSelect.click();
     await page.getByRole('option',{name:'resolved',exact:true}).click();
+    await expect(drawer.getByRole('button',{name:'更新状态'})).toBeEnabled();
+    await drawer.getByRole('button',{name:'更新状态'}).click();
+    await expect(page.getByText('工单状态已更新')).toBeVisible();
 
     await expect.poll(async()=>{
       const response=await request.get(`/api/workflows/aftersales/${ticket.id}/full`,{headers:manager.headers});

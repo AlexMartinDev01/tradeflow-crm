@@ -138,6 +138,52 @@ test.describe('TradeFlow governance and operations',()=>{
     expect(removed.status()).toBe(200);
   });
 
+  test('aftersales workflow persists open to resolved to closed status transitions',async({request})=>{
+    const manager=await loginApi(request,'demo.manager');
+    const suffix=Date.now().toString().slice(-8);
+    const customers=await getJson(request,'/api/customers?keyword=Nordstern&size=20',manager.headers);
+    const customer=customers.data.find(x=>x.name==='Nordstern Technik GmbH');
+    expect(customer).toBeTruthy();
+
+    const ticket=await postJson(request,'/api/aftersales',{
+      ticket_no:'AS-STATUS-'+suffix,
+      customer_id:customer.id,
+      order_id:null,
+      category:'service',
+      severity:'normal',
+      subject:'Aftersales status lifecycle '+suffix,
+      description:'Direct workflow lifecycle acceptance',
+      responsible_team:'Technical Support',
+      solution:'Verified resolution',
+      status:'open',
+      satisfaction:null,
+      opened_at:new Date().toISOString(),
+      closed_at:null
+    },manager.headers);
+
+    const resolved=await postJson(request,'/api/workflows/aftersales/'+ticket.id+'/status',{
+      status:'resolved',solution:'Verified resolution'
+    },manager.headers);
+    expect(resolved.status).toBe('resolved');
+    expect(resolved.resolved_at).toBeTruthy();
+
+    let full=await getJson(request,'/api/workflows/aftersales/'+ticket.id+'/full',manager.headers);
+    expect(full.status).toBe('resolved');
+    expect(full.resolved_at).toBeTruthy();
+    expect(full.closed_at).toBeFalsy();
+
+    const closed=await postJson(request,'/api/workflows/aftersales/'+ticket.id+'/status',{
+      status:'closed',solution:'Verified resolution'
+    },manager.headers);
+    expect(closed.status).toBe('closed');
+    expect(closed.closed_at).toBeTruthy();
+
+    full=await getJson(request,'/api/workflows/aftersales/'+ticket.id+'/full',manager.headers);
+    expect(full.status).toBe('closed');
+    expect(full.resolved_at).toBeTruthy();
+    expect(full.closed_at).toBeTruthy();
+  });
+
   test('published knowledge can be recommended and applied back to an aftersales ticket',async({request})=>{
     const manager=await loginApi(request,'demo.manager');
     const tickets=await getJson(request,'/api/aftersales?size=100',manager.headers);

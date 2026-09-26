@@ -9,7 +9,7 @@ import {useAuth} from '../stores/auth';
 
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
 const canEdit=computed(()=>['admin','manager','sales','followup'].includes(auth.user?.role));
-const rows=ref<any[]>([]),customers=ref<any[]>([]),orders=ref<any[]>([]),summary=ref<any>({}),detail=ref<any>(null),drawer=ref(false),dialog=ref(false),ratingDialog=ref(false),knowledgeDialog=ref(false),knowledgeRecommendations=ref<any[]>([]),router=useRouter();
+const rows=ref<any[]>([]),customers=ref<any[]>([]),orders=ref<any[]>([]),summary=ref<any>({}),detail=ref<any>(null),drawer=ref(false),dialog=ref(false),ratingDialog=ref(false),knowledgeDialog=ref(false),knowledgeRecommendations=ref<any[]>([]),statusDraft=ref(''),statusSaving=ref(false),router=useRouter();
 const filters=reactive({status:'',severity:'',category:''});
 const form=reactive<any>({customer_id:'',order_id:'',category:'quality',severity:'normal',subject:'',description:'',responsible_team:'Quality',solution:'',status:'open'});
 const rating=reactive<any>({satisfaction:5,note:''});
@@ -42,9 +42,17 @@ async function loadKnowledgeRecommendations(){
   if(!detail.value?.id){knowledgeRecommendations.value=[];return}
   try{knowledgeRecommendations.value=(await api.get('/knowledge/recommend',{params:{ticket_id:detail.value.id}})).data}catch{knowledgeRecommendations.value=[]}
 }
-async function open(r:any){detail.value=(await api.get(`/workflows/aftersales/${r.id}/full`)).data;drawer.value=true;await loadKnowledgeRecommendations()}
+async function open(r:any){detail.value=(await api.get(`/workflows/aftersales/${r.id}/full`)).data;statusDraft.value=detail.value.status;drawer.value=true;await loadKnowledgeRecommendations()}
 async function saveDetail(){await api.patch(`/aftersales/${detail.value.id}`,{category:detail.value.category,severity:detail.value.severity,responsible_team:detail.value.responsible_team,solution:detail.value.solution});await open(detail.value);await load();ElMessage.success('工单信息已保存')}
-async function changeStatus(v:string){await api.post(`/workflows/aftersales/${detail.value.id}/status`,{status:v,solution:detail.value.solution});await open(detail.value);await load();ElMessage.success('工单状态已更新')}
+async function changeStatus(){
+  if(!detail.value||!statusDraft.value||statusDraft.value===detail.value.status)return;
+  statusSaving.value=true;
+  try{
+    const currentId=detail.value.id;
+    await api.post(`/workflows/aftersales/${currentId}/status`,{status:statusDraft.value,solution:detail.value.solution});
+    await open({id:currentId});await load();ElMessage.success('工单状态已更新');
+  }finally{statusSaving.value=false}
+}
 function openRating(){Object.assign(rating,{satisfaction:detail.value.satisfaction||5,note:detail.value.satisfaction_note||''});ratingDialog.value=true}
 async function saveRating(){await api.post(`/workflows/aftersales/${detail.value.id}/satisfaction`,rating);ratingDialog.value=false;await open(detail.value);ElMessage.success('满意度已记录')}
 function openKnowledgeCreate(){
@@ -114,7 +122,7 @@ onMounted(load);
 </el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" @click="save">创建工单</el-button></template></el-dialog>
 
 <el-drawer v-model="drawer" size="76%" title="售后工单详情"><template v-if="detail">
-<div class="toolbar"><div><h3 style="margin:0">{{detail.ticket_no}} · {{detail.subject}}</h3><span class="muted">{{detail.customer_name}} · SLA {{detail.sla_due_at||'-'}}</span></div><div style="display:flex;gap:8px"><el-tag :type="detail.sla_status==='overdue'?'danger':detail.sla_status==='completed'?'success':'info'">{{detail.sla_status}}</el-tag><el-select v-if="canEdit" v-model="detail.status" style="width:170px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-else>{{detail.status}}</el-tag></div></div>
+<div class="toolbar"><div><h3 style="margin:0">{{detail.ticket_no}} · {{detail.subject}}</h3><span class="muted">{{detail.customer_name}} · SLA {{detail.sla_due_at||'-'}}</span></div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><el-tag :type="detail.sla_status==='overdue'?'danger':detail.sla_status==='completed'?'success':'info'">{{detail.sla_status}}</el-tag><template v-if="canEdit"><el-select v-model="statusDraft" aria-label="工单状态" style="width:170px"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-button type="primary" plain :loading="statusSaving" :disabled="statusDraft===detail.status" @click="changeStatus">更新状态</el-button></template><el-tag v-else>{{detail.status}}</el-tag></div></div>
 
 <div class="grid" style="grid-template-columns:1fr 1fr;align-items:start">
 <div class="card"><h3 class="section-title">问题与处理</h3><el-form label-position="top">
