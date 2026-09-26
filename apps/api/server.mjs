@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS aftersales(id TEXT PRIMARY KEY, ticket_no TEXT UNIQUE
 CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, segment_rule TEXT, status TEXT NOT NULL DEFAULT 'draft', scheduled_at TEXT, content TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, entity_type TEXT, entity_id TEXT, ip TEXT, request_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS automation_rules(key TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS automation_logs(id TEXT PRIMARY KEY, rule_key TEXT NOT NULL, message TEXT NOT NULL, entity_type TEXT, entity_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS saved_views(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, entity_type TEXT NOT NULL, name TEXT NOT NULL, filters TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
 CREATE INDEX IF NOT EXISTS idx_customers_name ON customers(name);
 CREATE INDEX IF NOT EXISTS idx_customers_owner ON customers(owner_id);
@@ -60,6 +62,8 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("ALTER TABLE tasks ADD COLUMN automation_key TEXT");}catch{}
+try{db.exec("CREATE INDEX IF NOT EXISTS idx_tasks_automation_key ON tasks(automation_key)");}catch{}
 
 const now = () => new Date().toISOString();
 const parseJSON = (v, fallback = null) => { try { return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
@@ -79,7 +83,66 @@ function seed() {
     for (const [channel,value] of channels) db.prepare('INSERT INTO contact_channels(id,contact_id,channel,value,is_primary,created_at) VALUES(?,?,?,?,?,?)').run(randomUUID(),contactId,channel,value,channel==='email'?1:0,now());
   }
 }
+
 seed();
+const automationDefaults=[
+  ['overdue_payment','逾期回款提醒',1,{priority:'urgent'}],
+  ['quotation_expiry','报价到期提醒',1,{days:3,priority:'high'}],
+  ['brand_expiry','品牌授权到期提醒',1,{days:30,priority:'high'}],
+  ['dormant_customer','沉默客户识别',1,{days:60,priority:'normal'}]
+];
+for(const [key,name,enabled,config] of automationDefaults){
+  db.prepare('INSERT OR IGNORE INTO automation_rules(key,name,enabled,config,updated_at) VALUES(?,?,?,?,?)').run(key,name,enabled,JSON.stringify(config),now());
+}
+function autoTask(key,customerId,title,description,dueAt,priority='normal',assignedTo=null){
+  const exists=db.prepare('SELECT id FROM tasks WHERE automation_key=? LIMIT 1').get(key); if(exists)return false;
+  db.prepare('INSERT INTO tasks(id,customer_id,title,description,due_at,status,priority,assigned_to,created_by,automation_key,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)')
+    .run(randomUUID(),customerId||null,title,description,dueAt||now(),'todo',priority,assignedTo||null,null,key,now(),now());
+  return true;
+}
+function automationLog(ruleKey,message,entityType=null,entityId=null){
+  db.prepare('INSERT INTO automation_logs(id,rule_key,message,entity_type,entity_id,created_at) VALUES(?,?,?,?,?,?)').run(randomUUID(),ruleKey,message,entityType,entityId,now());
+}
+function getRule(key){
+  const r=db.prepare('SELECT * FROM automation_rules WHERE key=?').get(key); return r?{...r,config:parseJSON(r.config,{})}:null;
+}
+function runAutomationSweep(){
+  const result={created:0,updated:0,checked_at:now()};
+  const overdue=getRule('overdue_payment');
+  if(overdue?.enabled){
+    const rows=db.prepare("SELECT p.*,c.owner_id,c.name customer_name FROM payments p JOIN customers c ON c.id=p.customer_id WHERE p.status!='paid' AND p.due_at IS NOT NULL AND p.due_at < ?").all(now());
+    for(const x of rows){
+      if(x.status!=='overdue'){db.prepare("UPDATE payments SET status='overdue',updated_at=? WHERE id=?").run(now(),x.id);result.updated++;}
+      const key=`payment-overdue:${x.id}`;
+      if(autoTask(key,x.customer_id,`逾期回款：${x.customer_name}`,`应收 ${x.currency||''} ${Number(x.amount||0).toFixed(2)} 已超过到期日 ${x.due_at}`,now(),overdue.config.priority||'urgent',x.owner_id)){result.created++;automationLog('overdue_payment','生成逾期回款任务','payment',x.id);}
+    }
+  }
+  const qr=getRule('quotation_expiry');
+  if(qr?.enabled){
+    const days=Number(qr.config.days||3),limit=new Date(Date.now()+days*86400000).toISOString().slice(0,10);
+    const rows=db.prepare("SELECT q.*,c.owner_id,c.name customer_name FROM quotations q JOIN customers c ON c.id=q.customer_id WHERE q.status NOT IN ('accepted','rejected','expired') AND q.valid_until IS NOT NULL AND q.valid_until <= ?").all(limit);
+    for(const x of rows){const key=`quote-expire:${x.id}`;if(autoTask(key,x.customer_id,`报价即将到期：${x.quote_no}`,`${x.customer_name} 的报价有效期至 ${x.valid_until}`,x.valid_until,qr.config.priority||'high',x.owner_id)){result.created++;automationLog('quotation_expiry','生成报价到期任务','quotation',x.id);}}
+  }
+  const br=getRule('brand_expiry');
+  if(br?.enabled){
+    const days=Number(br.config.days||30),limit=new Date(Date.now()+days*86400000).toISOString().slice(0,10);
+    const rows=db.prepare("SELECT cb.*,b.name brand_name,c.name customer_name,c.owner_id FROM customer_brands cb JOIN brands b ON b.id=cb.brand_id JOIN customers c ON c.id=cb.customer_id WHERE cb.end_date IS NOT NULL AND cb.end_date <= ?").all(limit);
+    for(const x of rows){const key=`brand-expire:${x.id}`;if(autoTask(key,x.customer_id,`品牌授权即将到期：${x.brand_name}`,`${x.customer_name} 的 ${x.brand_name} 授权关系将于 ${x.end_date} 到期`,x.end_date,br.config.priority||'high',x.owner_id)){result.created++;automationLog('brand_expiry','生成品牌授权到期任务','customer_brand',x.id);}}
+  }
+  const dr=getRule('dormant_customer');
+  if(dr?.enabled){
+    const days=Number(dr.config.days||60),cutoff=new Date(Date.now()-days*86400000).toISOString();
+    const rows=db.prepare(`SELECT c.*,MAX(a.occurred_at) last_activity FROM customers c LEFT JOIN activities a ON a.customer_id=c.id WHERE c.deleted_at IS NULL AND c.status IN ('potential','contacted','following','quoted','sample','negotiating') GROUP BY c.id HAVING COALESCE(MAX(a.occurred_at),c.created_at) < ?`).all(cutoff);
+    for(const x of rows){
+      if(x.status!=='dormant'){db.prepare("UPDATE customers SET status='dormant',updated_at=? WHERE id=?").run(now(),x.id);result.updated++;}
+      const key=`customer-dormant:${x.id}`;if(autoTask(key,x.id,`沉默客户需要重新激活：${x.name}`,`超过 ${days} 天没有有效跟进，请评估是否重新联系或转入公海。`,now(),dr.config.priority||'normal',x.owner_id)){result.created++;automationLog('dormant_customer','客户自动标记为沉默并生成任务','customer',x.id);}
+    }
+  }
+  return result;
+}
+let automationRunning=false;
+setInterval(()=>{if(automationRunning)return;automationRunning=true;try{runAutomationSweep();}catch(e){console.error('automation sweep failed',e);}finally{automationRunning=false;}},10*60*1000).unref();
+
 
 const resourceMap = {
   customers:{table:'customers', json:['customer_types','service_regions','custom_fields'], required:['name']},
@@ -275,6 +338,26 @@ const server = http.createServer(async (req,res)=>{
     const user=auth(req); if(!user) return json(res,401,{error:'unauthorized'});
     if(p==='/api/auth/me') return json(res,200,{id:user.user_id,username:user.username,display_name:user.display_name,role:user.role});
     if(p==='/api/auth/logout' && req.method==='POST'){ const token=(req.headers.authorization||'').slice(7); db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hashToken(token)); return json(res,200,{ok:true}); }
+
+    if(p==='/api/automation/rules' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role)) return json(res,403,{error:'forbidden'});
+      return json(res,200,db.prepare('SELECT * FROM automation_rules ORDER BY key').all().map(r=>({...r,config:parseJSON(r.config,{})})));
+    }
+    if(p==='/api/automation/rules' && req.method==='PATCH'){
+      if(!['admin','manager'].includes(user.role)) return json(res,403,{error:'forbidden'});
+      const b=await body(req), key=String(b.key||''); const old=getRule(key); if(!old)return json(res,404,{error:'not_found'});
+      const enabled=b.enabled===undefined?old.enabled:(b.enabled?1:0),config=b.config===undefined?old.config:b.config;
+      db.prepare('UPDATE automation_rules SET enabled=?,config=?,updated_at=? WHERE key=?').run(enabled,JSON.stringify(config||{}),now(),key);
+      audit(user,'update','automation_rule',key,req,{enabled,config}); return json(res,200,getRule(key));
+    }
+    if(p==='/api/automation/run' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role)) return json(res,403,{error:'forbidden'});
+      const result=runAutomationSweep(); audit(user,'run','automation',null,req,result); return json(res,200,result);
+    }
+    if(p==='/api/automation/logs' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role)) return json(res,403,{error:'forbidden'});
+      return json(res,200,db.prepare('SELECT * FROM automation_logs ORDER BY created_at DESC LIMIT 200').all());
+    }
 
     if(p==='/api/dashboard' && req.method==='GET'){
       const q=(sql,...a)=>db.prepare(sql).get(...a).c;
