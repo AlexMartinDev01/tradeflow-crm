@@ -487,7 +487,7 @@ function marketingSegmentCustomers(rules={},user=null,limit=1000){
   for(const k of exacts){if(rules[k]){filters.push(`c.${k}=?`);args.push(rules[k]);}}
   if(rules.customer_type){filters.push('c.customer_types LIKE ?');args.push(`%"${rules.customer_type}"%`);}
   if(rules.tag_id){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag_id=?)');args.push(rules.tag_id);}
-  if(user&&scopedRole(user)){filters.push('c.owner_id=?');args.push(user.user_id);}
+  if(user&&scopedRole(user)){const access=customerScopeClause(user,'c');if(access.sql){filters.push(access.sql.replace(/^\s*AND\s*/,'').trim());args.push(...access.args);}}
   const customers=db.prepare(`SELECT c.* FROM customers c WHERE ${filters.join(' AND ')} ORDER BY c.updated_at DESC LIMIT ?`).all(...args,Math.min(5000,Math.max(1,Number(limit||1000))));
   return customers.map(c=>{
     const contact=db.prepare("SELECT * FROM contacts WHERE customer_id=? AND is_departed=0 ORDER BY is_primary DESC,created_at LIMIT 1").get(c.id)||null;
@@ -620,6 +620,13 @@ function customerOwnedBy(user,customerId){
   }
   return !!db.prepare(`SELECT 1 ok FROM customers c WHERE c.id=? AND c.deleted_at IS NULL
     AND (c.owner_id=? OR EXISTS(SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=c.id AND cc.user_id=?))`).get(customerId,user.user_id,user.user_id);
+}
+function customerScopeClause(user,alias='c'){
+  const scope=userDataScope(user);if(scope==='all')return {sql:'',args:[]};
+  if(scope==='department'&&user.department_id){
+    return {sql:` AND (${alias}.owner_id=? OR EXISTS(SELECT 1 FROM users du WHERE du.id=${alias}.owner_id AND du.department_id=?) OR EXISTS(SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=${alias}.id AND cc.user_id=?))`,args:[user.user_id,user.department_id,user.user_id]};
+  }
+  return {sql:` AND (${alias}.owner_id=? OR EXISTS(SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=${alias}.id AND cc.user_id=?))`,args:[user.user_id,user.user_id]};
 }
 function getPublicPoolRule(){
   const row=db.prepare("SELECT value FROM settings WHERE key='public_pool_rule'").get();
@@ -1185,8 +1192,8 @@ const server = http.createServer(async (req,res)=>{
 
     if(p==='/api/analytics/overview' && req.method==='GET'){
       const months=Math.min(24,Math.max(3,Number(url.searchParams.get('months')||12)));
-      const customerScope=scopedRole(user)?' AND c.owner_id=?':'',scopeArgs=scopedRole(user)?[user.user_id]:[];
-      const orderScope=scopedRole(user)?' AND c.owner_id=?':'',orderArgs=scopedRole(user)?[user.user_id]:[];
+      const access=customerScopeClause(user,'c'),customerScope=access.sql,scopeArgs=access.args;
+      const orderScope=access.sql,orderArgs=access.args;
       const monthStart=new Date();monthStart.setMonth(monthStart.getMonth()-months+1);monthStart.setDate(1);monthStart.setHours(0,0,0,0);
       const startIso=monthStart.toISOString();
 
@@ -1198,7 +1205,7 @@ const server = http.createServer(async (req,res)=>{
 
       const source=db.prepare(`SELECT COALESCE(c.source,'Unknown') source,COUNT(DISTINCT c.id) customers,COUNT(DISTINCT o.id) orders,COALESCE(SUM(o.total),0) revenue FROM customers c LEFT JOIN orders o ON o.customer_id=c.id WHERE c.deleted_at IS NULL${customerScope} GROUP BY COALESCE(c.source,'Unknown') ORDER BY revenue DESC,customers DESC LIMIT 20`).all(...scopeArgs);
 
-      const salespeople=db.prepare(`SELECT u.id,u.display_name,u.role,
+      let salespeople=db.prepare(`SELECT u.id,u.display_name,u.role,u.department_id,
         COUNT(DISTINCT c.id) customers,
         COUNT(DISTINCT a.id) activities,
         COUNT(DISTINCT o.id) orders,
@@ -1208,6 +1215,8 @@ const server = http.createServer(async (req,res)=>{
         LEFT JOIN orders o ON o.customer_id=c.id
         WHERE u.enabled=1 AND u.role IN ('admin','manager','sales','followup')
         GROUP BY u.id ORDER BY revenue DESC,activities DESC LIMIT 30`).all();
+      if(userDataScope(user)==='self')salespeople=salespeople.filter(x=>x.id===user.user_id);
+      else if(userDataScope(user)==='department'&&user.department_id)salespeople=salespeople.filter(x=>x.department_id===user.department_id);
 
       const customerValue=db.prepare(`SELECT c.id,c.name,COUNT(DISTINCT o.id) order_count,COALESCE(SUM(o.total),0) revenue,
         COALESCE(SUM(CASE WHEN q.margin_rate IS NOT NULL THEN o.total*q.margin_rate/100.0 ELSE 0 END),0) estimated_gross_profit
@@ -1232,22 +1241,28 @@ const server = http.createServer(async (req,res)=>{
     }
 
     if(p==='/api/dashboard' && req.method==='GET'){
-      const q=(sql,...a)=>db.prepare(sql).get(...a).c;
-      return json(res,200,{
-        customers:q('SELECT COUNT(*) c FROM customers WHERE deleted_at IS NULL'),
-        contacts:q('SELECT COUNT(*) c FROM contacts'),
-        openTasks:q("SELECT COUNT(*) c FROM tasks WHERE status!='done'"),
-        inquiries:q('SELECT COUNT(*) c FROM inquiries'),
-        opportunities:q("SELECT COUNT(*) c FROM opportunities WHERE stage NOT IN ('won','lost')"),
-        quotations:q('SELECT COUNT(*) c FROM quotations'),
-        orders:q('SELECT COUNT(*) c FROM orders'),
-        overduePayments:q("SELECT COUNT(*) c FROM payments WHERE status!='paid' AND due_at IS NOT NULL AND due_at < ?",now()),
-        recentActivities:db.prepare('SELECT a.*,c.name customer_name FROM activities a JOIN customers c ON c.id=a.customer_id ORDER BY a.occurred_at DESC LIMIT 10').all(),
-        dueTasks:db.prepare("SELECT t.*,c.name customer_name FROM tasks t LEFT JOIN customers c ON c.id=t.customer_id WHERE t.status!='done' ORDER BY COALESCE(t.due_at,'9999') LIMIT 10").all()
-      });
+      const access=customerScopeClause(user,'c'),scope=access.sql,args=access.args;
+      const one=(sql,a=[])=>Number(db.prepare(sql).get(...a).c||0);
+      const customers=one(`SELECT COUNT(*) c FROM customers c WHERE c.deleted_at IS NULL${scope}`,args);
+      const contacts=one(`SELECT COUNT(*) c FROM contacts ct JOIN customers c ON c.id=ct.customer_id WHERE c.deleted_at IS NULL${scope}`,args);
+      const inquiries=one(`SELECT COUNT(*) c FROM inquiries i JOIN customers c ON c.id=i.customer_id WHERE c.deleted_at IS NULL${scope}`,args);
+      const opportunities=one(`SELECT COUNT(*) c FROM opportunities o JOIN customers c ON c.id=o.customer_id WHERE c.deleted_at IS NULL AND o.stage NOT IN ('won','lost')${scope}`,args);
+      const quotations=one(`SELECT COUNT(*) c FROM quotations q JOIN customers c ON c.id=q.customer_id WHERE c.deleted_at IS NULL${scope}`,args);
+      const orders=one(`SELECT COUNT(*) c FROM orders o JOIN customers c ON c.id=o.customer_id WHERE c.deleted_at IS NULL${scope}`,args);
+      const overduePayments=one(`SELECT COUNT(*) c FROM payments p JOIN customers c ON c.id=p.customer_id WHERE c.deleted_at IS NULL AND p.status!='paid' AND p.due_at IS NOT NULL AND p.due_at < ?${scope}`,[now(),...args]);
+      let openTasks,dueTasks;
+      if(userDataScope(user)==='all'){
+        openTasks=one("SELECT COUNT(*) c FROM tasks WHERE status!='done'");
+        dueTasks=db.prepare("SELECT t.*,c.name customer_name FROM tasks t LEFT JOIN customers c ON c.id=t.customer_id WHERE t.status!='done' ORDER BY COALESCE(t.due_at,'9999') LIMIT 10").all();
+      }else{
+        openTasks=one(`SELECT COUNT(*) c FROM tasks t LEFT JOIN customers c ON c.id=t.customer_id WHERE t.status!='done' AND (t.assigned_to=? OR (c.id IS NOT NULL AND c.deleted_at IS NULL${scope}))`,[user.user_id,...args]);
+        dueTasks=db.prepare(`SELECT t.*,c.name customer_name FROM tasks t LEFT JOIN customers c ON c.id=t.customer_id WHERE t.status!='done' AND (t.assigned_to=? OR (c.id IS NOT NULL AND c.deleted_at IS NULL${scope})) ORDER BY COALESCE(t.due_at,'9999') LIMIT 10`).all(user.user_id,...args);
+      }
+      const recentActivities=db.prepare(`SELECT a.*,c.name customer_name FROM activities a JOIN customers c ON c.id=a.customer_id WHERE c.deleted_at IS NULL${scope} ORDER BY a.occurred_at DESC LIMIT 10`).all(...args);
+      return json(res,200,{customers,contacts,openTasks,inquiries,opportunities,quotations,orders,overduePayments,recentActivities,dueTasks});
     }
     if(p==='/api/search' && req.method==='GET'){
-      const term=(url.searchParams.get('q')||'').trim();if(!term)return json(res,200,[]);const like=`%${term}%`,scope=scopedRole(user)?' AND (c.owner_id=? OR EXISTS(SELECT 1 FROM customer_collaborators cca WHERE cca.customer_id=c.id AND cca.user_id=?))':'',scopeArgs=scopedRole(user)?[user.user_id,user.user_id]:[];
+      const term=(url.searchParams.get('q')||'').trim();if(!term)return json(res,200,[]);const like=`%${term}%`,access=customerScopeClause(user,'c'),scope=access.sql,scopeArgs=access.args;
       const base=db.prepare(`
         SELECT DISTINCT c.*,u.display_name owner_name
         FROM customers c LEFT JOIN users u ON u.id=c.owner_id
@@ -1292,11 +1307,15 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,db.prepare('SELECT a.*,u.display_name user_name FROM audit_logs a LEFT JOIN users u ON u.id=a.user_id ORDER BY a.created_at DESC LIMIT 500').all().map(x=>({...x,detail:parseJSON(x.detail,{})})));
     }
     if(p==='/api/analytics/funnel' && req.method==='GET'){
-      const one=sql=>db.prepare(sql).get().c; return json(res,200,{inquiries:one('SELECT COUNT(*) c FROM inquiries'), opportunities:one('SELECT COUNT(*) c FROM opportunities'), quotations:one('SELECT COUNT(*) c FROM quotations'), samples:one('SELECT COUNT(*) c FROM samples'), orders:one('SELECT COUNT(*) c FROM orders')});
+      const access=customerScopeClause(user,'c'),scope=access.sql,args=access.args;
+      const one=(table,alias,extra='')=>Number(db.prepare(`SELECT COUNT(*) c FROM ${table} ${alias} JOIN customers c ON c.id=${alias}.customer_id WHERE c.deleted_at IS NULL ${extra}${scope}`).get(...args).c||0);
+      return json(res,200,{inquiries:one('inquiries','i'),opportunities:one('opportunities','o'," AND o.stage NOT IN ('won','lost')"),quotations:one('quotations','q'),samples:one('samples','s'),orders:one('orders','o')});
     }
-    if(p==='/api/analytics/customers-by-country' && req.method==='GET') return json(res,200,db.prepare(`SELECT COALESCE(country,'Unknown') name, COUNT(*) value FROM customers WHERE deleted_at IS NULL GROUP BY country ORDER BY value DESC LIMIT 30`).all());
+    if(p==='/api/analytics/customers-by-country' && req.method==='GET'){
+      const access=customerScopeClause(user,'c');return json(res,200,db.prepare(`SELECT COALESCE(c.country,'Unknown') name,COUNT(*) value FROM customers c WHERE c.deleted_at IS NULL${access.sql} GROUP BY c.country ORDER BY value DESC LIMIT 30`).all(...access.args));
+    }
     if(p==='/api/analytics/customers-by-type' && req.method==='GET'){
-      const all=db.prepare('SELECT customer_types FROM customers WHERE deleted_at IS NULL').all(); const m={}; for(const r of all) for(const t of parseJSON(r.customer_types,[])) m[t]=(m[t]||0)+1; return json(res,200,Object.entries(m).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value));
+      const access=customerScopeClause(user,'c'),all=db.prepare(`SELECT c.customer_types FROM customers c WHERE c.deleted_at IS NULL${access.sql}`).all(...access.args);const m={};for(const r of all)for(const t of parseJSON(r.customer_types,[]))m[t]=(m[t]||0)+1;return json(res,200,Object.entries(m).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value));
     }
     // ---- Auditable exchange rates / currency conversion ----
     if(p==='/api/settings/exchange-rates' && req.method==='GET'){
@@ -1383,9 +1402,8 @@ const server = http.createServer(async (req,res)=>{
 
     // ---- Aftersales / complaint ticket workflow ----
     if(p==='/api/aftersales/summary' && req.method==='GET'){
-      const rows=scopedRole(user)?
-        db.prepare("SELECT a.* FROM aftersales a JOIN customers c ON c.id=a.customer_id WHERE c.owner_id=?").all(user.user_id):
-        db.prepare("SELECT * FROM aftersales").all();
+      const access=customerScopeClause(user,'c');
+      const rows=db.prepare(`SELECT a.* FROM aftersales a JOIN customers c ON c.id=a.customer_id WHERE c.deleted_at IS NULL${access.sql}`).all(...access.args);
       const open=rows.filter(x=>!['resolved','closed'].includes(x.status)).length;
       const overdue=rows.filter(x=>!['resolved','closed'].includes(x.status)&&x.sla_due_at&&x.sla_due_at<now()).length;
       const resolved=rows.filter(x=>['resolved','closed'].includes(x.status)).length;
@@ -1470,9 +1488,8 @@ const server = http.createServer(async (req,res)=>{
 
     // ---- Customs declaration preparation / HS Code workflow ----
     if(p==='/api/customs-declarations' && req.method==='GET'){
-      const scope=scopedRole(user)?" WHERE (c.owner_id=? OR EXISTS (SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=c.id AND cc.user_id=?))":"";
-      const args=scopedRole(user)?[user.user_id,user.user_id]:[];
-      const rows=db.prepare(`SELECT cd.*,o.order_no,c.name customer_name,s.booking_no,s.bl_no FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN shipments s ON s.id=cd.shipment_id${scope} ORDER BY cd.updated_at DESC LIMIT 500`).all(...args);
+      const access=customerScopeClause(user,'c');
+      const rows=db.prepare(`SELECT cd.*,o.order_no,o.customer_id,c.name customer_name,s.booking_no,s.bl_no FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id JOIN customers c ON c.id=o.customer_id LEFT JOIN shipments s ON s.id=cd.shipment_id WHERE c.deleted_at IS NULL${access.sql} ORDER BY cd.updated_at DESC LIMIT 500`).all(...access.args);
       return json(res,200,rows);
     }
     {
@@ -2128,11 +2145,10 @@ const server = http.createServer(async (req,res)=>{
     // ---- Inquiry assignment / first-response SLA / opportunity loss closure ----
     if(p==='/api/inquiries/sla-dashboard' && req.method==='GET'){
       const rule=getRule('inquiry_response_sla'),hours=Number(rule?.config?.hours||4);
-      const scope=scopedRole(user)?" AND (i.owner_id=? OR c.owner_id=? OR EXISTS (SELECT 1 FROM customer_collaborators cc WHERE cc.customer_id=c.id AND cc.user_id=?))":"";
-      const args=scopedRole(user)?[user.user_id,user.user_id,user.user_id]:[];
+      const access=customerScopeClause(user,'c');
       const rows=db.prepare(`SELECT i.*,c.name customer_name,u.display_name owner_name
         FROM inquiries i JOIN customers c ON c.id=i.customer_id LEFT JOIN users u ON u.id=i.owner_id
-        WHERE c.deleted_at IS NULL${scope} ORDER BY i.received_at DESC LIMIT 500`).all(...args).map(x=>inquirySlaInfo(decodeRow(x,resourceMap.inquiries),hours));
+        WHERE c.deleted_at IS NULL${access.sql} ORDER BY i.received_at DESC LIMIT 500`).all(...access.args).map(x=>inquirySlaInfo(decodeRow(x,resourceMap.inquiries),hours));
       const responded=rows.filter(x=>x.first_response_at),breached=rows.filter(x=>x.sla_status==='breached').length,overdue=rows.filter(x=>x.sla_status==='overdue').length;
       const avg=responded.length?Math.round(responded.reduce((a,x)=>a+Number(x.response_minutes||0),0)/responded.length):0;
       return json(res,200,{sla_hours:hours,summary:{total:rows.length,responded:responded.length,breached,overdue,avg_response_minutes:avg},rows});
