@@ -152,6 +152,52 @@ function decodeRow(row, cfg){ if(!row) return row; const r={...row}; for(const k
 function auth(req){ const h=req.headers.authorization||''; if(!h.startsWith('Bearer ')) return null; const token=h.slice(7); const s=db.prepare(`SELECT s.*,u.username,u.display_name,u.role,u.enabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`).get(hashToken(token),now()); return s&&s.enabled?s:null; }
 function audit(user, action, entityType, entityId, req, detail={}){ db.prepare('INSERT INTO audit_logs(id,user_id,action,entity_type,entity_id,ip,request_id,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(randomUUID(),user?.user_id||null,action,entityType||null,entityId||null,req.socket.remoteAddress||'',req.requestId||'',JSON.stringify(detail),now()); }
 function makeNo(prefix){ return `${prefix}-${new Date().toISOString().slice(0,10).replaceAll('-','')}-${Math.random().toString(36).slice(2,7).toUpperCase()}`; }
+
+function normalizeCompanyName(v=''){
+  return String(v).toLowerCase().normalize('NFKC')
+    .replace(/&/g,'and')
+    .replace(/[\s\p{P}\p{S}]+/gu,'')
+    .replace(/(limited|ltd|incorporated|inc|corporation|corp|company|co|llc|gmbh|sarl|bv|plc)$/i,'');
+}
+function normalizeDomain(v=''){
+  let x=String(v).trim().toLowerCase();
+  if(!x) return '';
+  try { return new URL(/^https?:\/\//i.test(x)?x:`https://${x}`).hostname.replace(/^www\./,''); }
+  catch { return x.replace(/^https?:\/\//,'').replace(/^www\./,'').split('/')[0]; }
+}
+function duplicateCandidates(input){
+  const nameKey=normalizeCompanyName(input.name||input.english_name||'');
+  const domain=normalizeDomain(input.website||'');
+  const tax=String(input.tax_no||'').replace(/\s+/g,'').toLowerCase();
+  const reg=String(input.registration_no||'').replace(/\s+/g,'').toLowerCase();
+  const email=String(input.email||'').trim().toLowerCase();
+  const phone=String(input.phone||'').replace(/\D/g,'');
+  const rows=db.prepare(`SELECT c.*,u.display_name owner_name,u.role owner_role
+    FROM customers c LEFT JOIN users u ON u.id=c.owner_id WHERE c.deleted_at IS NULL`).all();
+  const channelOwners=new Map();
+  if(email||phone){
+    for(const r of db.prepare(`SELECT cc.channel,cc.value,c.customer_id FROM contact_channels cc
+      JOIN contacts c ON c.id=cc.contact_id`).all()){
+      const key=r.channel==='email'?String(r.value||'').trim().toLowerCase():String(r.value||'').replace(/\D/g,'');
+      if(key) channelOwners.set(`${r.channel}:${key}`,r.customer_id);
+    }
+  }
+  return rows.map(r=>{
+    let score=0; const reasons=[];
+    const rn=normalizeCompanyName(r.name||r.english_name||'');
+    const rd=normalizeDomain(r.website||'');
+    const rt=String(r.tax_no||'').replace(/\s+/g,'').toLowerCase();
+    const rr=String(r.registration_no||'').replace(/\s+/g,'').toLowerCase();
+    if(tax && rt && tax===rt){score+=100;reasons.push('税号一致');}
+    if(reg && rr && reg===rr){score+=100;reasons.push('注册号一致');}
+    if(domain && rd && domain===rd){score+=90;reasons.push('官网域名一致');}
+    if(nameKey && rn && nameKey===rn){score+=80;reasons.push('公司名称一致');}
+    if(email && channelOwners.get(`email:${email}`)===r.id){score+=100;reasons.push('邮箱已存在');}
+    if(phone && channelOwners.get(`phone:${phone}`)===r.id){score+=100;reasons.push('电话已存在');}
+    return {id:r.id,name:r.name,english_name:r.english_name,country:r.country,status:r.status,grade:r.grade,owner_id:r.owner_id,owner_name:r.owner_name,owner_role:r.owner_role,score,reasons};
+  }).filter(x=>x.score>0).sort((a,b)=>b.score-a.score).slice(0,10);
+}
+
 function sanitizePayload(cfg, payload, isCreate=false){
   const cols=tableCols(cfg.table); const out={};
   for(const [k,v] of Object.entries(payload||{})) if(cols.includes(k) && !['id','created_at','updated_at','deleted_at','password_hash'].includes(k)) out[k]=(cfg.json||[]).includes(k)?JSON.stringify(v??(k==='custom_fields'?{}:[])):v;
@@ -220,6 +266,54 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,{target,copyFallback:!target});
     }
 
+
+
+    // ---- Customer ownership, tags and duplicate/collision protection ----
+    if(p==='/api/users/lookup' && req.method==='GET'){
+      return json(res,200,db.prepare("SELECT id,username,display_name,role FROM users WHERE enabled=1 ORDER BY display_name").all());
+    }
+    if(p==='/api/customers/duplicate-check' && req.method==='POST'){
+      const b=await body(req);
+      return json(res,200,{matches:duplicateCandidates(b),checked_at:now()});
+    }
+    {
+      const tm=p.match(/^\/api\/customers\/([0-9a-f-]+)\/tags$/);
+      if(tm && req.method==='GET'){
+        const rows=db.prepare(`SELECT t.* FROM tags t JOIN customer_tags ct ON ct.tag_id=t.id
+          WHERE ct.customer_id=? ORDER BY COALESCE(t.category,''),t.name`).all(tm[1]);
+        return json(res,200,rows);
+      }
+      if(tm && req.method==='POST'){
+        const b=await body(req); let tagId=String(b.tag_id||'');
+        if(!tagId){
+          const name=String(b.name||'').trim(); if(!name) return json(res,400,{error:'tag_name_required'});
+          let tag=db.prepare('SELECT * FROM tags WHERE name=?').get(name);
+          if(!tag){ tagId=randomUUID(); db.prepare('INSERT INTO tags(id,name,category,created_at) VALUES(?,?,?,?)').run(tagId,name,b.category||null,now()); }
+          else tagId=tag.id;
+        }
+        db.prepare('INSERT OR IGNORE INTO customer_tags(customer_id,tag_id) VALUES(?,?)').run(tm[1],tagId);
+        audit(user,'add_tag','customers',tm[1],req,{tag_id:tagId});
+        return json(res,201,db.prepare('SELECT * FROM tags WHERE id=?').get(tagId));
+      }
+      const tdel=p.match(/^\/api\/customers\/([0-9a-f-]+)\/tags\/([0-9a-f-]+)$/);
+      if(tdel && req.method==='DELETE'){
+        db.prepare('DELETE FROM customer_tags WHERE customer_id=? AND tag_id=?').run(tdel[1],tdel[2]);
+        audit(user,'remove_tag','customers',tdel[1],req,{tag_id:tdel[2]});
+        return json(res,200,{ok:true});
+      }
+      const transfer=p.match(/^\/api\/customers\/([0-9a-f-]+)\/transfer$/);
+      if(transfer && req.method==='POST'){
+        if(!['admin','manager'].includes(user.role)) return json(res,403,{error:'forbidden'});
+        const b=await body(req), ownerId=String(b.owner_id||'');
+        const owner=db.prepare('SELECT id,display_name,role FROM users WHERE id=? AND enabled=1').get(ownerId);
+        if(!owner) return json(res,400,{error:'invalid_owner'});
+        const before=db.prepare('SELECT owner_id FROM customers WHERE id=? AND deleted_at IS NULL').get(transfer[1]);
+        if(!before) return json(res,404,{error:'not_found'});
+        db.prepare('UPDATE customers SET owner_id=?,updated_at=? WHERE id=?').run(ownerId,now(),transfer[1]);
+        audit(user,'transfer_owner','customers',transfer[1],req,{from:before.owner_id,to:ownerId});
+        return json(res,200,{ok:true,owner});
+      }
+    }
 
     // ---- Sales workflow actions: inquiry -> opportunity -> quotation -> order / sample follow-up ----
     {
@@ -345,13 +439,13 @@ const server = http.createServer(async (req,res)=>{
       if(key==='users' && user.role!=='admin') return json(res,403,{error:'forbidden'});
       if(req.method==='GET' && !id){
         const page=Math.max(1,Number(url.searchParams.get('page')||1)), size=Math.min(200,Math.max(1,Number(url.searchParams.get('size')||50))), offset=(page-1)*size;
-        const customerId=url.searchParams.get('customer_id'); const contactId=url.searchParams.get('contact_id'); const orderId=url.searchParams.get('order_id');
-        const filters=[]; const args=[]; if(customerId && tableCols(table).includes('customer_id')){filters.push('customer_id=?');args.push(customerId);} if(contactId&&tableCols(table).includes('contact_id')){filters.push('contact_id=?');args.push(contactId);} if(orderId&&tableCols(table).includes('order_id')){filters.push('order_id=?');args.push(orderId);} if(table==='customers') filters.push('deleted_at IS NULL');
+        const customerId=url.searchParams.get('customer_id'); const contactId=url.searchParams.get('contact_id'); const orderId=url.searchParams.get('order_id'); const ownerId=url.searchParams.get('owner_id'); const tagId=url.searchParams.get('tag_id');
+        const filters=[]; const args=[]; if(customerId && tableCols(table).includes('customer_id')){filters.push('customer_id=?');args.push(customerId);} if(contactId&&tableCols(table).includes('contact_id')){filters.push('contact_id=?');args.push(contactId);} if(orderId&&tableCols(table).includes('order_id')){filters.push('order_id=?');args.push(orderId);} if(table==='customers'){filters.push('deleted_at IS NULL'); if(ownerId){filters.push('owner_id=?');args.push(ownerId);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);}}
         const where=filters.length?`WHERE ${filters.join(' AND ')}`:''; const total=db.prepare(`SELECT COUNT(*) c FROM ${table} ${where}`).get(...args).c; const data=db.prepare(`SELECT * FROM ${table} ${where} ORDER BY ${tableCols(table).includes('updated_at')?'updated_at':'rowid'} DESC LIMIT ? OFFSET ?`).all(...args,size,offset).map(r=>decodeRow(r,cfg)); return json(res,200,{data,total,page,size});
       }
       if(req.method==='GET' && id){ const row=db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id); return row?json(res,200,decodeRow(row,cfg)):json(res,404,{error:'not_found'}); }
       if(req.method==='POST' && !id){
-        const b=await body(req), payload=sanitizePayload(cfg,b,true), newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
+        const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers' && !payload.owner_id) payload.owner_id=user.user_id; const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
         if(table==='inquiries' && !payload.inquiry_no){cols.push('inquiry_no');vals.push(makeNo('INQ'));} if(table==='quotations'&&!payload.quote_no){cols.push('quote_no');vals.push(makeNo('QT'));} if(table==='contracts'&&!payload.contract_no){cols.push('contract_no');vals.push(makeNo('CT'));} if(table==='orders'&&!payload.order_no){cols.push('order_no');vals.push(makeNo('SO'));} if(table==='aftersales'&&!payload.ticket_no){cols.push('ticket_no');vals.push(makeNo('AS'));}
         if(table==='users'){ const password=String(b.password||'ChangeMe@123'); cols.push('password_hash');vals.push(hashPassword(password)); }
         db.prepare(`INSERT INTO ${table}(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`).run(...vals); audit(user,'create',key,newId,req,payload); return json(res,201,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(newId),cfg));
