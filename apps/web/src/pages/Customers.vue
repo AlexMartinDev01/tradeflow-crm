@@ -107,7 +107,7 @@ onMounted(async()=>{await loadRefs();await load()});
 
 <div class="card" style="margin-bottom:16px">
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
-    <el-tag v-for="v in views" :key="v.id" closable @click="applyView(v)" @close.stop="deleteView(v)" style="cursor:pointer">{{v.name}}</el-tag>
+    <el-tag v-for="v in views" :key="v.id" closable disable-transitions @click="applyView(v)" @close.stop="deleteView(v)" style="cursor:pointer">{{v.name}}</el-tag>
     <el-button link type="primary" @click="saveViewDialog=true">+ 保存当前筛选</el-button>
   </div>
   <div class="grid" style="grid-template-columns:2fr repeat(4,1fr)">
