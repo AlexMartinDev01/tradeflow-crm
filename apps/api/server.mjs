@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS marketing_segments(id TEXT PRIMARY KEY, name TEXT NOT
 CREATE TABLE IF NOT EXISTS email_templates(id TEXT PRIMARY KEY, name TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS marketing_consents(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, contact_id TEXT, channel TEXT NOT NULL DEFAULT 'email', status TEXT NOT NULL DEFAULT 'opt_in', source TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS campaign_recipients(id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, customer_id TEXT NOT NULL, contact_id TEXT, address TEXT, status TEXT NOT NULL DEFAULT 'prepared', reason TEXT, personalized_subject TEXT, personalized_body TEXT, sent_at TEXT, converted_at TEXT, created_at TEXT NOT NULL, UNIQUE(campaign_id,customer_id,contact_id,address));
+CREATE TABLE IF NOT EXISTS campaign_events(id TEXT PRIMARY KEY, recipient_id TEXT NOT NULL, campaign_id TEXT NOT NULL, customer_id TEXT NOT NULL, contact_id TEXT, event_type TEXT NOT NULL, target_url TEXT, ip_hash TEXT, user_agent TEXT, created_at TEXT NOT NULL, FOREIGN KEY(recipient_id) REFERENCES campaign_recipients(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS integrations(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, provider TEXT, base_url TEXT, enabled INTEGER NOT NULL DEFAULT 0, config TEXT NOT NULL DEFAULT '{}', secret_env TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS integration_deliveries(id TEXT PRIMARY KEY, integration_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, status_code INTEGER, response_excerpt TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS attachment_backup_state(integration_id TEXT NOT NULL, document_id TEXT NOT NULL, checksum TEXT, status TEXT NOT NULL, synced_at TEXT, message TEXT, PRIMARY KEY(integration_id,document_id));
@@ -95,6 +96,14 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("CREATE INDEX IF NOT EXISTS idx_campaign_events_recipient ON campaign_events(recipient_id,event_type,created_at)");}catch{}
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN unsubscribed_at TEXT");}catch{}
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN last_clicked_at TEXT");}catch{}
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN first_clicked_at TEXT");}catch{}
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN last_opened_at TEXT");}catch{}
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN first_opened_at TEXT");}catch{}
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN click_count INTEGER NOT NULL DEFAULT 0");}catch{}
+try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN open_count INTEGER NOT NULL DEFAULT 0");}catch{}
 try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0");}catch{}
 try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN send_error TEXT");}catch{}
 try{db.exec("ALTER TABLE campaign_recipients ADD COLUMN provider_message_id TEXT");}catch{}
@@ -588,7 +597,7 @@ function smtpIntegration(){
 function smtpConfig(row){
   if(!row)return null;
   const cfg=parseJSON(row.config,{})||{},host=String(cfg.host||'').trim(),port=Number(cfg.port||(cfg.secure?465:587)),username=String(cfg.username||'').trim(),password=row.secret_env?process.env[row.secret_env]||'':'';
-  return {host,port,secure:!!cfg.secure,username,password,from_name:String(cfg.from_name||companyProfile().name||'TradeFlow').trim(),from_email:String(cfg.from_email||username||'').trim(),reply_to:String(cfg.reply_to||'').trim(),reject_unauthorized:cfg.reject_unauthorized!==false};
+  return {host,port,secure:!!cfg.secure,username,password,from_name:String(cfg.from_name||companyProfile().name||'TradeFlow').trim(),from_email:String(cfg.from_email||username||'').trim(),reply_to:String(cfg.reply_to||'').trim(),reject_unauthorized:cfg.reject_unauthorized!==false,public_base_url:String(cfg.public_base_url||process.env.PUBLIC_BASE_URL||'').trim().replace(/\/$/,''),tracking_enabled:cfg.tracking_enabled!==false};
 }
 function createSmtpTransport(row){
   const cfg=smtpConfig(row);if(!cfg?.host||!cfg.from_email)throw new Error('smtp_config_incomplete');
@@ -597,13 +606,62 @@ function createSmtpTransport(row){
   return {transport,cfg};
 }
 function validEmail(v=''){return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(v).trim());}
-async function deliverEmail(row,{to,subject,text}){
+async function deliverEmail(row,{to,subject,text,html,headers}){
   if(!validEmail(to))throw new Error('invalid_recipient_email');
   const {transport,cfg}=createSmtpTransport(row);
   try{
-    const info=await transport.sendMail({from:{name:cfg.from_name,address:cfg.from_email},to:String(to).trim(),replyTo:cfg.reply_to||undefined,subject:String(subject||'').replace(/[\r\n]+/g,' ').slice(0,998),text:String(text||'')});
+    const info=await transport.sendMail({from:{name:cfg.from_name,address:cfg.from_email},to:String(to).trim(),replyTo:cfg.reply_to||undefined,subject:String(subject||'').replace(/[\r\n]+/g,' ').slice(0,998),text:String(text||''),html:html||undefined,headers:headers||undefined});
     return {message_id:info.messageId||null,accepted:info.accepted||[],rejected:info.rejected||[],response:info.response||''};
   }finally{try{transport.close()}catch{}}
+}
+
+
+function marketingTrackingSig(kind,recipientId,extra=''){
+  return createHmac('sha256',APP_SECRET).update(`${kind}:${recipientId}:${extra}`).digest('base64url').slice(0,32);
+}
+function marketingPublicBase(integration){
+  const cfg=smtpConfig(integration),base=String(cfg?.public_base_url||'').trim().replace(/\/$/,'');
+  return /^https?:\/\//i.test(base)?base:'';
+}
+function trackingIpHash(req){
+  return createHmac('sha256',APP_SECRET).update(String(req.socket.remoteAddress||'unknown')).digest('hex');
+}
+function recordMarketingEvent(recipient,eventType,req,targetUrl=null){
+  if(!recipient)return;
+  db.prepare('INSERT INTO campaign_events(id,recipient_id,campaign_id,customer_id,contact_id,event_type,target_url,ip_hash,user_agent,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)')
+    .run(randomUUID(),recipient.id,recipient.campaign_id,recipient.customer_id,recipient.contact_id||null,eventType,targetUrl||null,trackingIpHash(req),String(req.headers['user-agent']||'').slice(0,500),now());
+}
+function validTrackedDestination(v=''){
+  try{const u=new URL(String(v));return ['http:','https:'].includes(u.protocol)?u.toString():'';}catch{return '';}
+}
+function trackedMarketingLinks(recipient,integration){
+  const base=marketingPublicBase(integration),cfg=smtpConfig(integration);
+  if(!base||cfg?.tracking_enabled===false)return {enabled:false,base:'',open_url:'',unsubscribe_url:''};
+  const openSig=marketingTrackingSig('open',recipient.id),unsubSig=marketingTrackingSig('unsubscribe',recipient.id);
+  return {enabled:true,base,open_url:`${base}/api/marketing/track/open/${recipient.id}?sig=${encodeURIComponent(openSig)}`,unsubscribe_url:`${base}/api/marketing/unsubscribe/${recipient.id}?sig=${encodeURIComponent(unsubSig)}`};
+}
+function buildMarketingMessage(recipient,integration){
+  const body=String(recipient.personalized_body||''),links=trackedMarketingLinks(recipient,integration);
+  const urlRx=/https?:\/\/[^\s<>"']+/gi;
+  let html='',last=0,text=body;
+  if(links.enabled){
+    const replacements=[];
+    for(const m of body.matchAll(urlRx)){
+      let dest=m[0],trail='';while(/[),.;!?]$/.test(dest)){trail=dest.slice(-1)+trail;dest=dest.slice(0,-1);}
+      const safe=validTrackedDestination(dest);if(!safe)continue;
+      const sig=marketingTrackingSig('click',recipient.id,safe);
+      const track=`${links.base}/api/marketing/track/click/${recipient.id}?u=${encodeURIComponent(safe)}&sig=${encodeURIComponent(sig)}`;
+      replacements.push({start:m.index,end:m.index+m[0].length,dest:safe,trail,track});
+    }
+    let cursor=0,textOut='';
+    for(const r of replacements){textOut+=body.slice(cursor,r.start)+r.track+r.trail;cursor=r.end;}textOut+=body.slice(cursor);text=textOut;
+    for(const r of replacements){html+=esc(body.slice(last,r.start)).replace(/\n/g,'<br>')+`<a href="${esc(r.track)}" rel="noopener noreferrer">${esc(r.dest)}</a>${esc(r.trail)}`;last=r.end;}
+    html+=esc(body.slice(last)).replace(/\n/g,'<br>');
+    html+=`<div style="margin-top:24px;padding-top:12px;border-top:1px solid #e5e7eb;font-size:12px;color:#667085">If you no longer wish to receive these emails, <a href="${esc(links.unsubscribe_url)}">unsubscribe here</a>.</div><img src="${esc(links.open_url)}" width="1" height="1" alt="" style="display:block;width:1px;height:1px;border:0" />`;
+    text+=`\n\nUnsubscribe: ${links.unsubscribe_url}`;
+  }else html=esc(body).replace(/\n/g,'<br>');
+  const headers=links.enabled?{'List-Unsubscribe':`<${links.unsubscribe_url}>`,'List-Unsubscribe-Post':'List-Unsubscribe=One-Click'}:undefined;
+  return {text,html,headers,tracking:links};
 }
 
 async function sendMarketingRecipient(recipientId){
@@ -623,7 +681,7 @@ async function sendMarketingRecipient(recipientId){
   const integration=smtpIntegration();if(!integration)throw new Error('smtp_not_configured');
   db.prepare('UPDATE campaign_recipients SET attempt_count=COALESCE(attempt_count,0)+1 WHERE id=?').run(r.id);
   try{
-    const info=await deliverEmail(integration,{to:r.address,subject:r.personalized_subject||r.campaign_name,text:r.personalized_body||''});
+    const msg=buildMarketingMessage(r,integration),info=await deliverEmail(integration,{to:r.address,subject:r.personalized_subject||r.campaign_name,text:msg.text,html:msg.html,headers:msg.headers});
     db.prepare("UPDATE campaign_recipients SET status='sent',sent_at=?,provider_message_id=?,send_error=NULL,reason=NULL WHERE id=?").run(now(),info.message_id,r.id);
     db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)')
       .run(randomUUID(),integration.id,'email.send','success',250,String(info.response||info.message_id||'sent').slice(0,500),now());
@@ -1655,7 +1713,7 @@ const server = http.createServer(async (req,res)=>{
     if(p==='/api/email/status' && req.method==='GET'){
       if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
       const row=smtpIntegration(),cfg=row?smtpConfig(row):null;
-      return json(res,200,{configured:!!row,integration:row?{id:row.id,name:row.name,provider:row.provider,updated_at:row.updated_at}:null,config:cfg?{host:cfg.host,port:cfg.port,secure:cfg.secure,username:cfg.username,from_name:cfg.from_name,from_email:cfg.from_email,reply_to:cfg.reply_to,password_env_configured:!!(row.secret_env&&process.env[row.secret_env])}:null});
+      return json(res,200,{configured:!!row,integration:row?{id:row.id,name:row.name,provider:row.provider,updated_at:row.updated_at}:null,config:cfg?{host:cfg.host,port:cfg.port,secure:cfg.secure,username:cfg.username,from_name:cfg.from_name,from_email:cfg.from_email,reply_to:cfg.reply_to,public_base_url:cfg.public_base_url,tracking_enabled:cfg.tracking_enabled,tracking_ready:!!(cfg.tracking_enabled&&/^https?:\/\//i.test(cfg.public_base_url)),password_env_configured:!!(row.secret_env&&process.env[row.secret_env])}:null});
     }
     if(p==='/api/email/test' && req.method==='POST'){
       if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
@@ -1758,7 +1816,8 @@ const server = http.createServer(async (req,res)=>{
         const rs=db.prepare('SELECT * FROM campaign_recipients WHERE campaign_id=?').all(campaign.id);
         let converted=0,revenue=0;
         for(const r of rs){const o=db.prepare('SELECT COALESCE(SUM(total),0) revenue,COUNT(*) c FROM orders WHERE customer_id=? AND created_at>=?').get(r.customer_id,campaign.created_at);if(Number(o.c)>0){converted++;revenue+=Number(o.revenue||0);if(!r.converted_at)db.prepare('UPDATE campaign_recipients SET converted_at=? WHERE id=?').run(now(),r.id);}}
-        return json(res,200,{total:rs.length,prepared:rs.filter(x=>x.status==='prepared').length,sent:rs.filter(x=>x.status==='sent').length,failed:rs.filter(x=>x.status==='failed').length,skipped:rs.filter(x=>x.status==='skipped').length,converted,revenue,conversion_rate:rs.length?converted/rs.length*100:0});
+        const sentCount=rs.filter(x=>x.status==='sent').length,opened=rs.filter(x=>Number(x.open_count||0)>0).length,clicked=rs.filter(x=>Number(x.click_count||0)>0).length,unsubscribed=rs.filter(x=>!!x.unsubscribed_at).length;
+        return json(res,200,{total:rs.length,prepared:rs.filter(x=>x.status==='prepared').length,sent:sentCount,failed:rs.filter(x=>x.status==='failed').length,skipped:rs.filter(x=>x.status==='skipped').length,opened,clicked,unsubscribed,total_opens:rs.reduce((a,x)=>a+Number(x.open_count||0),0),total_clicks:rs.reduce((a,x)=>a+Number(x.click_count||0),0),open_rate:sentCount?opened/sentCount*100:0,click_rate:sentCount?clicked/sentCount*100:0,click_to_open_rate:opened?clicked/opened*100:0,unsubscribe_rate:sentCount?unsubscribed/sentCount*100:0,converted,revenue,conversion_rate:rs.length?converted/rs.length*100:0,tracking_note:'Open/click signals may include mailbox image proxies or security scanners and are not exact proof of human engagement.'});
       }
       const sendCampaign=p.match(/^\/api\/marketing\/campaigns\/([0-9a-f-]+)\/send$/);
       if(sendCampaign&&req.method==='POST'){
