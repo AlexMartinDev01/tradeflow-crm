@@ -909,15 +909,52 @@ function applyCustomerCustomFieldRules(incoming,role,customerId=null,existing={}
   return merged;
 }
 
+function getPrivacyPolicy(){
+  const row=db.prepare("SELECT value FROM settings WHERE key='privacy_policy'").get();
+  const raw=parseJSON(row?.value,{})||{};
+  return {
+    customer_fields:Array.isArray(raw.customer_fields)?raw.customer_fields:['tax_no','registration_no'],
+    channel_types:Array.isArray(raw.channel_types)?raw.channel_types:['email','phone','whatsapp','wechat','line','telegram','viber','kakaotalk','zalo'],
+    full_roles:Array.isArray(raw.full_roles)?raw.full_roles:['admin','manager','finance'],
+    owner_roles:Array.isArray(raw.owner_roles)?raw.owner_roles:['sales','followup'],
+    export_roles:Array.isArray(raw.export_roles)?raw.export_roles:['admin','manager']
+  };
+}
+function canViewSensitiveCustomer(user,customerId){
+  const policy=getPrivacyPolicy();if(policy.full_roles.includes(user.role))return true;
+  if(policy.owner_roles.includes(user.role)&&customerId)return customerOwnedBy(user,customerId);
+  return false;
+}
+function maskSensitiveValue(kind,value){
+  const v=String(value??'');if(!v)return v;
+  if(kind==='email'||v.includes('@')){const [local,domain='']=v.split('@');return `${local.slice(0,Math.min(2,local.length))}***@${domain}`;}
+  if(['phone','whatsapp','telegram','viber','kakaotalk','zalo','wechat','line'].includes(kind)){const tail=v.replace(/\s/g,'').slice(-4);return `***${tail}`;}
+  if(v.length<=4)return '*'.repeat(v.length);
+  return `${v.slice(0,2)}***${v.slice(-2)}`;
+}
+function canExportCustomers(user){return getPrivacyPolicy().export_roles.includes(user.role);}
+
 function protectRow(key,row,user){
   if(!row)return row; const r={...row};
   if(!['admin','manager'].includes(user.role)){
     if(key==='quotations')delete r.margin_rate;
     if(key==='quotationItems')delete r.cost;
   }
-  if(key==='customers'&&r.custom_fields&&typeof r.custom_fields==='object'){
-    const allowed=new Set(customFieldDefs('customer').filter(d=>customFieldVisible(d,user.role)).map(d=>d.field_key));
-    r.custom_fields=Object.fromEntries(Object.entries(r.custom_fields).filter(([k])=>allowed.has(k)));
+  if(key==='customers'){
+    if(r.custom_fields&&typeof r.custom_fields==='object'){
+      const allowed=new Set(customFieldDefs('customer').filter(d=>customFieldVisible(d,user.role)).map(d=>d.field_key));
+      r.custom_fields=Object.fromEntries(Object.entries(r.custom_fields).filter(([k])=>allowed.has(k)));
+    }
+    if(!canViewSensitiveCustomer(user,r.id)){
+      for(const field of getPrivacyPolicy().customer_fields)if(r[field]!==undefined&&r[field]!==null)r[field]=maskSensitiveValue(field,r[field]);
+      r._sensitive_masked=true;
+    }
+  }
+  if(key==='channels'){
+    const cid=db.prepare('SELECT customer_id FROM contacts WHERE id=?').get(r.contact_id)?.customer_id;
+    if(cid&&!canViewSensitiveCustomer(user,cid)&&getPrivacyPolicy().channel_types.includes(String(r.channel||'').toLowerCase())){
+      r.value=maskSensitiveValue(String(r.channel||'').toLowerCase(),r.value);r._sensitive_masked=true;
+    }
   }
   return r;
 }
@@ -1579,6 +1616,25 @@ const server = http.createServer(async (req,res)=>{
     if(p==='/api/analytics/customers-by-type' && req.method==='GET'){
       const access=customerScopeClause(user,'c'),all=db.prepare(`SELECT c.customer_types FROM customers c WHERE c.deleted_at IS NULL${access.sql}`).all(...access.args);const m={};for(const r of all)for(const t of parseJSON(r.customer_types,[]))m[t]=(m[t]||0)+1;return json(res,200,Object.entries(m).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value));
     }
+    // ---- Privacy masking and export policy ----
+    if(p==='/api/settings/privacy-policy' && req.method==='GET'){
+      return json(res,200,getPrivacyPolicy());
+    }
+    if(p==='/api/settings/privacy-policy' && req.method==='PUT'){
+      if(user.role!=='admin')return json(res,403,{error:'admin_required'});
+      const b=await body(req),validRoles=['admin','manager','sales','followup','finance','readonly'];
+      const cleanList=(v,fallback)=>Array.isArray(v)?[...new Set(v.map(String).filter(Boolean))]:fallback;
+      const policy={
+        customer_fields:cleanList(b.customer_fields,['tax_no','registration_no']),
+        channel_types:cleanList(b.channel_types,[]).map(x=>x.toLowerCase()),
+        full_roles:cleanList(b.full_roles,['admin','manager','finance']).filter(x=>validRoles.includes(x)),
+        owner_roles:cleanList(b.owner_roles,['sales','followup']).filter(x=>validRoles.includes(x)),
+        export_roles:cleanList(b.export_roles,['admin','manager']).filter(x=>validRoles.includes(x))
+      };
+      db.prepare("INSERT INTO settings(key,value,updated_at) VALUES('privacy_policy',?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at").run(JSON.stringify(policy),now());
+      audit(user,'update','privacy_policy','privacy_policy',req,policy);return json(res,200,policy);
+    }
+
     // ---- Auditable exchange rates / currency conversion ----
     if(p==='/api/settings/exchange-rates' && req.method==='GET'){
       const base=currencyCode(url.searchParams.get('base')||''),quote=currencyCode(url.searchParams.get('quote')||'');
@@ -2076,6 +2132,7 @@ const server = http.createServer(async (req,res)=>{
 
     // ---- Customer Excel import / preview / export data ----
     if(p==='/api/customers/import/preview' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
       const b=await body(req), rows=Array.isArray(b.rows)?b.rows.slice(0,2000):[];
       const out=rows.map((row,index)=>{
         const clean={};
@@ -2092,6 +2149,7 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,{rows:out,total:out.length,invalid:out.filter(x=>x.status==='invalid').length,duplicates:out.filter(x=>x.status==='duplicate').length,ready:out.filter(x=>x.status==='ready').length});
     }
     if(p==='/api/customers/import/commit' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
       const b=await body(req), items=Array.isArray(b.items)?b.items.slice(0,2000):[];
       const result={created:0,updated:0,skipped:0,errors:[]};
       db.exec('BEGIN IMMEDIATE');
@@ -2120,13 +2178,16 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,result);
     }
     if(p==='/api/customers/export-data' && req.method==='GET'){
-      const filters=['c.deleted_at IS NULL'],args=[];
+      if(!canExportCustomers(user))return json(res,403,{error:'export_forbidden',message:'当前角色没有客户导出权限'});
+      const filters=['c.deleted_at IS NULL'],args=[],access=customerScopeClause(user,'c');
+      if(access.sql){filters.push(access.sql.replace(/^\s*AND\s*/,'').trim());args.push(...access.args);}
       const exacts=['country','status','grade','source','industry','owner_id'];
       for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`c.${k}=?`);args.push(v);}}
-      const tagId=url.searchParams.get('tag_id'); if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag_id=?)');args.push(tagId);}
-      const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('c.customer_types LIKE ?');args.push(`%"${customerType}"%`);}
+      const tagId=url.searchParams.get('tag_id');if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag_id=?)');args.push(tagId);}
+      const customerType=url.searchParams.get('customer_type');if(customerType){filters.push('c.customer_types LIKE ?');args.push(`%"${customerType}"%`);}
       const rows=db.prepare(`SELECT c.*,u.display_name owner_name FROM customers c LEFT JOIN users u ON u.id=c.owner_id WHERE ${filters.join(' AND ')} ORDER BY c.updated_at DESC LIMIT 5000`).all(...args)
-        .map(r=>decodeRow(r,resourceMap.customers));
+        .map(r=>protectRow('customers',decodeRow(r,resourceMap.customers),user));
+      audit(user,'export','customers',null,req,{count:rows.length,filters:Object.fromEntries(url.searchParams.entries())});
       return json(res,200,rows);
     }
 
