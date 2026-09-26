@@ -111,14 +111,14 @@ onMounted(async()=>{await loadRefs();await load()});
   </div>
   <div class="grid" style="grid-template-columns:2fr repeat(4,1fr)">
     <el-input v-model="filters.keyword" clearable placeholder="客户名 / 官网 / 税号 / 注册号 / 主营业务" @keyup.enter="load" @clear="load"/>
-    <el-select v-model="filters.country" clearable filterable placeholder="国家" @change="load"><el-option v-for="x in countries" :key="x" :label="x" :value="x"/></el-select>
-    <el-select v-model="filters.status" clearable placeholder="状态" @change="load"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select>
-    <el-select v-model="filters.grade" clearable placeholder="等级" @change="load"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select>
-    <el-select v-model="filters.customer_type" clearable placeholder="客户类型" @change="load"><el-option v-for="x in ['Importer','Distributor','Wholesaler','Retailer','Brand','Agent','Manufacturer','End User','E-commerce']" :key="x" :label="x" :value="x"/></el-select>
-    <el-select v-model="filters.owner_id" clearable filterable placeholder="负责人" @change="load"><el-option v-for="x in owners" :key="x.id" :label="x.display_name" :value="x.id"/></el-select>
-    <el-select v-model="filters.tag_id" clearable filterable placeholder="标签" @change="load"><el-option v-for="x in tags" :key="x.id" :label="x.name" :value="x.id"/></el-select>
-    <el-select v-model="filters.source" clearable filterable allow-create placeholder="来源" @change="load"><el-option v-for="x in sources" :key="x" :label="x" :value="x"/></el-select>
-    <el-select v-model="filters.industry" clearable filterable allow-create placeholder="行业" @change="load"><el-option v-for="x in industries" :key="x" :label="x" :value="x"/></el-select>
+    <el-select v-model="filters.country" aria-label="按国家筛选客户" clearable filterable placeholder="国家" @change="load"><el-option v-for="x in countries" :key="x" :label="x" :value="x"/></el-select>
+    <el-select v-model="filters.status" aria-label="按客户状态筛选" clearable placeholder="状态" @change="load"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select>
+    <el-select v-model="filters.grade" aria-label="按客户等级筛选" clearable placeholder="等级" @change="load"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select>
+    <el-select v-model="filters.customer_type" aria-label="按客户类型筛选" clearable placeholder="客户类型" @change="load"><el-option v-for="x in ['Importer','Distributor','Wholesaler','Retailer','Brand','Agent','Manufacturer','End User','E-commerce']" :key="x" :label="x" :value="x"/></el-select>
+    <el-select v-model="filters.owner_id" aria-label="按负责人筛选客户" clearable filterable placeholder="负责人" @change="load"><el-option v-for="x in owners" :key="x.id" :label="x.display_name" :value="x.id"/></el-select>
+    <el-select v-model="filters.tag_id" aria-label="按标签筛选客户" clearable filterable placeholder="标签" @change="load"><el-option v-for="x in tags" :key="x.id" :label="x.name" :value="x.id"/></el-select>
+    <el-select v-model="filters.source" aria-label="按客户来源筛选" clearable filterable allow-create placeholder="来源" @change="load"><el-option v-for="x in sources" :key="x" :label="x" :value="x"/></el-select>
+    <el-select v-model="filters.industry" aria-label="按行业筛选客户" clearable filterable allow-create placeholder="行业" @change="load"><el-option v-for="x in industries" :key="x" :label="x" :value="x"/></el-select>
     <div style="display:flex;gap:8px"><el-button type="primary" plain @click="load">应用筛选</el-button><el-button @click="clearFilters">重置</el-button></div>
   </div>
 </div>
@@ -141,14 +141,14 @@ onMounted(async()=>{await loadRefs();await load()});
 <el-form label-position="top">
   <el-form-item label="作用范围"><el-radio-group v-model="bulk.scope" @change="bulkPreview=null"><el-radio value="selected" :disabled="!selectedRows.length">已勾选客户（{{selectedRows.length}}）</el-radio><el-radio value="filtered">当前完整筛选结果（{{total}}）</el-radio></el-radio-group></el-form-item>
   <div class="grid" style="grid-template-columns:1fr 1fr">
-    <el-form-item label="修改状态"><el-select v-model="bulk.status" clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
-    <el-form-item label="修改等级"><el-select v-model="bulk.grade" clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+    <el-form-item label="修改状态"><el-select v-model="bulk.status" aria-label="批量修改客户状态" clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+    <el-form-item label="修改等级"><el-select v-model="bulk.grade" aria-label="批量修改客户等级" clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
     <el-form-item label="修改来源"><el-input v-model="bulk.source" clearable @input="bulkPreview=null"/></el-form-item>
     <el-form-item label="修改行业"><el-input v-model="bulk.industry" clearable @input="bulkPreview=null"/></el-form-item>
-    <el-form-item v-if="canChangeOwner" label="转移负责人"><el-select v-model="bulk.owner_id" clearable filterable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in owners" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item>
+    <el-form-item v-if="canChangeOwner" label="转移负责人"><el-select v-model="bulk.owner_id" aria-label="批量转移客户负责人" clearable filterable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in owners" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item>
   </div>
-  <el-form-item label="批量添加标签"><el-select v-model="bulk.add_tag_ids" multiple filterable clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in tags" :key="x.id" :label="x.name" :value="x.id"/></el-select></el-form-item>
-  <el-form-item label="批量移除标签"><el-select v-model="bulk.remove_tag_ids" multiple filterable clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in tags" :key="x.id" :label="x.name" :value="x.id"/></el-select></el-form-item>
+  <el-form-item label="批量添加标签"><el-select v-model="bulk.add_tag_ids" aria-label="批量添加客户标签" multiple filterable clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in tags" :key="x.id" :label="x.name" :value="x.id"/></el-select></el-form-item>
+  <el-form-item label="批量移除标签"><el-select v-model="bulk.remove_tag_ids" aria-label="批量移除客户标签" multiple filterable clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in tags" :key="x.id" :label="x.name" :value="x.id"/></el-select></el-form-item>
 </el-form>
 
 <div v-if="bulkPreview" class="card" style="margin-top:12px">
@@ -166,10 +166,10 @@ onMounted(async()=>{await loadRefs();await load()});
   <el-form-item label="国家"><el-input v-model="form.country"/></el-form-item><el-form-item label="城市"><el-input v-model="form.city"/></el-form-item>
   <el-form-item label="官网"><el-input v-model="form.website"/></el-form-item><el-form-item label="行业"><el-input v-model="form.industry"/></el-form-item>
   <el-form-item label="税号 / VAT"><el-input v-model="form.tax_no"/></el-form-item><el-form-item label="注册号"><el-input v-model="form.registration_no"/></el-form-item>
-  <el-form-item label="客户属性"><el-select v-model="form.customer_types" multiple allow-create filterable style="width:100%"><el-option v-for="x in ['Importer','Distributor','Wholesaler','Retailer','Brand','Agent','Manufacturer','End User','E-commerce']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
-  <el-form-item label="客户状态"><el-select v-model="form.status" style="width:100%"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
-  <el-form-item label="等级"><el-select v-model="form.grade" style="width:100%"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
-  <el-form-item label="负责人"><el-select v-model="form.owner_id" filterable style="width:100%"><el-option v-for="x in owners" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item>
+  <el-form-item label="客户属性"><el-select v-model="form.customer_types" aria-label="客户属性" multiple allow-create filterable style="width:100%"><el-option v-for="x in ['Importer','Distributor','Wholesaler','Retailer','Brand','Agent','Manufacturer','End User','E-commerce']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+  <el-form-item label="客户状态"><el-select v-model="form.status" aria-label="客户状态" style="width:100%"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+  <el-form-item label="等级"><el-select v-model="form.grade" aria-label="客户等级" style="width:100%"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+  <el-form-item label="负责人"><el-select v-model="form.owner_id" aria-label="客户负责人" filterable style="width:100%"><el-option v-for="x in owners" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item>
   <el-form-item label="来源"><el-input v-model="form.source"/></el-form-item><el-form-item label="语言"><el-input v-model="form.language"/></el-form-item>
 </div><el-form-item label="主营业务"><el-input v-model="form.business_scope" type="textarea"/></el-form-item></el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" @click="save">查重并保存</el-button></template></el-dialog>
 </AppLayout></template>
