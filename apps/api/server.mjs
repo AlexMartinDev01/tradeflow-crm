@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
-import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHmac, createHash } from 'node:crypto';
+import { randomUUID, randomBytes, scryptSync, timingSafeEqual, createHmac, createHash, createCipheriv, createDecipheriv } from 'node:crypto';
 import { URL } from 'node:url';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,6 +22,7 @@ const schema = `
 CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, display_name TEXT NOT NULL, password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'sales', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS departments(id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, parent_id TEXT, manager_user_id TEXT, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS auth_challenges(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, challenge_hash TEXT UNIQUE NOT NULL, expires_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS customers(id TEXT PRIMARY KEY, name TEXT NOT NULL, english_name TEXT, local_name TEXT, country TEXT, region TEXT, city TEXT, address TEXT, postal_code TEXT, website TEXT, industry TEXT, customer_types TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL DEFAULT 'potential', grade TEXT, source TEXT, timezone TEXT, language TEXT, tax_no TEXT, registration_no TEXT, owner_id TEXT, annual_sales REAL, employee_count INTEGER, business_scope TEXT, service_regions TEXT NOT NULL DEFAULT '[]', notes TEXT, custom_fields TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, deleted_at TEXT, FOREIGN KEY(owner_id) REFERENCES users(id));
 CREATE TABLE IF NOT EXISTS contacts(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, name TEXT NOT NULL, title TEXT, department TEXT, role TEXT, language TEXT, timezone TEXT, is_primary INTEGER NOT NULL DEFAULT 0, is_departed INTEGER NOT NULL DEFAULT 0, birthday TEXT, influence_level TEXT, attitude TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(customer_id) REFERENCES customers(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS contact_channels(id TEXT PRIMARY KEY, contact_id TEXT NOT NULL, channel TEXT NOT NULL, value TEXT NOT NULL, label TEXT, is_primary INTEGER NOT NULL DEFAULT 0, preferred_time TEXT, created_at TEXT NOT NULL, FOREIGN KEY(contact_id) REFERENCES contacts(id) ON DELETE CASCADE);
@@ -89,6 +90,13 @@ CREATE INDEX IF NOT EXISTS idx_orders_customer ON orders(customer_id);
 CREATE INDEX IF NOT EXISTS idx_payments_due ON payments(status, due_at);
 `;
 db.exec(schema);
+try{db.exec("ALTER TABLE users ADD COLUMN totp_last_counter INTEGER NOT NULL DEFAULT -1");}catch{}
+try{db.exec("ALTER TABLE users ADD COLUMN totp_secret_enc TEXT");}catch{}
+try{db.exec("ALTER TABLE users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0");}catch{}
+try{db.exec("ALTER TABLE users ADD COLUMN password_changed_at TEXT");}catch{}
+try{db.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0");}catch{}
+try{db.exec("ALTER TABLE users ADD COLUMN locked_until TEXT");}catch{}
+try{db.exec("ALTER TABLE users ADD COLUMN failed_login_count INTEGER NOT NULL DEFAULT 0");}catch{}
 try{db.exec("ALTER TABLE users ADD COLUMN data_scope TEXT");}catch{}
 try{db.exec("ALTER TABLE users ADD COLUMN department_id TEXT");}catch{}
 try{db.exec("ALTER TABLE products ADD COLUMN declaration_elements TEXT NOT NULL DEFAULT '{}'");}catch{}
@@ -131,10 +139,70 @@ const hashPassword = (password, salt = randomBytes(16).toString('hex')) => `${sa
 const verifyPassword = (password, stored) => { const [salt, h] = stored.split(':'); const a = Buffer.from(h,'hex'); const b = scryptSync(password,salt,64); return a.length===b.length && timingSafeEqual(a,b); };
 const hashToken = token => createHmac('sha256', APP_SECRET).update(token).digest('hex');
 
+function passwordPolicyErrors(password,username=''){
+  const p=String(password||''),errors=[];
+  if(p.length<10)errors.push('至少 10 位');
+  if(!/[a-z]/.test(p))errors.push('至少 1 个小写字母');
+  if(!/[A-Z]/.test(p))errors.push('至少 1 个大写字母');
+  if(!/\d/.test(p))errors.push('至少 1 个数字');
+  if(!/[^A-Za-z0-9]/.test(p))errors.push('至少 1 个特殊字符');
+  if(username&&username.length>=3&&p.toLowerCase().includes(String(username).toLowerCase()))errors.push('不能包含用户名');
+  const weak=['admin@123456','changeme@123','password123!','qwerty123!','123456789a!'];
+  if(weak.includes(p.toLowerCase()))errors.push('不能使用系统默认或常见弱密码');
+  return errors;
+}
+function assertStrongPassword(password,username=''){
+  const errors=passwordPolicyErrors(password,username);if(errors.length){const e=new Error('weak_password');e.details=errors;throw e;}
+}
+function securityKey(){return createHash('sha256').update(APP_SECRET).digest();}
+function encryptSecret(value){
+  const iv=randomBytes(12),cipher=createCipheriv('aes-256-gcm',securityKey(),iv),body=Buffer.concat([cipher.update(String(value),'utf8'),cipher.final()]),tag=cipher.getAuthTag();
+  return [iv,tag,body].map(x=>x.toString('base64url')).join('.');
+}
+function decryptSecret(value){
+  const [ivB64,tagB64,bodyB64]=String(value||'').split('.');if(!ivB64||!tagB64||!bodyB64)return '';
+  const decipher=createDecipheriv('aes-256-gcm',securityKey(),Buffer.from(ivB64,'base64url'));decipher.setAuthTag(Buffer.from(tagB64,'base64url'));
+  return Buffer.concat([decipher.update(Buffer.from(bodyB64,'base64url')),decipher.final()]).toString('utf8');
+}
+const B32='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(buf){
+  let bits=0,value=0,out='';for(const byte of buf){value=(value<<8)|byte;bits+=8;while(bits>=5){out+=B32[(value>>>(bits-5))&31];bits-=5;}}
+  if(bits>0)out+=B32[(value<<(5-bits))&31];return out;
+}
+function base32Decode(text){
+  let bits=0,value=0,out=[];for(const ch of String(text||'').toUpperCase().replace(/=|\s/g,'')){const idx=B32.indexOf(ch);if(idx<0)continue;value=(value<<5)|idx;bits+=5;if(bits>=8){out.push((value>>>(bits-8))&255);bits-=8;}}
+  return Buffer.from(out);
+}
+function totpAt(secret,counter){
+  const key=base32Decode(secret),buf=Buffer.alloc(8);buf.writeBigUInt64BE(BigInt(counter));
+  const h=createHmac('sha1',key).update(buf).digest(),off=h[h.length-1]&15,num=(h.readUInt32BE(off)&0x7fffffff)%1_000_000;
+  return String(num).padStart(6,'0');
+}
+function verifyTotp(secret,code,lastCounter=-1){
+  const input=String(code||'').replace(/\s/g,'');if(!/^\d{6}$/.test(input))return null;
+  const current=Math.floor(Date.now()/1000/30);
+  for(let delta=-1;delta<=1;delta++){const counter=current+delta;if(counter<=Number(lastCounter??-1))continue;const expected=totpAt(secret,counter);if(timingSafeEqual(Buffer.from(expected),Buffer.from(input)))return counter;}
+  return null;
+}
+function sessionUserPayload(u){
+  return {id:u.id,username:u.username,display_name:u.display_name,role:u.role,department_id:u.department_id||null,data_scope:u.data_scope||defaultDataScope(u.role),must_change_password:!!u.must_change_password,two_factor_enabled:!!u.totp_enabled};
+}
+function issueSession(userId){
+  const token=randomBytes(32).toString('base64url'),sid=randomUUID(),exp=new Date(Date.now()+12*3600_000).toISOString();
+  db.prepare('INSERT INTO sessions(id,user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)').run(sid,userId,hashToken(token),exp,now());
+  return {token,expires_at:exp};
+}
+function failLogin(u){
+  const count=Number(u.failed_login_count||0)+1,locked=count>=5?new Date(Date.now()+15*60_000).toISOString():null;
+  db.prepare('UPDATE users SET failed_login_count=?,locked_until=? WHERE id=?').run(locked?0:count,locked,u.id);
+  return {count,locked_until:locked};
+}
+
+
 function seed() {
   const count = db.prepare('SELECT COUNT(*) c FROM users').get().c;
   if (!count) {
-    db.prepare('INSERT INTO users(id,username,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)').run(randomUUID(),'admin','系统管理员',hashPassword('Admin@123456'),'admin',now());
+    db.prepare('INSERT INTO users(id,username,display_name,password_hash,role,must_change_password,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),'admin','系统管理员',hashPassword('Admin@123456'),'admin',1,now());
     const cid = randomUUID();
     db.prepare(`INSERT INTO customers(id,name,english_name,country,city,website,industry,customer_types,status,grade,source,timezone,language,owner_id,business_scope,service_regions,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(cid,'示例国际贸易有限公司','Demo Global Trading Ltd.','Germany','Hamburg','https://example.com','Industrial Equipment',JSON.stringify(['Importer','Distributor']),'following','A','Exhibition','Europe/Berlin','English',db.prepare('SELECT id FROM users LIMIT 1').get().id,'Industrial equipment distribution',JSON.stringify(['Germany','EU']),'系统初始化示例客户',now(),now());
     const contactId = randomUUID();
@@ -524,7 +592,7 @@ async function emitIntegrationEvent(event,payload){
 
 function auth(req){
   const h=req.headers.authorization||'';if(!h.startsWith('Bearer '))return null;const token=h.slice(7),hashed=hashToken(token);
-  const session=db.prepare(`SELECT s.*,u.username,u.display_name,u.role,u.enabled,u.department_id,u.data_scope FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`).get(hashed,now());
+  const session=db.prepare(`SELECT s.*,u.username,u.display_name,u.role,u.enabled,u.department_id,u.data_scope,u.must_change_password,u.totp_enabled,u.password_changed_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`).get(hashed,now());
   if(session&&session.enabled)return session;
   const api=db.prepare("SELECT * FROM api_tokens WHERE token_hash=? AND enabled=1 AND (expires_at IS NULL OR expires_at>?)").get(hashed,now());
   if(api){db.prepare('UPDATE api_tokens SET last_used_at=? WHERE id=?').run(now(),api.id);return {user_id:null,username:`api:${api.name}`,display_name:api.name,role:api.role,enabled:1,department_id:null,data_scope:['admin','manager','finance','readonly'].includes(api.role)?'all':'self',api_token_id:api.id};}
@@ -877,14 +945,84 @@ const server = http.createServer(async (req,res)=>{
     if(!p.startsWith('/api/')) return serveFrontend(req,res,p);
     if(p==='/api/health') return json(res,200,{ok:true,service:'tradeflow-api',time:now()});
     if(p==='/api/auth/login' && req.method==='POST'){
-      const b=await body(req); const u=db.prepare('SELECT * FROM users WHERE username=? AND enabled=1').get(b.username||'');
-      if(!u || !verifyPassword(b.password||'',u.password_hash)) return json(res,401,{error:'invalid_credentials'});
-      const token=randomBytes(32).toString('base64url'), sid=randomUUID(), exp=new Date(Date.now()+12*3600_000).toISOString();
-      db.prepare('INSERT INTO sessions(id,user_id,token_hash,expires_at,created_at) VALUES(?,?,?,?,?)').run(sid,u.id,hashToken(token),exp,now());
-      audit({user_id:u.id},'login','user',u.id,req); return json(res,200,{token,expires_at:exp,user:{id:u.id,username:u.username,display_name:u.display_name,role:u.role,department_id:u.department_id||null,data_scope:u.data_scope||null}});
+      const b=await body(req),username=String(b.username||'').trim(),u=db.prepare('SELECT * FROM users WHERE username=? AND enabled=1').get(username);
+      if(!u)return json(res,401,{error:'invalid_credentials',message:'用户名或密码错误'});
+      if(u.locked_until&&u.locked_until>now())return json(res,423,{error:'account_locked',message:'账号因连续登录失败已临时锁定',locked_until:u.locked_until});
+      if(!verifyPassword(b.password||'',u.password_hash)){
+        const failed=failLogin(u);audit({user_id:u.id},'login_failed','user',u.id,req,{locked_until:failed.locked_until});
+        if(failed.locked_until)return json(res,423,{error:'account_locked',message:'连续失败次数过多，账号已锁定 15 分钟',locked_until:failed.locked_until});
+        return json(res,401,{error:'invalid_credentials',message:`用户名或密码错误，还可尝试 ${Math.max(0,5-failed.count)} 次`});
+      }
+      db.prepare('UPDATE users SET failed_login_count=0,locked_until=NULL WHERE id=?').run(u.id);
+      if(u.totp_enabled){
+        db.prepare('DELETE FROM auth_challenges WHERE user_id=? OR expires_at<?').run(u.id,now());
+        const challenge=randomBytes(32).toString('base64url'),expiresAt=new Date(Date.now()+5*60_000).toISOString();
+        db.prepare('INSERT INTO auth_challenges(id,user_id,challenge_hash,expires_at,attempts,created_at) VALUES(?,?,?,?,?,?)').run(randomUUID(),u.id,hashToken(challenge),expiresAt,0,now());
+        audit({user_id:u.id},'login_password_ok','user',u.id,req,{two_factor_required:true});
+        return json(res,200,{two_factor_required:true,challenge_token:challenge,expires_at:expiresAt,user:{username:u.username,display_name:u.display_name}});
+      }
+      const session=issueSession(u.id);audit({user_id:u.id},'login','user',u.id,req);
+      return json(res,200,{...session,user:sessionUserPayload(u)});
+    }
+    if(p==='/api/auth/2fa/verify' && req.method==='POST'){
+      const b=await body(req),challenge=String(b.challenge_token||''),row=db.prepare('SELECT * FROM auth_challenges WHERE challenge_hash=? AND expires_at>?').get(hashToken(challenge),now());
+      if(!row)return json(res,401,{error:'invalid_challenge',message:'二次验证已过期，请重新登录'});
+      const u=db.prepare('SELECT * FROM users WHERE id=? AND enabled=1').get(row.user_id);if(!u||!u.totp_enabled)return json(res,401,{error:'invalid_challenge'});
+      const counter=verifyTotp(decryptSecret(u.totp_secret_enc),b.code,u.totp_last_counter);
+      if(counter===null){
+        const attempts=Number(row.attempts||0)+1;db.prepare('UPDATE auth_challenges SET attempts=? WHERE id=?').run(attempts,row.id);
+        if(attempts>=5)db.prepare('DELETE FROM auth_challenges WHERE id=?').run(row.id);
+        audit({user_id:u.id},'two_factor_failed','user',u.id,req,{attempts});
+        return json(res,401,{error:'invalid_two_factor_code',message:attempts>=5?'验证失败次数过多，请重新登录':'动态验证码错误'});
+      }
+      db.prepare('DELETE FROM auth_challenges WHERE id=?').run(row.id);db.prepare('UPDATE users SET totp_last_counter=? WHERE id=?').run(counter,u.id);
+      const session=issueSession(u.id);audit({user_id:u.id},'login','user',u.id,req,{two_factor:true});
+      return json(res,200,{...session,user:sessionUserPayload(u)});
     }
     const user=auth(req); if(!user) return json(res,401,{error:'unauthorized'});
-    if(p==='/api/auth/me') return json(res,200,{id:user.user_id,username:user.username,display_name:user.display_name,role:user.role,department_id:user.department_id||null,data_scope:userDataScope(user)});
+    if(p==='/api/auth/me') return json(res,200,{id:user.user_id,username:user.username,display_name:user.display_name,role:user.role,department_id:user.department_id||null,data_scope:userDataScope(user),must_change_password:!!user.must_change_password,two_factor_enabled:!!user.totp_enabled,password_changed_at:user.password_changed_at||null});
+    if(p==='/api/auth/security-status' && req.method==='GET'){
+      if(!user.user_id)return json(res,403,{error:'human_account_required'});
+      const u=db.prepare('SELECT username,must_change_password,password_changed_at,totp_enabled,locked_until,failed_login_count FROM users WHERE id=?').get(user.user_id);
+      return json(res,200,{...u,two_factor_enabled:!!u.totp_enabled,password_policy:{min_length:10,upper:true,lower:true,digit:true,special:true}});
+    }
+    if(p==='/api/auth/change-password' && req.method==='POST'){
+      if(!user.user_id)return json(res,403,{error:'human_account_required'});
+      const b=await body(req),u=db.prepare('SELECT * FROM users WHERE id=?').get(user.user_id);
+      if(!verifyPassword(String(b.current_password||''),u.password_hash))return json(res,400,{error:'current_password_invalid',message:'当前密码错误'});
+      if(String(b.current_password||'')===String(b.new_password||''))return json(res,400,{error:'password_unchanged',message:'新密码不能与当前密码相同'});
+      assertStrongPassword(b.new_password,u.username);
+      db.prepare('UPDATE users SET password_hash=?,must_change_password=0,password_changed_at=?,failed_login_count=0,locked_until=NULL WHERE id=?').run(hashPassword(String(b.new_password)),now(),u.id);
+      const currentHash=hashToken((req.headers.authorization||'').slice(7));db.prepare('DELETE FROM sessions WHERE user_id=? AND token_hash!=?').run(u.id,currentHash);
+      audit(user,'change_password','user',u.id,req);return json(res,200,{ok:true,must_change_password:false,password_changed_at:now()});
+    }
+    if(p==='/api/auth/2fa/setup' && req.method==='POST'){
+      if(!user.user_id)return json(res,403,{error:'human_account_required'});
+      const b=await body(req),u=db.prepare('SELECT * FROM users WHERE id=?').get(user.user_id);
+      if(u.must_change_password)return json(res,409,{error:'must_change_password',message:'请先修改初始/重置密码'});
+      if(!verifyPassword(String(b.current_password||''),u.password_hash))return json(res,400,{error:'current_password_invalid',message:'当前密码错误'});
+      const secret=base32Encode(randomBytes(20)),uri=`otpauth://totp/TradeFlow:${encodeURIComponent(u.username)}?secret=${secret}&issuer=TradeFlow&algorithm=SHA1&digits=6&period=30`;
+      db.prepare('UPDATE users SET totp_secret_enc=?,totp_enabled=0,totp_last_counter=-1 WHERE id=?').run(encryptSecret(secret),u.id);
+      audit(user,'two_factor_setup','user',u.id,req);return json(res,200,{secret,otpauth_uri:uri});
+    }
+    if(p==='/api/auth/2fa/enable' && req.method==='POST'){
+      if(!user.user_id)return json(res,403,{error:'human_account_required'});
+      const b=await body(req),u=db.prepare('SELECT * FROM users WHERE id=?').get(user.user_id);
+      if(!verifyPassword(String(b.current_password||''),u.password_hash))return json(res,400,{error:'current_password_invalid',message:'当前密码错误'});
+      if(!u.totp_secret_enc)return json(res,409,{error:'setup_required',message:'请先生成 2FA 密钥'});
+      const counter=verifyTotp(decryptSecret(u.totp_secret_enc),b.code,-1);if(counter===null)return json(res,400,{error:'invalid_two_factor_code',message:'动态验证码错误'});
+      db.prepare('UPDATE users SET totp_enabled=1,totp_last_counter=? WHERE id=?').run(counter,u.id);audit(user,'two_factor_enabled','user',u.id,req);return json(res,200,{ok:true,two_factor_enabled:true});
+    }
+    if(p==='/api/auth/2fa/disable' && req.method==='POST'){
+      if(!user.user_id)return json(res,403,{error:'human_account_required'});
+      const b=await body(req),u=db.prepare('SELECT * FROM users WHERE id=?').get(user.user_id);
+      if(!verifyPassword(String(b.current_password||''),u.password_hash))return json(res,400,{error:'current_password_invalid',message:'当前密码错误'});
+      if(u.totp_enabled){
+        const counter=verifyTotp(decryptSecret(u.totp_secret_enc),b.code,u.totp_last_counter);if(counter===null)return json(res,400,{error:'invalid_two_factor_code',message:'动态验证码错误'});
+      }
+      db.prepare('UPDATE users SET totp_enabled=0,totp_secret_enc=NULL,totp_last_counter=-1 WHERE id=?').run(u.id);db.prepare('DELETE FROM auth_challenges WHERE user_id=?').run(u.id);
+      audit(user,'two_factor_disabled','user',u.id,req);return json(res,200,{ok:true,two_factor_enabled:false});
+    }
     if(p==='/api/auth/logout' && req.method==='POST'){ const token=(req.headers.authorization||'').slice(7); db.prepare('DELETE FROM sessions WHERE token_hash=?').run(hashToken(token)); return json(res,200,{ok:true}); }
 
     // ---- Departments and data scopes ----
@@ -2370,14 +2508,26 @@ const server = http.createServer(async (req,res)=>{
       if(req.method==='POST' && !id){
         const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ const cf=applyCustomerCustomFieldRules(b.custom_fields||{},user.role,null,{}); payload.custom_fields=JSON.stringify(cf); if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; if(tableCols(table).includes('pool_status'))payload.pool_status='assigned'; } else if(table==='inquiries'){ if(!payload.owner_id) payload.owner_id=chooseInquiryOwner(payload.customer_id,user.user_id); const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } else { const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
         if(table==='inquiries' && !payload.inquiry_no){cols.push('inquiry_no');vals.push(makeNo('INQ'));} if(table==='quotations'&&!payload.quote_no){cols.push('quote_no');vals.push(makeNo('QT'));} if(table==='contracts'&&!payload.contract_no){cols.push('contract_no');vals.push(makeNo('CT'));} if(table==='orders'&&!payload.order_no){cols.push('order_no');vals.push(makeNo('SO'));} if(table==='aftersales'){if(!payload.ticket_no){cols.push('ticket_no');vals.push(makeNo('AS'));} if(!payload.opened_at){const opened=now();cols.push('opened_at');vals.push(opened);if(tableCols(table).includes('sla_due_at')){cols.push('sla_due_at');vals.push(aftersalesSlaDue(payload.severity||'normal',opened));}}}
-        if(table==='users'){ const password=String(b.password||'ChangeMe@123'); cols.push('password_hash');vals.push(hashPassword(password)); if(!payload.data_scope){cols.push('data_scope');vals.push(defaultDataScope(payload.role||'sales'));} }
+        if(table==='users'){
+          const password=String(b.password||'');assertStrongPassword(password,payload.username||'');
+          cols.push('password_hash');vals.push(hashPassword(password));
+          cols.push('must_change_password');vals.push(1);
+          if(!payload.data_scope){cols.push('data_scope');vals.push(defaultDataScope(payload.role||'sales'));}
+        }
         db.prepare(`INSERT INTO ${table}(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`).run(...vals); audit(user,'create',key,newId,req,payload); return json(res,201,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(newId),cfg));
       }
-      if(req.method==='PATCH' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const b=await body(req), payload=sanitizePayload(cfg,b,false); if(table==='customers'&&b.custom_fields!==undefined){const oldRow=db.prepare('SELECT custom_fields FROM customers WHERE id=?').get(id);const merged=applyCustomerCustomFieldRules(b.custom_fields||{},user.role,id,parseJSON(oldRow?.custom_fields,{}));payload.custom_fields=JSON.stringify(merged);} if(table==='customers' && !['admin','manager'].includes(user.role)) delete payload.owner_id; if(table==='users'){ if(b.password) payload.password_hash=hashPassword(String(b.password)); if(payload.data_scope&&!['self','department','all'].includes(payload.data_scope))return json(res,400,{error:'invalid_data_scope'}); } if(tableCols(table).includes('updated_at')) payload.updated_at=now(); const entries=Object.entries(payload); if(!entries.length) return json(res,400,{error:'no_fields'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); db.prepare(`UPDATE ${table} SET ${entries.map(([k])=>`${k}=?`).join(',')} WHERE id=?`).run(...entries.map(([,v])=>v),id); audit(user,'update',key,id,req,payload); return json(res,200,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),cfg)); }
+      if(req.method==='PATCH' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const b=await body(req), payload=sanitizePayload(cfg,b,false); if(table==='customers'&&b.custom_fields!==undefined){const oldRow=db.prepare('SELECT custom_fields FROM customers WHERE id=?').get(id);const merged=applyCustomerCustomFieldRules(b.custom_fields||{},user.role,id,parseJSON(oldRow?.custom_fields,{}));payload.custom_fields=JSON.stringify(merged);} if(table==='customers' && !['admin','manager'].includes(user.role)) delete payload.owner_id; if(table==='users'){
+        if(b.password){
+          const target=db.prepare('SELECT username FROM users WHERE id=?').get(id);assertStrongPassword(String(b.password),target?.username||'');
+          payload.password_hash=hashPassword(String(b.password));payload.must_change_password=1;payload.password_changed_at=null;
+          db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);db.prepare('DELETE FROM auth_challenges WHERE user_id=?').run(id);
+        }
+        if(payload.data_scope&&!['self','department','all'].includes(payload.data_scope))return json(res,400,{error:'invalid_data_scope'});
+      } if(tableCols(table).includes('updated_at')) payload.updated_at=now(); const entries=Object.entries(payload); if(!entries.length) return json(res,400,{error:'no_fields'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); db.prepare(`UPDATE ${table} SET ${entries.map(([k])=>`${k}=?`).join(',')} WHERE id=?`).run(...entries.map(([,v])=>v),id); audit(user,'update',key,id,req,payload); return json(res,200,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),cfg)); }
       if(req.method==='DELETE' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); if(table==='customers') db.prepare('UPDATE customers SET deleted_at=?,updated_at=? WHERE id=?').run(now(),now(),id); else db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); audit(user,'delete',key,id,req); return json(res,200,{ok:true}); }
     }
 
     return json(res,404,{error:'not_found',path:p});
-  } catch(e){ console.error(req.requestId,e); return json(res,400,{error:e.message==='custom_field_validation_failed'?'custom_field_validation_failed':'request_failed',message:e.message,details:e.details||undefined,request_id:req.requestId}); }
+  } catch(e){ console.error(req.requestId,e); const known=['custom_field_validation_failed','weak_password']; const code=known.includes(e.message)?e.message:'request_failed'; return json(res,400,{error:code,message:e.message,details:e.details||undefined,request_id:req.requestId}); }
 });
 server.listen(PORT,HOST,()=>console.log(`TradeFlow API listening on http://${HOST}:${PORT}/api`));
