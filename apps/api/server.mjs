@@ -3241,10 +3241,12 @@ const server = http.createServer(async (req,res)=>{
       db.exec('BEGIN IMMEDIATE');
       try{
         for(let i=0;i<items.length;i++){
-          const item=items[i]||{}, action=item.action||'skip', raw=item.row||{};
+          const item=items[i]||{}, action=String(item.action||'skip'), raw=item.row||{};
           if(action==='skip'){result.skipped++;continue;}
+          if(!['create','update'].includes(action)){result.errors.push({index:i,message:'不支持的导入动作'});continue;}
+          if(action==='create'&&!String(raw.name||'').trim()){result.errors.push({index:i,message:'客户名称必填'});continue;}
           const cfg=resourceMap.customers, payload=sanitizePayload(cfg,raw,action==='create');
-          if(!payload.name){result.errors.push({index:i,message:'客户名称必填'});continue;}
+          if(action==='update'&&!String(payload.name||raw.name||'').trim()){result.errors.push({index:i,message:'客户名称必填'});continue;}
           if(action==='update'){
             const target=String(item.duplicate_id||''); const old=db.prepare('SELECT * FROM customers WHERE id=? AND deleted_at IS NULL').get(target);
             if(!old){result.errors.push({index:i,message:'重复客户不存在'});continue;}
@@ -3821,22 +3823,28 @@ const server = http.createServer(async (req,res)=>{
       const qorder=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/to-order$/);
       if(qorder && req.method==='POST'){
         if(!canWriteResource(user.role,'orders'))return json(res,403,{error:'forbidden'});
-        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qorder[1]);
-        if(!q) return json(res,404,{error:'quotation_not_found'});
-        if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
-        if(!['approved','sent','accepted'].includes(q.status)) return json(res,409,{error:'quotation_not_approved'});
-        const existing=db.prepare('SELECT * FROM orders WHERE quotation_id=? ORDER BY created_at DESC LIMIT 1').get(q.id);
-        if(existing) return json(res,200,existing);
-        const b=await body(req), id=randomUUID();
-        db.prepare('INSERT INTO orders(id,order_no,customer_id,quotation_id,customer_po,status,currency,incoterm,payment_terms,total,requested_delivery,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
-          .run(id,makeNo('SO'),q.customer_id,q.id,b.customer_po||null,'pending',q.currency,q.incoterm,q.payment_terms,q.total,b.requested_delivery||null,b.notes||q.notes||null,now(),now());
-        const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=?').all(q.id);
-        const ins=db.prepare('INSERT INTO order_items(id,order_id,product_name,quantity,unit,unit_price,amount) VALUES(?,?,?,?,?,?,?)');
-        for(const it of items) ins.run(randomUUID(),id,it.product_name,it.quantity,it.unit,it.unit_price,it.amount);
-        db.prepare("UPDATE quotations SET status='accepted',updated_at=? WHERE id=?").run(now(),q.id);
-        if(q.opportunity_id) db.prepare("UPDATE opportunities SET stage='won',probability=100,updated_at=? WHERE id=?").run(now(),q.opportunity_id);
-        audit(user,'convert_quotation_to_order','orders',id,req,{quotation_id:q.id});
-        return json(res,201,{...db.prepare('SELECT * FROM orders WHERE id=?').get(id),items:db.prepare('SELECT * FROM order_items WHERE order_id=?').all(id)});
+        const b=await body(req);
+        let createdId=null,existing=null,q=null;
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qorder[1]);
+          if(!q){db.exec('ROLLBACK');return json(res,404,{error:'quotation_not_found'});}
+          if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id)){db.exec('ROLLBACK');return json(res,403,{error:'forbidden'});}
+          if(!['approved','sent','accepted'].includes(q.status)){db.exec('ROLLBACK');return json(res,409,{error:'quotation_not_approved'});}
+          existing=db.prepare('SELECT * FROM orders WHERE quotation_id=? ORDER BY created_at DESC LIMIT 1').get(q.id);
+          if(existing){db.exec('COMMIT');return json(res,200,existing);}
+          createdId=randomUUID();
+          db.prepare('INSERT INTO orders(id,order_no,customer_id,quotation_id,customer_po,status,currency,incoterm,payment_terms,total,requested_delivery,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+            .run(createdId,makeNo('SO'),q.customer_id,q.id,b.customer_po||null,'pending',q.currency,q.incoterm,q.payment_terms,q.total,b.requested_delivery||null,b.notes||q.notes||null,now(),now());
+          const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=?').all(q.id);
+          const ins=db.prepare('INSERT INTO order_items(id,order_id,product_name,quantity,unit,unit_price,amount) VALUES(?,?,?,?,?,?,?)');
+          for(const it of items) ins.run(randomUUID(),createdId,it.product_name,it.quantity,it.unit,it.unit_price,it.amount);
+          db.prepare("UPDATE quotations SET status='accepted',updated_at=? WHERE id=?").run(now(),q.id);
+          if(q.opportunity_id) db.prepare("UPDATE opportunities SET stage='won',probability=100,updated_at=? WHERE id=?").run(now(),q.opportunity_id);
+          db.exec('COMMIT');
+        }catch(e){try{db.exec('ROLLBACK')}catch{} throw e;}
+        audit(user,'convert_quotation_to_order','orders',createdId,req,{quotation_id:q.id});
+        return json(res,201,{...db.prepare('SELECT * FROM orders WHERE id=?').get(createdId),items:db.prepare('SELECT * FROM order_items WHERE order_id=?').all(createdId)});
       }
 
       const sdel=p.match(/^\/api\/workflows\/samples\/([0-9a-f-]+)\/mark-delivered$/);
