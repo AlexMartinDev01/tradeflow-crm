@@ -3,7 +3,7 @@ import {computed} from 'vue';
 import {modules} from '../config/modules';
 import {useAuth} from '../stores/auth';
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
-const dedicated=['inquiries','opportunities','quotations','samples','products','orders','payments','creditProfiles','shipments','aftersales','campaigns','customFields'];
+const dedicated=['inquiries','opportunities','quotations','samples','products','contracts','orders','payments','creditProfiles','shipments','aftersales','campaigns','customFields'];
 const allowedByRole:any={
   admin:'*',manager:'*',
   sales:['brands','products','contracts','tasks','activities','documents'],
@@ -37,7 +37,7 @@ const showAdmin=computed(()=>['admin','manager'].includes(role.value));
     <router-link class="nav" to="/sales/samples"><span class="label">样品管理</span></router-link>
   </template>
 
-  <div class="nav-group">订单履约</div>
+  <div class="nav-group">订单履约</div><router-link class="nav" to="/contracts"><span class="label">合同管理</span></router-link>
   <router-link class="nav" to="/orders"><span class="label">订单执行</span></router-link>
   <router-link class="nav" to="/shipments"><span class="label">出运执行</span></router-link>
   <router-link class="nav" to="/aftersales"><span class="label">售后与投诉</span></router-link>
