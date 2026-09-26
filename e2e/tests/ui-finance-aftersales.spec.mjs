@@ -111,7 +111,7 @@ test.describe('TradeFlow aftersales knowledge UI loop',()=>{
 
     const statusInput=drawer.getByLabel('工单状态');
     await expect(statusInput).toBeVisible();
-    const statusSelect=drawer.locator('.el-select').filter({has:statusInput});
+    const statusSelect=statusInput.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " el-select ")][1]');
     await statusSelect.click();
     await page.getByRole('option',{name:'resolved',exact:true}).click();
     await expect(drawer.getByRole('button',{name:'更新状态'})).toBeEnabled();
