@@ -49,6 +49,14 @@ CREATE TABLE IF NOT EXISTS shipment_containers(id TEXT PRIMARY KEY, shipment_id 
 CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, category TEXT, name TEXT NOT NULL, version TEXT, url TEXT, content_base64 TEXT, mime_type TEXT, notes TEXT, uploaded_by TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS aftersales(id TEXT PRIMARY KEY, ticket_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, order_id TEXT, category TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'normal', subject TEXT NOT NULL, description TEXT NOT NULL, responsible_team TEXT, solution TEXT, status TEXT NOT NULL DEFAULT 'open', satisfaction INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, segment_rule TEXT, status TEXT NOT NULL DEFAULT 'draft', scheduled_at TEXT, content TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS marketing_segments(id TEXT PRIMARY KEY, name TEXT NOT NULL, rules TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS email_templates(id TEXT PRIMARY KEY, name TEXT NOT NULL, subject TEXT NOT NULL, body TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS marketing_consents(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, contact_id TEXT, channel TEXT NOT NULL DEFAULT 'email', status TEXT NOT NULL DEFAULT 'opt_in', source TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS campaign_recipients(id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, customer_id TEXT NOT NULL, contact_id TEXT, address TEXT, status TEXT NOT NULL DEFAULT 'prepared', reason TEXT, personalized_subject TEXT, personalized_body TEXT, sent_at TEXT, converted_at TEXT, created_at TEXT NOT NULL, UNIQUE(campaign_id,customer_id,contact_id,address));
+CREATE TABLE IF NOT EXISTS integrations(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, provider TEXT, base_url TEXT, enabled INTEGER NOT NULL DEFAULT 0, config TEXT NOT NULL DEFAULT '{}', secret_env TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS integration_deliveries(id TEXT PRIMARY KEY, integration_id TEXT NOT NULL, event TEXT NOT NULL, status TEXT NOT NULL, status_code INTEGER, response_excerpt TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT NOT NULL, token_hash TEXT UNIQUE NOT NULL, role TEXT NOT NULL DEFAULT 'readonly', enabled INTEGER NOT NULL DEFAULT 1, expires_at TEXT, last_used_at TEXT, created_at TEXT NOT NULL);
+
 CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, entity_type TEXT, entity_id TEXT, ip TEXT, request_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_rules(key TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
@@ -74,6 +82,12 @@ try{db.exec("ALTER TABLE documents ADD COLUMN original_name TEXT");}catch{}
 try{db.exec("ALTER TABLE aftersales ADD COLUMN sla_due_at TEXT");}catch{}
 try{db.exec("ALTER TABLE aftersales ADD COLUMN closed_at TEXT");}catch{}
 try{db.exec("ALTER TABLE aftersales ADD COLUMN satisfaction_note TEXT");}catch{}
+try{db.exec("ALTER TABLE campaigns ADD COLUMN subject TEXT");}catch{}
+try{db.exec("ALTER TABLE campaigns ADD COLUMN template_id TEXT");}catch{}
+try{db.exec("ALTER TABLE campaigns ADD COLUMN segment_id TEXT");}catch{}
+try{db.exec("ALTER TABLE campaigns ADD COLUMN sent_at TEXT");}catch{}
+try{db.exec("CREATE INDEX IF NOT EXISTS idx_campaign_recipients_campaign ON campaign_recipients(campaign_id,status)");}catch{}
+try{db.exec("CREATE INDEX IF NOT EXISTS idx_marketing_consents_lookup ON marketing_consents(customer_id,contact_id,channel,updated_at)");}catch{}
 
 const now = () => new Date().toISOString();
 const parseJSON = (v, fallback = null) => { try { return v ? JSON.parse(v) : fallback; } catch { return fallback; } };
@@ -178,7 +192,7 @@ const resourceMap = {
   shipments:{table:'shipments', required:['order_id']},
   documents:{table:'documents', required:['entity_type','entity_id','name']},
   aftersales:{table:'aftersales', required:['customer_id','category','subject','description']},
-  campaigns:{table:'campaigns', required:['name','type']},
+  campaigns:{table:'campaigns', json:['segment_rule'], required:['name','type']},
   users:{table:'users', required:['username','display_name','role']}
 };
 
@@ -215,7 +229,7 @@ function serveFrontend(req,res,pathname){
 }
 
 function json(res, status, data, extraHeaders={}) {
-  res.writeHead(status, {'content-type':'application/json; charset=utf-8','access-control-allow-origin':CORS_ORIGIN,'access-control-allow-headers':'content-type, authorization','access-control-allow-methods':'GET,POST,PATCH,DELETE,OPTIONS',...extraHeaders});
+  res.writeHead(status, {'content-type':'application/json; charset=utf-8','access-control-allow-origin':CORS_ORIGIN,'access-control-allow-headers':'content-type, authorization','access-control-allow-methods':'GET,POST,PUT,PATCH,DELETE,OPTIONS',...extraHeaders});
   res.end(JSON.stringify(data));
 }
 function body(req) { return new Promise((resolve,reject)=>{ let raw=''; req.on('data',c=>{ raw+=c; if(raw.length>25_000_000){reject(new Error('payload too large'));req.destroy();}}); req.on('end',()=>{ if(!raw)return resolve({}); try{resolve(JSON.parse(raw));}catch{reject(new Error('invalid json'));}}); req.on('error',reject);}); }
@@ -223,8 +237,60 @@ function columns(table) { return db.prepare(`PRAGMA table_info(${table})`).all()
 const colCache = new Map();
 function tableCols(table){ if(!colCache.has(table)) colCache.set(table,columns(table)); return colCache.get(table); }
 function decodeRow(row, cfg){ if(!row) return row; const r={...row}; for(const k of (cfg.json||[])) r[k]=parseJSON(r[k], Array.isArray(r[k])?[]: (k==='custom_fields'?{}:[])); if(cfg.table==='users') delete r.password_hash; return r; }
-function auth(req){ const h=req.headers.authorization||''; if(!h.startsWith('Bearer ')) return null; const token=h.slice(7); const s=db.prepare(`SELECT s.*,u.username,u.display_name,u.role,u.enabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`).get(hashToken(token),now()); return s&&s.enabled?s:null; }
-function audit(user, action, entityType, entityId, req, detail={}){ db.prepare('INSERT INTO audit_logs(id,user_id,action,entity_type,entity_id,ip,request_id,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(randomUUID(),user?.user_id||null,action,entityType||null,entityId||null,req.socket.remoteAddress||'',req.requestId||'',JSON.stringify(detail),now()); }
+
+function marketingSegmentCustomers(rules={},user=null,limit=1000){
+  const filters=['c.deleted_at IS NULL',"c.status!='blacklist'"],args=[];
+  const exacts=['country','status','grade','source','industry','owner_id'];
+  for(const k of exacts){if(rules[k]){filters.push(`c.${k}=?`);args.push(rules[k]);}}
+  if(rules.customer_type){filters.push('c.customer_types LIKE ?');args.push(`%"${rules.customer_type}"%`);}
+  if(rules.tag_id){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=c.id AND ct.tag_id=?)');args.push(rules.tag_id);}
+  if(user&&scopedRole(user)){filters.push('c.owner_id=?');args.push(user.user_id);}
+  const customers=db.prepare(`SELECT c.* FROM customers c WHERE ${filters.join(' AND ')} ORDER BY c.updated_at DESC LIMIT ?`).all(...args,Math.min(5000,Math.max(1,Number(limit||1000))));
+  return customers.map(c=>{
+    const contact=db.prepare("SELECT * FROM contacts WHERE customer_id=? AND is_departed=0 ORDER BY is_primary DESC,created_at LIMIT 1").get(c.id)||null;
+    const email=contact?db.prepare("SELECT value FROM contact_channels WHERE contact_id=? AND channel='email' ORDER BY is_primary DESC,created_at LIMIT 1").get(contact.id)?.value||null:null;
+    return {...c,contact_id:contact?.id||null,contact_name:contact?.name||null,email};
+  });
+}
+function marketingConsent(customerId,contactId,channel='email'){
+  const r=db.prepare(`SELECT status FROM marketing_consents WHERE customer_id=? AND channel=? AND (contact_id=? OR contact_id IS NULL) ORDER BY CASE WHEN contact_id=? THEN 0 ELSE 1 END,updated_at DESC LIMIT 1`).get(customerId,channel,contactId||'',contactId||'');
+  return r?.status||'unknown';
+}
+function renderMarketingText(text='',ctx={}){
+  const vars={customer_name:ctx.customer_name||'',contact_name:ctx.contact_name||'',country:ctx.country||'',company_name:companyProfile().name||'',email:ctx.email||''};
+  return String(text).replace(/{{\s*([a-z_]+)\s*}}/gi,(_,k)=>vars[String(k).toLowerCase()]??'');
+}
+async function emitIntegrationEvent(event,payload){
+  const rows=db.prepare("SELECT * FROM integrations WHERE enabled=1 AND type='webhook'").all();
+  for(const row of rows){
+    const cfg=parseJSON(row.config,{})||{},events=Array.isArray(cfg.events)?cfg.events:['*'];
+    if(!events.includes('*')&&!events.includes(event))continue;
+    const secret=row.secret_env?process.env[row.secret_env]||'':'';
+    const bodyText=JSON.stringify({event,time:now(),data:payload});
+    const headers={'content-type':'application/json','user-agent':'TradeFlow-CRM/1.0'};
+    if(secret)headers['x-tradeflow-signature']=createHmac('sha256',secret).update(bodyText).digest('hex');
+    let status='failed',statusCode=null,excerpt='';
+    try{
+      const target=row.base_url||cfg.url;if(!target)throw new Error('missing webhook url');
+      const res=await fetch(target,{method:'POST',headers,body:bodyText,signal:AbortSignal.timeout(7000)});
+      statusCode=res.status;excerpt=(await res.text()).slice(0,500);status=res.ok?'success':'failed';
+    }catch(e){excerpt=String(e?.message||e).slice(0,500);}
+    try{db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),row.id,event,status,statusCode,excerpt,now());}catch{}
+  }
+}
+
+function auth(req){
+  const h=req.headers.authorization||'';if(!h.startsWith('Bearer '))return null;const token=h.slice(7),hashed=hashToken(token);
+  const session=db.prepare(`SELECT s.*,u.username,u.display_name,u.role,u.enabled FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?`).get(hashed,now());
+  if(session&&session.enabled)return session;
+  const api=db.prepare("SELECT * FROM api_tokens WHERE token_hash=? AND enabled=1 AND (expires_at IS NULL OR expires_at>?)").get(hashed,now());
+  if(api){db.prepare('UPDATE api_tokens SET last_used_at=? WHERE id=?').run(now(),api.id);return {user_id:null,username:`api:${api.name}`,display_name:api.name,role:api.role,enabled:1,api_token_id:api.id};}
+  return null;
+}
+function audit(user, action, entityType, entityId, req, detail={}){
+  db.prepare('INSERT INTO audit_logs(id,user_id,action,entity_type,entity_id,ip,request_id,detail,created_at) VALUES(?,?,?,?,?,?,?,?,?)').run(randomUUID(),user?.user_id||null,action,entityType||null,entityId||null,req.socket.remoteAddress||'',req.requestId||'',JSON.stringify(detail),now());
+  const event=`${entityType||'system'}.${action}`;queueMicrotask(()=>emitIntegrationEvent(event,{entity_type:entityType,entity_id:entityId,detail,request_id:req.requestId||null}).catch(()=>{}));
+}
 function makeNo(prefix){ return `${prefix}-${new Date().toISOString().slice(0,10).replaceAll('-','')}-${Math.random().toString(36).slice(2,7).toUpperCase()}`; }
 
 function normalizeCompanyName(v=''){
@@ -433,6 +499,162 @@ const server = http.createServer(async (req,res)=>{
       return json(res,200,db.prepare('SELECT * FROM automation_logs ORDER BY created_at DESC LIMIT 200').all());
     }
 
+
+
+    // ---- Marketing segments, templates, consent and campaign recipients ----
+    if(p==='/api/marketing/segments' && req.method==='GET'){
+      const rows=db.prepare('SELECT * FROM marketing_segments WHERE created_by=? OR is_shared=1 ORDER BY updated_at DESC').all(user.user_id)
+        .map(r=>({...r,rules:parseJSON(r.rules,{})}));return json(res,200,rows);
+    }
+    if(p==='/api/marketing/segments' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req),name=String(b.name||'').trim();if(!name)return json(res,400,{error:'name_required'});
+      const id=randomUUID();db.prepare('INSERT INTO marketing_segments(id,name,rules,is_shared,created_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?)').run(id,name,JSON.stringify(b.rules||{}),b.is_shared?1:0,user.user_id,now(),now());
+      audit(user,'create','marketing_segment',id,req,{name});return json(res,201,{id,name,rules:b.rules||{},is_shared:b.is_shared?1:0});
+    }
+    if(p==='/api/marketing/segments/preview' && req.method==='POST'){
+      const b=await body(req),rows=marketingSegmentCustomers(b.rules||{},user,Number(b.limit||500));
+      return json(res,200,{total:rows.length,data:rows.map(x=>({id:x.id,name:x.name,country:x.country,grade:x.grade,source:x.source,contact_id:x.contact_id,contact_name:x.contact_name,email:x.email,consent:marketingConsent(x.id,x.contact_id,'email')}))});
+    }
+    {
+      const segDel=p.match(/^\/api\/marketing\/segments\/([0-9a-f-]+)$/);
+      if(segDel&&req.method==='DELETE'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const row=db.prepare('SELECT * FROM marketing_segments WHERE id=?').get(segDel[1]);if(!row)return json(res,404,{error:'not_found'});
+        db.prepare('DELETE FROM marketing_segments WHERE id=?').run(row.id);audit(user,'delete','marketing_segment',row.id,req);return json(res,200,{ok:true});
+      }
+    }
+
+    if(p==='/api/marketing/templates' && req.method==='GET')return json(res,200,db.prepare('SELECT * FROM email_templates ORDER BY updated_at DESC').all());
+    if(p==='/api/marketing/templates' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req);if(!b.name||!b.subject||!b.body)return json(res,400,{error:'missing_fields'});
+      const id=randomUUID();db.prepare('INSERT INTO email_templates(id,name,subject,body,created_at,updated_at) VALUES(?,?,?,?,?,?)').run(id,b.name,b.subject,b.body,now(),now());
+      audit(user,'create','email_template',id,req,{name:b.name});return json(res,201,db.prepare('SELECT * FROM email_templates WHERE id=?').get(id));
+    }
+    {
+      const tpl=p.match(/^\/api\/marketing\/templates\/([0-9a-f-]+)$/);
+      if(tpl&&req.method==='PATCH'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const b=await body(req),old=db.prepare('SELECT * FROM email_templates WHERE id=?').get(tpl[1]);if(!old)return json(res,404,{error:'not_found'});
+        db.prepare('UPDATE email_templates SET name=?,subject=?,body=?,updated_at=? WHERE id=?').run(b.name??old.name,b.subject??old.subject,b.body??old.body,now(),old.id);
+        return json(res,200,db.prepare('SELECT * FROM email_templates WHERE id=?').get(old.id));
+      }
+      if(tpl&&req.method==='DELETE'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        db.prepare('DELETE FROM email_templates WHERE id=?').run(tpl[1]);return json(res,200,{ok:true});
+      }
+    }
+
+    if(p==='/api/marketing/consent' && req.method==='POST'){
+      const b=await body(req),customerId=String(b.customer_id||''),contactId=b.contact_id?String(b.contact_id):null,channel=String(b.channel||'email'),status=String(b.status||'opt_out');
+      if(!customerId)return json(res,400,{error:'customer_required'});
+      if(scopedRole(user)&&!customerOwnedBy(user,customerId))return json(res,403,{error:'forbidden'});
+      db.prepare('DELETE FROM marketing_consents WHERE customer_id=? AND channel=? AND ((contact_id IS NULL AND ? IS NULL) OR contact_id=?)').run(customerId,channel,contactId,contactId);
+      const id=randomUUID();db.prepare('INSERT INTO marketing_consents(id,customer_id,contact_id,channel,status,source,updated_at) VALUES(?,?,?,?,?,?,?)').run(id,customerId,contactId,channel,status,b.source||'manual',now());
+      audit(user,'consent','customer',customerId,req,{channel,status,contact_id:contactId});return json(res,200,{id,customer_id:customerId,contact_id:contactId,channel,status});
+    }
+
+    {
+      const prep=p.match(/^\/api\/marketing\/campaigns\/([0-9a-f-]+)\/prepare$/);
+      if(prep&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const campaign=db.prepare('SELECT * FROM campaigns WHERE id=?').get(prep[1]);if(!campaign)return json(res,404,{error:'not_found'});
+        let rules=parseJSON(campaign.segment_rule,{})||{};
+        if(campaign.segment_id){const seg=db.prepare('SELECT * FROM marketing_segments WHERE id=?').get(campaign.segment_id);if(seg)rules=parseJSON(seg.rules,{})||rules;}
+        const template=campaign.template_id?db.prepare('SELECT * FROM email_templates WHERE id=?').get(campaign.template_id):null;
+        const subject=campaign.subject||template?.subject||campaign.name,bodyText=campaign.content||template?.body||'';
+        const candidates=marketingSegmentCustomers(rules,user,5000);
+        db.prepare("DELETE FROM campaign_recipients WHERE campaign_id=? AND status='prepared'").run(campaign.id);
+        const ins=db.prepare('INSERT OR IGNORE INTO campaign_recipients(id,campaign_id,customer_id,contact_id,address,status,reason,personalized_subject,personalized_body,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)');
+        let prepared=0,skipped=0;
+        for(const x of candidates){
+          const consent=marketingConsent(x.id,x.contact_id,'email'),blocked=!x.email||['opt_out','blocked'].includes(consent);
+          const ctx={customer_name:x.name,contact_name:x.contact_name,country:x.country,email:x.email};
+          ins.run(randomUUID(),campaign.id,x.id,x.contact_id,x.email||null,blocked?'skipped':'prepared',!x.email?'no_email':(['opt_out','blocked'].includes(consent)?consent:null),renderMarketingText(subject,ctx),renderMarketingText(bodyText,ctx),now());
+          if(blocked)skipped++;else prepared++;
+        }
+        db.prepare("UPDATE campaigns SET status='prepared',updated_at=? WHERE id=?").run(now(),campaign.id);
+        audit(user,'prepare','campaign',campaign.id,req,{prepared,skipped});return json(res,200,{prepared,skipped,total:candidates.length});
+      }
+      const rec=p.match(/^\/api\/marketing\/campaigns\/([0-9a-f-]+)\/recipients$/);
+      if(rec&&req.method==='GET'){
+        const rows=db.prepare(`SELECT cr.*,c.name customer_name,ct.name contact_name FROM campaign_recipients cr JOIN customers c ON c.id=cr.customer_id LEFT JOIN contacts ct ON ct.id=cr.contact_id WHERE cr.campaign_id=? ORDER BY cr.created_at DESC`).all(rec[1]);
+        return json(res,200,rows);
+      }
+      const stats=p.match(/^\/api\/marketing\/campaigns\/([0-9a-f-]+)\/stats$/);
+      if(stats&&req.method==='GET'){
+        const campaign=db.prepare('SELECT * FROM campaigns WHERE id=?').get(stats[1]);if(!campaign)return json(res,404,{error:'not_found'});
+        const rs=db.prepare('SELECT * FROM campaign_recipients WHERE campaign_id=?').all(campaign.id);
+        let converted=0,revenue=0;
+        for(const r of rs){const o=db.prepare('SELECT COALESCE(SUM(total),0) revenue,COUNT(*) c FROM orders WHERE customer_id=? AND created_at>=?').get(r.customer_id,campaign.created_at);if(Number(o.c)>0){converted++;revenue+=Number(o.revenue||0);if(!r.converted_at)db.prepare('UPDATE campaign_recipients SET converted_at=? WHERE id=?').run(now(),r.id);}}
+        return json(res,200,{total:rs.length,prepared:rs.filter(x=>x.status==='prepared').length,sent:rs.filter(x=>x.status==='sent').length,skipped:rs.filter(x=>x.status==='skipped').length,converted,revenue,conversion_rate:rs.length?converted/rs.length*100:0});
+      }
+      const sent=p.match(/^\/api\/marketing\/recipients\/([0-9a-f-]+)\/mark-sent$/);
+      if(sent&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const r=db.prepare('SELECT * FROM campaign_recipients WHERE id=?').get(sent[1]);if(!r)return json(res,404,{error:'not_found'});
+        db.prepare("UPDATE campaign_recipients SET status='sent',sent_at=? WHERE id=?").run(now(),r.id);return json(res,200,{ok:true});
+      }
+    }
+
+    // ---- Integration configuration, webhook testing and API tokens ----
+    if(p==='/api/integrations' && req.method==='GET'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      return json(res,200,db.prepare('SELECT * FROM integrations ORDER BY updated_at DESC').all().map(r=>({...r,config:parseJSON(r.config,{})})));
+    }
+    if(p==='/api/integrations' && req.method==='POST'){
+      if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req),id=randomUUID();if(!b.name||!b.type)return json(res,400,{error:'missing_fields'});
+      db.prepare('INSERT INTO integrations(id,name,type,provider,base_url,enabled,config,secret_env,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(id,b.name,b.type,b.provider||null,b.base_url||null,b.enabled?1:0,JSON.stringify(b.config||{}),b.secret_env||null,now(),now());
+      audit(user,'create','integration',id,req,{name:b.name,type:b.type});return json(res,201,{id});
+    }
+    {
+      const integ=p.match(/^\/api\/integrations\/([0-9a-f-]+)$/);
+      if(integ&&req.method==='PATCH'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const old=db.prepare('SELECT * FROM integrations WHERE id=?').get(integ[1]);if(!old)return json(res,404,{error:'not_found'});
+        const b=await body(req);db.prepare('UPDATE integrations SET name=?,type=?,provider=?,base_url=?,enabled=?,config=?,secret_env=?,updated_at=? WHERE id=?').run(b.name??old.name,b.type??old.type,b.provider??old.provider,b.base_url??old.base_url,b.enabled===undefined?old.enabled:(b.enabled?1:0),JSON.stringify(b.config??parseJSON(old.config,{})),b.secret_env??old.secret_env,now(),old.id);
+        return json(res,200,{ok:true});
+      }
+      if(integ&&req.method==='DELETE'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        db.prepare('DELETE FROM integrations WHERE id=?').run(integ[1]);return json(res,200,{ok:true});
+      }
+      const test=p.match(/^\/api\/integrations\/([0-9a-f-]+)\/test$/);
+      if(test&&req.method==='POST'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const row=db.prepare('SELECT * FROM integrations WHERE id=?').get(test[1]);if(!row)return json(res,404,{error:'not_found'});
+        if(row.type!=='webhook')return json(res,400,{error:'test_not_supported'});
+        const cfg=parseJSON(row.config,{})||{},secret=row.secret_env?process.env[row.secret_env]||'':'',bodyText=JSON.stringify({event:'integration.test',time:now(),data:{message:'TradeFlow webhook test'}});
+        const headers={'content-type':'application/json','user-agent':'TradeFlow-CRM/1.0'};if(secret)headers['x-tradeflow-signature']=createHmac('sha256',secret).update(bodyText).digest('hex');
+        try{const res=await fetch(row.base_url||cfg.url,{method:'POST',headers,body:bodyText,signal:AbortSignal.timeout(7000)});const txt=(await res.text()).slice(0,500);db.prepare('INSERT INTO integration_deliveries(id,integration_id,event,status,status_code,response_excerpt,created_at) VALUES(?,?,?,?,?,?,?)').run(randomUUID(),row.id,'integration.test',res.ok?'success':'failed',res.status,txt,now());return json(res,res.ok?200:502,{ok:res.ok,status:res.status,response:txt});}
+        catch(e){return json(res,502,{ok:false,error:String(e?.message||e)});}
+      }
+      const deliveries=p.match(/^\/api\/integrations\/([0-9a-f-]+)\/deliveries$/);
+      if(deliveries&&req.method==='GET'){
+        if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
+        return json(res,200,db.prepare('SELECT * FROM integration_deliveries WHERE integration_id=? ORDER BY created_at DESC LIMIT 100').all(deliveries[1]));
+      }
+    }
+
+    if(p==='/api/api-tokens' && req.method==='GET'){
+      if(user.role!=='admin')return json(res,403,{error:'forbidden'});
+      return json(res,200,db.prepare('SELECT id,name,role,enabled,expires_at,last_used_at,created_at FROM api_tokens ORDER BY created_at DESC').all());
+    }
+    if(p==='/api/api-tokens' && req.method==='POST'){
+      if(user.role!=='admin')return json(res,403,{error:'forbidden'});
+      const b=await body(req),raw=`tf_${randomBytes(32).toString('base64url')}`,id=randomUUID(),role=['readonly','finance','sales','manager'].includes(b.role)?b.role:'readonly';
+      db.prepare('INSERT INTO api_tokens(id,name,token_hash,role,enabled,expires_at,created_at) VALUES(?,?,?,?,?,?,?)').run(id,b.name||'API Token',hashToken(raw),role,1,b.expires_at||null,now());
+      audit(user,'create','api_token',id,req,{name:b.name||'API Token',role});return json(res,201,{id,token:raw,name:b.name||'API Token',role,expires_at:b.expires_at||null});
+    }
+    {
+      const tok=p.match(/^\/api\/api-tokens\/([0-9a-f-]+)$/);
+      if(tok&&req.method==='DELETE'){
+        if(user.role!=='admin')return json(res,403,{error:'forbidden'});
+        db.prepare('DELETE FROM api_tokens WHERE id=?').run(tok[1]);audit(user,'revoke','api_token',tok[1],req);return json(res,200,{ok:true});
+      }
+    }
 
     if(p==='/api/analytics/overview' && req.method==='GET'){
       const months=Math.min(24,Math.max(3,Number(url.searchParams.get('months')||12)));
