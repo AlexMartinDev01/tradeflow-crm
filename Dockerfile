@@ -17,7 +17,7 @@ ENV NODE_ENV=production \
 COPY apps/api ./apps/api
 RUN npm install --omit=dev --prefix apps/api
 COPY scripts ./scripts
-RUN node --check apps/api/server.mjs
+RUN node --check apps/api/server.mjs && node --check scripts/seed-full-demo.mjs
 COPY --from=web-builder /src/apps/web/dist ./apps/web/dist
 RUN mkdir -p /data /app/uploads && chown -R node:node /app /data
 USER node
