@@ -16,16 +16,20 @@ jobs:
       TRADEFLOW_SCHEDULER_URL: ${{ secrets.TRADEFLOW_SCHEDULER_URL }}
       TRADEFLOW_SCHEDULER_TOKEN: ${{ secrets.TRADEFLOW_SCHEDULER_TOKEN }}
     steps:
-      - name: Validate scheduler configuration
+      - name: Check scheduler configuration
+        id: scheduler-config
         shell: bash
         run: |
           set -euo pipefail
           if [ -z "${TRADEFLOW_SCHEDULER_URL}" ] || [ -z "${TRADEFLOW_SCHEDULER_TOKEN}" ]; then
-            echo "::error::Missing TRADEFLOW_SCHEDULER_URL or TRADEFLOW_SCHEDULER_TOKEN repository secret."
-            exit 1
+            echo "::warning::TradeFlow scheduler is not configured yet. Set TRADEFLOW_SCHEDULER_URL and TRADEFLOW_SCHEDULER_TOKEN repository secrets when a stable production/Codespaces endpoint is available."
+            echo "configured=false" >> "${GITHUB_OUTPUT}"
+            exit 0
           fi
+          echo "configured=true" >> "${GITHUB_OUTPUT}"
 
       - name: Trigger TradeFlow automation sweep
+        if: steps.scheduler-config.outputs.configured == 'true'
         shell: bash
         run: |
           set -euo pipefail
