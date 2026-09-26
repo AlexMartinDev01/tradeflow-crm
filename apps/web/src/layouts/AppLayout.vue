@@ -3,7 +3,7 @@ import {computed} from 'vue';
 import {modules} from '../config/modules';
 import {useAuth} from '../stores/auth';
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
-const dedicated=['inquiries','opportunities','quotations','samples','orders','payments','creditProfiles','customFields'];
+const dedicated=['inquiries','opportunities','quotations','samples','orders','payments','creditProfiles','shipments','customFields'];
 const allowedByRole:any={
   admin:'*',manager:'*',
   sales:['brands','products','contracts','orders','shipments','aftersales','tasks','activities','documents'],
