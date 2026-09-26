@@ -109,7 +109,8 @@ test.describe('TradeFlow aftersales knowledge UI loop',()=>{
     const solution=drawer.getByLabel('解决方案');
     await expect(solution).toHaveValue(/Firmware parameter mismatch/);
 
-    const statusSelect=drawer.getByRole('combobox').first();
+    const statusSelect=drawer.locator('.toolbar .el-select').first();
+    await expect(statusSelect).toBeVisible();
     await statusSelect.click();
     await page.getByRole('option',{name:'resolved',exact:true}).click();
     await expect(page.getByText('工单状态已更新')).toBeVisible();
