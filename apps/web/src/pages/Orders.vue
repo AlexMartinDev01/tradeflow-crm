@@ -4,7 +4,8 @@ import {ElMessage,ElMessageBox} from 'element-plus';
 import AppLayout from '../layouts/AppLayout.vue';
 import {api} from '../api/client';
 
-const rows=ref<any[]>([]),customers=ref<any[]>([]),detail=ref<any>(null),drawer=ref(false),itemDialog=ref(false),loading=ref(false);
+const rows=ref<any[]>([]),customers=ref<any[]>([]),detail=ref<any>(null),drawer=ref(false),itemDialog=ref(false),paymentPlanDialog=ref(false),loading=ref(false);
+const paymentPlan=reactive<any>({deposit_percent:30,deposit_due:new Date().toISOString().slice(0,10),balance_due:''});
 const item=reactive<any>({product_id:'',product_name:'',quantity:1,unit:'pcs',unit_price:0,amount:0,delivery_date:''});
 const customerMap=computed(()=>Object.fromEntries(customers.value.map(x=>[x.id,x.name])));
 const statuses=['pending','confirmed','production','ready','partial_shipped','shipped','partial_delivered','completed','cancelled'];
@@ -15,6 +16,7 @@ async function saveHeader(){const p={customer_po:detail.value.customer_po,incote
 async function changeStatus(v:string){await api.post(`/workflows/orders/${detail.value.id}/status`,{status:v});await refresh();ElMessage.success('订单状态已更新')}
 async function addItem(){if(!item.product_name.trim())return ElMessage.warning('请输入产品名称');item.amount=Number(item.quantity||0)*Number(item.unit_price||0);await api.post('/orderItems',{...item,order_id:detail.value.id});itemDialog.value=false;Object.assign(item,{product_id:'',product_name:'',quantity:1,unit:'pcs',unit_price:0,amount:0,delivery_date:''});await api.post(`/workflows/orders/${detail.value.id}/recalculate`,{});await refresh()}
 async function removeItem(r:any){await ElMessageBox.confirm('确认删除该订单明细？','确认');await api.delete(`/orderItems/${r.id}`);await api.post(`/workflows/orders/${detail.value.id}/recalculate`,{});await refresh()}
+async function createPaymentPlan(){try{await api.post(`/workflows/orders/${detail.value.id}/payment-plan`,paymentPlan);paymentPlanDialog.value=false;await refresh();ElMessage.success('定金/尾款计划已生成')}catch(e:any){ElMessage.error(e.response?.data?.error==='payment_plan_exists'?'该订单已经存在收款计划':'生成失败')}}
 onMounted(load);
 </script>
 
@@ -29,7 +31,7 @@ onMounted(load);
 
 <el-drawer v-model="drawer" size="82%" title="订单执行详情">
 <template v-if="detail">
-<div class="toolbar"><div><h3 style="margin:0">{{detail.order_no}}</h3><span class="muted">{{detail.customer_name}} · {{detail.currency}} {{Number(detail.total||0).toLocaleString()}}</span></div><el-select v-model="detail.status" style="width:180px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select></div>
+<div class="toolbar"><div><h3 style="margin:0">{{detail.order_no}}</h3><span class="muted">{{detail.customer_name}} · {{detail.currency}} {{Number(detail.total||0).toLocaleString()}}</span></div><div style="display:flex;gap:8px"><el-button @click="paymentPlanDialog=true">生成收款计划</el-button><el-select v-model="detail.status" style="width:180px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select></div></div>
 
 <div class="card" style="margin-bottom:16px"><div class="grid" style="grid-template-columns:repeat(4,1fr)">
 <el-form-item label="客户PO"><el-input v-model="detail.customer_po"/></el-form-item><el-form-item label="Incoterm"><el-input v-model="detail.incoterm"/></el-form-item>
@@ -54,4 +56,5 @@ onMounted(load);
 <el-form-item label="单位"><el-input v-model="item.unit"/></el-form-item><el-form-item label="单价"><el-input v-model.number="item.unit_price" type="number"/></el-form-item>
 <el-form-item label="计划交期"><el-input v-model="item.delivery_date" type="date"/></el-form-item>
 </div></el-form><template #footer><el-button @click="itemDialog=false">取消</el-button><el-button type="primary" @click="addItem">添加并重算</el-button></template></el-dialog>
+<el-dialog v-model="paymentPlanDialog" title="生成定金/尾款计划" width="520"><el-form label-position="top"><el-form-item label="定金比例 %"><el-input-number v-model="paymentPlan.deposit_percent" :min="0" :max="100"/></el-form-item><el-form-item label="定金到期日"><el-input v-model="paymentPlan.deposit_due" type="date"/></el-form-item><el-form-item label="尾款到期日"><el-input v-model="paymentPlan.balance_due" type="date"/></el-form-item></el-form><template #footer><el-button @click="paymentPlanDialog=false">取消</el-button><el-button type="primary" @click="createPaymentPlan">生成计划</el-button></template></el-dialog>
 </AppLayout></template>
