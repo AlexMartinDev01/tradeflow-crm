@@ -5,26 +5,26 @@ import {useRouter} from 'vue-router';
 import AppLayout from '../layouts/AppLayout.vue';
 import {api} from '../api/client';
 
-const rows=ref<any[]>([]),total=ref(0),dialog=ref(false),loading=ref(false),saveViewDialog=ref(false),router=useRouter();
-const owners=ref<any[]>([]),tags=ref<any[]>([]),views=ref<any[]>([]),me=ref<any>(null),viewName=ref('');
+const rows=ref<any[]>([]),total=ref(0),dialog=ref(false),loading=ref(false),saveViewDialog=ref(false),bulkDialog=ref(false),bulkLoading=ref(false),router=useRouter();
+const owners=ref<any[]>([]),tags=ref<any[]>([]),views=ref<any[]>([]),me=ref<any>(null),viewName=ref(''),selectedRows=ref<any[]>([]),bulkPreview=ref<any>(null);
 const filters=reactive<any>({keyword:'',country:'',status:'',grade:'',owner_id:'',tag_id:'',source:'',industry:'',customer_type:''});
 const form=reactive<any>({name:'',english_name:'',country:'',city:'',website:'',industry:'',customer_types:['Importer'],status:'potential',grade:'B',source:'',language:'English',timezone:'',business_scope:'',tax_no:'',registration_no:'',owner_id:''});
+const bulk=reactive<any>({scope:'selected',status:'',grade:'',source:'',industry:'',owner_id:'',add_tag_ids:[],remove_tag_ids:[]});
 
 const countries=computed(()=>[...new Set(rows.value.map(x=>x.country).filter(Boolean))].sort());
 const sources=computed(()=>[...new Set(rows.value.map(x=>x.source).filter(Boolean))].sort());
 const industries=computed(()=>[...new Set(rows.value.map(x=>x.industry).filter(Boolean))].sort());
 const ownerMap=computed(()=>Object.fromEntries(owners.value.map(x=>[x.id,x.display_name])));
-const visibleRows=computed(()=>rows.value.filter(r=>{
-  const k=filters.keyword.trim().toLowerCase();
-  return !k||[r.name,r.english_name,r.website,r.tax_no,r.registration_no,r.business_scope].some((v:any)=>String(v||'').toLowerCase().includes(k));
-}));
+const canBulk=computed(()=>['admin','manager','sales','followup'].includes(me.value?.role));
+const canChangeOwner=computed(()=>['admin','manager'].includes(me.value?.role));
 
 function queryParams(){
   const p:any={size:200};
-  for(const k of ['country','status','grade','owner_id','tag_id','source','industry','customer_type']) if(filters[k])p[k]=filters[k];
+  for(const k of ['keyword','country','status','grade','owner_id','tag_id','source','industry','customer_type']) if(filters[k])p[k]=filters[k];
   return p;
 }
-async function load(){loading.value=true;try{const r=await api.get('/customers',{params:queryParams()});rows.value=r.data.data;total.value=r.data.total}finally{loading.value=false}}
+function filterPayload(){const p:any={};for(const k of ['keyword','country','status','grade','owner_id','tag_id','source','industry','customer_type'])if(filters[k])p[k]=filters[k];return p}
+async function load(){loading.value=true;try{const r=await api.get('/customers',{params:queryParams()});rows.value=r.data.data;total.value=r.data.total;selectedRows.value=[]}finally{loading.value=false}}
 async function loadRefs(){
   me.value=(await api.get('/auth/me')).data;
   owners.value=(await api.get('/users/lookup')).data;
@@ -47,16 +47,62 @@ function clearFilters(){Object.assign(filters,{keyword:'',country:'',status:'',g
 function openCustomer(r:any){router.push(`/customers/${r.id}`)}
 async function saveView(){
   if(!viewName.value.trim())return ElMessage.warning('请输入视图名称');
-  const f:any={}; for(const [k,v] of Object.entries(filters)) if(v)f[k]=v;
-  await api.post('/views',{name:viewName.value,entity_type:'customers',filters:f}); viewName.value=''; saveViewDialog.value=false; await loadRefs(); ElMessage.success('筛选视图已保存');
+  const f:any={};for(const [k,v] of Object.entries(filters))if(v)f[k]=v;
+  await api.post('/views',{name:viewName.value,entity_type:'customers',filters:f});viewName.value='';saveViewDialog.value=false;await loadRefs();ElMessage.success('筛选视图已保存');
 }
-async function applyView(v:any){clearFilters();Object.assign(filters,v.filters||{});await load()}
+async function applyView(v:any){Object.assign(filters,{keyword:'',country:'',status:'',grade:'',owner_id:'',tag_id:'',source:'',industry:'',customer_type:'',...(v.filters||{})});await load()}
 async function deleteView(v:any){await ElMessageBox.confirm(`删除视图“${v.name}”？`,'确认');await api.delete(`/views/${v.id}`);await loadRefs()}
+function selectionChanged(v:any[]){selectedRows.value=v}
+function resetBulk(){
+  Object.assign(bulk,{scope:selectedRows.value.length?'selected':'filtered',status:'',grade:'',source:'',industry:'',owner_id:'',add_tag_ids:[],remove_tag_ids:[]});
+  bulkPreview.value=null;
+}
+function openBulk(){resetBulk();bulkDialog.value=true}
+function bulkOperations(){
+  const set:any={};
+  for(const k of ['status','grade','source','industry'])if(bulk[k])set[k]=bulk[k];
+  if(canChangeOwner.value&&bulk.owner_id)set.owner_id=bulk.owner_id;
+  const ops:any={set,add_tag_ids:[...bulk.add_tag_ids],remove_tag_ids:[...bulk.remove_tag_ids]};
+  if(!Object.keys(set).length&&!ops.add_tag_ids.length&&!ops.remove_tag_ids.length)return null;
+  return ops;
+}
+async function previewBulk(){
+  const operations=bulkOperations();if(!operations)return ElMessage.warning('请至少选择一项需要批量修改的内容');
+  if(bulk.scope==='selected'&&!selectedRows.value.length)return ElMessage.warning('请先勾选客户');
+  bulkLoading.value=true;
+  try{
+    const payload:any={operations};
+    if(bulk.scope==='selected')payload.ids=selectedRows.value.map(x=>x.id);else payload.filters=filterPayload();
+    bulkPreview.value=(await api.post('/customers/bulk/preview',payload)).data;
+  }finally{bulkLoading.value=false}
+}
+async function applyBulk(){
+  if(!bulkPreview.value?.preview_id)return;
+  await ElMessageBox.confirm(`即将修改 ${bulkPreview.value.count} 个客户。系统会再次校验数据范围，确认继续？`,'确认批量修改',{type:'warning',confirmButtonText:'确认执行'});
+  bulkLoading.value=true;
+  try{
+    const {data}=await api.post('/customers/bulk/apply',{preview_id:bulkPreview.value.preview_id});
+    ElMessage.success(`已完成 ${data.count} 个客户的批量修改`);bulkDialog.value=false;bulkPreview.value=null;await load();
+  }catch(e:any){
+    const code=e.response?.data?.error;
+    if(code==='bulk_preview_expired')ElMessage.error('预览已超过 10 分钟，请重新预览');
+    else if(code==='bulk_permission_or_data_changed')ElMessage.error('数据或权限已发生变化，请重新预览');
+    else throw e;
+  }finally{bulkLoading.value=false}
+}
 onMounted(async()=>{await loadRefs();await load()});
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">客户360°</h2><span class="muted">高级筛选、查重、防撞单和客户归属 · 共 {{total}} 个客户</span></div><div style="display:flex;gap:8px"><el-button v-if="['admin','manager'].includes(me?.role)" @click="router.push('/recycle-bin/customers')">回收站</el-button><el-button type="primary" @click="dialog=true">新增客户</el-button></div></div>
+<div class="toolbar">
+  <div><h2 style="margin:0">客户360°</h2><span class="muted">高级筛选、查重、防撞单、批量治理 · 当前条件共 {{total}} 个客户</span></div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap">
+    <el-button @click="router.push('/data-quality')">数据质量</el-button>
+    <el-button v-if="canBulk" @click="openBulk">批量操作<span v-if="selectedRows.length">（已选 {{selectedRows.length}}）</span></el-button>
+    <el-button v-if="['admin','manager'].includes(me?.role)" @click="router.push('/recycle-bin/customers')">回收站</el-button>
+    <el-button type="primary" @click="dialog=true">新增客户</el-button>
+  </div>
+</div>
 
 <div class="card" style="margin-bottom:16px">
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">
@@ -64,7 +110,7 @@ onMounted(async()=>{await loadRefs();await load()});
     <el-button link type="primary" @click="saveViewDialog=true">+ 保存当前筛选</el-button>
   </div>
   <div class="grid" style="grid-template-columns:2fr repeat(4,1fr)">
-    <el-input v-model="filters.keyword" clearable placeholder="客户名 / 官网 / 税号 / 注册号"/>
+    <el-input v-model="filters.keyword" clearable placeholder="客户名 / 官网 / 税号 / 注册号 / 主营业务" @keyup.enter="load" @clear="load"/>
     <el-select v-model="filters.country" clearable filterable placeholder="国家" @change="load"><el-option v-for="x in countries" :key="x" :label="x" :value="x"/></el-select>
     <el-select v-model="filters.status" clearable placeholder="状态" @change="load"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select>
     <el-select v-model="filters.grade" clearable placeholder="等级" @change="load"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select>
@@ -77,7 +123,8 @@ onMounted(async()=>{await loadRefs();await load()});
   </div>
 </div>
 
-<div class="card"><el-table v-loading="loading" :data="visibleRows" @row-dblclick="openCustomer">
+<div class="card"><el-table v-loading="loading" :data="rows" @selection-change="selectionChanged" @row-dblclick="openCustomer">
+  <el-table-column v-if="canBulk" type="selection" width="48"/>
   <el-table-column prop="name" label="客户名称" min-width="220"><template #default="s"><b>{{s.row.name}}</b><div class="muted" style="font-size:12px">{{s.row.english_name||''}}</div></template></el-table-column>
   <el-table-column prop="country" label="国家" width="120"/><el-table-column prop="industry" label="行业" min-width="140"/>
   <el-table-column label="属性" min-width="180"><template #default="s"><el-tag v-for="x in s.row.customer_types" :key="x" size="small" style="margin:2px 4px 2px 0">{{x}}</el-tag></template></el-table-column>
@@ -85,7 +132,32 @@ onMounted(async()=>{await loadRefs();await load()});
   <el-table-column prop="grade" label="等级" width="70"/><el-table-column prop="source" label="来源" width="120"/>
   <el-table-column label="负责人" width="120"><template #default="s">{{ownerMap[s.row.owner_id]||'未分配'}}</template></el-table-column>
   <el-table-column label="操作" width="100" fixed="right"><template #default="s"><el-button link type="primary" @click="openCustomer(s.row)">进入360°</el-button></template></el-table-column>
-</el-table></div>
+</el-table>
+<el-alert v-if="total>rows.length" type="info" :closable="false" :title="`当前条件共 ${total} 个客户，列表展示前 ${rows.length} 条；“按当前筛选批量操作”会由后端作用于完整筛选结果（最多 5000 条），不是只处理当前页面。`" style="margin-top:12px"/>
+</div>
+
+<el-dialog v-model="bulkDialog" title="客户批量操作" width="780">
+<el-alert type="warning" :closable="false" title="批量修改采用“预览快照 → 确认执行”两阶段。预览 10 分钟内有效，执行时后端会再次校验权限和客户范围。" style="margin-bottom:14px"/>
+<el-form label-position="top">
+  <el-form-item label="作用范围"><el-radio-group v-model="bulk.scope" @change="bulkPreview=null"><el-radio value="selected" :disabled="!selectedRows.length">已勾选客户（{{selectedRows.length}}）</el-radio><el-radio value="filtered">当前完整筛选结果（{{total}}）</el-radio></el-radio-group></el-form-item>
+  <div class="grid" style="grid-template-columns:1fr 1fr">
+    <el-form-item label="修改状态"><el-select v-model="bulk.status" clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost','blacklist']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+    <el-form-item label="修改等级"><el-select v-model="bulk.grade" clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+    <el-form-item label="修改来源"><el-input v-model="bulk.source" clearable @input="bulkPreview=null"/></el-form-item>
+    <el-form-item label="修改行业"><el-input v-model="bulk.industry" clearable @input="bulkPreview=null"/></el-form-item>
+    <el-form-item v-if="canChangeOwner" label="转移负责人"><el-select v-model="bulk.owner_id" clearable filterable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in owners" :key="x.id" :label="`${x.display_name} · ${x.role}`" :value="x.id"/></el-select></el-form-item>
+  </div>
+  <el-form-item label="批量添加标签"><el-select v-model="bulk.add_tag_ids" multiple filterable clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in tags" :key="x.id" :label="x.name" :value="x.id"/></el-select></el-form-item>
+  <el-form-item label="批量移除标签"><el-select v-model="bulk.remove_tag_ids" multiple filterable clearable style="width:100%" @change="bulkPreview=null"><el-option v-for="x in tags" :key="x.id" :label="x.name" :value="x.id"/></el-select></el-form-item>
+</el-form>
+
+<div v-if="bulkPreview" class="card" style="margin-top:12px">
+  <div class="toolbar"><div><b>预览确认</b><div class="muted">将影响 {{bulkPreview.count}} 个客户 · 有效至 {{bulkPreview.expires_at}}</div></div><el-tag type="warning">尚未执行</el-tag></div>
+  <el-table :data="bulkPreview.sample" size="small" max-height="260"><el-table-column prop="name" label="样例客户" min-width="180"/><el-table-column prop="country" label="国家"/><el-table-column prop="status" label="原状态"/><el-table-column prop="grade" label="原等级"/><el-table-column prop="owner_name" label="原负责人"/></el-table>
+  <div v-if="bulkPreview.count>bulkPreview.sample.length" class="muted" style="margin-top:8px">仅展示前 {{bulkPreview.sample.length}} 条样例，实际执行以快照中的 {{bulkPreview.count}} 个客户 ID 为准。</div>
+</div>
+<template #footer><el-button @click="bulkDialog=false">取消</el-button><el-button :loading="bulkLoading" @click="previewBulk">重新预览</el-button><el-button type="primary" :disabled="!bulkPreview" :loading="bulkLoading" @click="applyBulk">确认执行</el-button></template>
+</el-dialog>
 
 <el-dialog v-model="saveViewDialog" title="保存筛选视图" width="480"><el-form label-position="top"><el-form-item label="视图名称"><el-input v-model="viewName" placeholder="例如：德国A类重点客户"/></el-form-item></el-form><template #footer><el-button @click="saveViewDialog=false">取消</el-button><el-button type="primary" @click="saveView">保存</el-button></template></el-dialog>
 
