@@ -206,6 +206,53 @@ function sanitizePayload(cfg, payload, isCreate=false){
   return out;
 }
 
+const writePolicy={
+  admin:'*',manager:'*',
+  sales:new Set(['customers','contacts','channels','customerBrands','activities','tasks','inquiries','opportunities','quotations','quotationItems','samples','contracts','orders','orderItems','shipments','documents','aftersales']),
+  followup:new Set(['customers','contacts','channels','activities','tasks','inquiries','samples','aftersales']),
+  finance:new Set(['payments','creditProfiles']),
+  readonly:new Set()
+};
+function canWriteResource(role,key){
+  const p=writePolicy[role]??new Set(); return p==='*'||p.has(key);
+}
+function scopedRole(user){return ['sales','followup'].includes(user.role);}
+function customerOwnedBy(user,customerId){
+  if(!customerId||!scopedRole(user)) return true;
+  return !!db.prepare('SELECT 1 ok FROM customers WHERE id=? AND owner_id=? AND deleted_at IS NULL').get(customerId,user.user_id);
+}
+function resourceCustomerId(key,payloadOrId,isId=false){
+  try{
+    if(!isId){
+      const p=payloadOrId||{};
+      if(p.customer_id)return p.customer_id;
+      if(key==='channels'&&p.contact_id)return db.prepare('SELECT customer_id FROM contacts WHERE id=?').get(p.contact_id)?.customer_id;
+      if(key==='quotationItems'&&p.quotation_id)return db.prepare('SELECT customer_id FROM quotations WHERE id=?').get(p.quotation_id)?.customer_id;
+      if(key==='orderItems'&&p.order_id)return db.prepare('SELECT customer_id FROM orders WHERE id=?').get(p.order_id)?.customer_id;
+      if(key==='shipments'&&p.order_id)return db.prepare('SELECT customer_id FROM orders WHERE id=?').get(p.order_id)?.customer_id;
+      if(key==='documents'&&p.entity_type==='customer')return p.entity_id;
+      if(key==='documents'&&p.entity_type==='order')return db.prepare('SELECT customer_id FROM orders WHERE id=?').get(p.entity_id)?.customer_id;
+      return null;
+    }
+    const id=payloadOrId;
+    const cfg=resourceMap[key]; if(!cfg)return null; const table=cfg.table;
+    if(tableCols(table).includes('customer_id'))return db.prepare(`SELECT customer_id FROM ${table} WHERE id=?`).get(id)?.customer_id;
+    if(key==='channels')return db.prepare('SELECT c.customer_id FROM contact_channels cc JOIN contacts c ON c.id=cc.contact_id WHERE cc.id=?').get(id)?.customer_id;
+    if(key==='quotationItems')return db.prepare('SELECT q.customer_id FROM quotation_items qi JOIN quotations q ON q.id=qi.quotation_id WHERE qi.id=?').get(id)?.customer_id;
+    if(key==='orderItems')return db.prepare('SELECT o.customer_id FROM order_items oi JOIN orders o ON o.id=oi.order_id WHERE oi.id=?').get(id)?.customer_id;
+    if(key==='shipments')return db.prepare('SELECT o.customer_id FROM shipments s JOIN orders o ON o.id=s.order_id WHERE s.id=?').get(id)?.customer_id;
+    return null;
+  }catch{return null;}
+}
+function protectRow(key,row,user){
+  if(!row)return row; const r={...row};
+  if(!['admin','manager'].includes(user.role)){
+    if(key==='quotations')delete r.margin_rate;
+    if(key==='quotationItems')delete r.cost;
+  }
+  return r;
+}
+
 const rate = new Map();
 function rateLimit(req){ const ip=req.socket.remoteAddress||'x', t=Date.now(), w=60_000; const x=rate.get(ip)||{start:t,count:0}; if(t-x.start>w){x.start=t;x.count=0;} x.count++; rate.set(ip,x); return x.count<=300; }
 
@@ -440,7 +487,7 @@ const server = http.createServer(async (req,res)=>{
         const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qfull[1]);
         if(!q) return json(res,404,{error:'quotation_not_found'});
         const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=? ORDER BY rowid').all(q.id);
-        return json(res,200,{...q,items});
+        const safeQ=protectRow('quotations',q,user); const safeItems=items.map(x=>protectRow('quotationItems',x,user)); return json(res,200,{...safeQ,items:safeItems});
       }
 
       const qrecalc=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/recalculate$/);
@@ -529,21 +576,23 @@ const server = http.createServer(async (req,res)=>{
     if(m && resourceMap[m[1]]){
       const key=m[1], id=m[2], cfg=resourceMap[key], table=cfg.table;
       if(key==='users' && user.role!=='admin') return json(res,403,{error:'forbidden'});
+      if(key==='customFields' && !['admin','manager'].includes(user.role) && req.method!=='GET') return json(res,403,{error:'forbidden'});
+      if(req.method!=='GET' && !canWriteResource(user.role,key)) return json(res,403,{error:'forbidden'});
       if(req.method==='GET' && !id){
         const page=Math.max(1,Number(url.searchParams.get('page')||1)), size=Math.min(200,Math.max(1,Number(url.searchParams.get('size')||50))), offset=(page-1)*size;
         const customerId=url.searchParams.get('customer_id'); const contactId=url.searchParams.get('contact_id'); const orderId=url.searchParams.get('order_id'); const ownerId=url.searchParams.get('owner_id'); const tagId=url.searchParams.get('tag_id');
-        const filters=[]; const args=[]; if(customerId && tableCols(table).includes('customer_id')){filters.push('customer_id=?');args.push(customerId);} if(contactId&&tableCols(table).includes('contact_id')){filters.push('contact_id=?');args.push(contactId);} if(orderId&&tableCols(table).includes('order_id')){filters.push('order_id=?');args.push(orderId);} if(table==='customers'){filters.push('deleted_at IS NULL'); const exacts=['owner_id','country','status','grade','source','industry']; for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`${k}=?`);args.push(v);}} const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('customer_types LIKE ?');args.push(`%"${customerType}"%`);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);}}
-        const where=filters.length?`WHERE ${filters.join(' AND ')}`:''; const total=db.prepare(`SELECT COUNT(*) c FROM ${table} ${where}`).get(...args).c; const data=db.prepare(`SELECT * FROM ${table} ${where} ORDER BY ${tableCols(table).includes('updated_at')?'updated_at':'rowid'} DESC LIMIT ? OFFSET ?`).all(...args,size,offset).map(r=>decodeRow(r,cfg)); return json(res,200,{data,total,page,size});
+        const filters=[]; const args=[]; if(customerId && tableCols(table).includes('customer_id')){filters.push('customer_id=?');args.push(customerId);} if(contactId&&tableCols(table).includes('contact_id')){filters.push('contact_id=?');args.push(contactId);} if(orderId&&tableCols(table).includes('order_id')){filters.push('order_id=?');args.push(orderId);} if(scopedRole(user)){ if(table==='customers'){filters.push('owner_id=?');args.push(user.user_id);} else if(tableCols(table).includes('customer_id')){filters.push('customer_id IN (SELECT id FROM customers WHERE owner_id=? AND deleted_at IS NULL)');args.push(user.user_id);} else if(key==='channels'){filters.push('contact_id IN (SELECT ct.id FROM contacts ct JOIN customers c ON c.id=ct.customer_id WHERE c.owner_id=? AND c.deleted_at IS NULL)');args.push(user.user_id);} else if(key==='quotationItems'){filters.push('quotation_id IN (SELECT q.id FROM quotations q JOIN customers c ON c.id=q.customer_id WHERE c.owner_id=? AND c.deleted_at IS NULL)');args.push(user.user_id);} else if(key==='orderItems'){filters.push('order_id IN (SELECT o.id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE c.owner_id=? AND c.deleted_at IS NULL)');args.push(user.user_id);} else if(key==='shipments'){filters.push('order_id IN (SELECT o.id FROM orders o JOIN customers c ON c.id=o.customer_id WHERE c.owner_id=? AND c.deleted_at IS NULL)');args.push(user.user_id);} } if(table==='customers'){filters.push('deleted_at IS NULL'); const exacts=['owner_id','country','status','grade','source','industry']; for(const k of exacts){const v=url.searchParams.get(k);if(v){filters.push(`${k}=?`);args.push(v);}} const customerType=url.searchParams.get('customer_type'); if(customerType){filters.push('customer_types LIKE ?');args.push(`%"${customerType}"%`);} if(tagId){filters.push('EXISTS (SELECT 1 FROM customer_tags ct WHERE ct.customer_id=customers.id AND ct.tag_id=?)');args.push(tagId);}}
+        const where=filters.length?`WHERE ${filters.join(' AND ')}`:''; const total=db.prepare(`SELECT COUNT(*) c FROM ${table} ${where}`).get(...args).c; const data=db.prepare(`SELECT * FROM ${table} ${where} ORDER BY ${tableCols(table).includes('updated_at')?'updated_at':'rowid'} DESC LIMIT ? OFFSET ?`).all(...args,size,offset).map(r=>protectRow(key,decodeRow(r,cfg),user)); return json(res,200,{data,total,page,size});
       }
-      if(req.method==='GET' && id){ const row=db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id); return row?json(res,200,decodeRow(row,cfg)):json(res,404,{error:'not_found'}); }
+      if(req.method==='GET' && id){ const row=db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id); if(!row)return json(res,404,{error:'not_found'}); const cid=key==='customers'?row.id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); return json(res,200,protectRow(key,decodeRow(row,cfg),user)); }
       if(req.method==='POST' && !id){
-        const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
+        const b=await body(req), payload=sanitizePayload(cfg,b,true); if(table==='customers'){ if(!['admin','manager'].includes(user.role)) payload.owner_id=user.user_id; else if(!payload.owner_id) payload.owner_id=user.user_id; } else { const cid=resourceCustomerId(key,payload,false); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); } const newId=randomUUID(), cols=['id',...Object.keys(payload)], vals=[newId,...Object.values(payload)]; if(tableCols(table).includes('created_at')){cols.push('created_at');vals.push(now());} if(tableCols(table).includes('updated_at')){cols.push('updated_at');vals.push(now());}
         if(table==='inquiries' && !payload.inquiry_no){cols.push('inquiry_no');vals.push(makeNo('INQ'));} if(table==='quotations'&&!payload.quote_no){cols.push('quote_no');vals.push(makeNo('QT'));} if(table==='contracts'&&!payload.contract_no){cols.push('contract_no');vals.push(makeNo('CT'));} if(table==='orders'&&!payload.order_no){cols.push('order_no');vals.push(makeNo('SO'));} if(table==='aftersales'&&!payload.ticket_no){cols.push('ticket_no');vals.push(makeNo('AS'));}
         if(table==='users'){ const password=String(b.password||'ChangeMe@123'); cols.push('password_hash');vals.push(hashPassword(password)); }
         db.prepare(`INSERT INTO ${table}(${cols.join(',')}) VALUES(${cols.map(()=>'?').join(',')})`).run(...vals); audit(user,'create',key,newId,req,payload); return json(res,201,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(newId),cfg));
       }
-      if(req.method==='PATCH' && id){ const b=await body(req), payload=sanitizePayload(cfg,b,false); if(table==='customers' && !['admin','manager'].includes(user.role)) delete payload.owner_id; if(table==='users' && b.password) payload.password_hash=hashPassword(String(b.password)); if(tableCols(table).includes('updated_at')) payload.updated_at=now(); const entries=Object.entries(payload); if(!entries.length) return json(res,400,{error:'no_fields'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); db.prepare(`UPDATE ${table} SET ${entries.map(([k])=>`${k}=?`).join(',')} WHERE id=?`).run(...entries.map(([,v])=>v),id); audit(user,'update',key,id,req,payload); return json(res,200,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),cfg)); }
-      if(req.method==='DELETE' && id){ const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); if(table==='customers') db.prepare('UPDATE customers SET deleted_at=?,updated_at=? WHERE id=?').run(now(),now(),id); else db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); audit(user,'delete',key,id,req); return json(res,200,{ok:true}); }
+      if(req.method==='PATCH' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const b=await body(req), payload=sanitizePayload(cfg,b,false); if(table==='customers' && !['admin','manager'].includes(user.role)) delete payload.owner_id; if(table==='users' && b.password) payload.password_hash=hashPassword(String(b.password)); if(tableCols(table).includes('updated_at')) payload.updated_at=now(); const entries=Object.entries(payload); if(!entries.length) return json(res,400,{error:'no_fields'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); db.prepare(`UPDATE ${table} SET ${entries.map(([k])=>`${k}=?`).join(',')} WHERE id=?`).run(...entries.map(([,v])=>v),id); audit(user,'update',key,id,req,payload); return json(res,200,decodeRow(db.prepare(`SELECT * FROM ${table} WHERE id=?`).get(id),cfg)); }
+      if(req.method==='DELETE' && id){ const cid=key==='customers'?id:resourceCustomerId(key,id,true); if(scopedRole(user)&&cid&&!customerOwnedBy(user,cid))return json(res,403,{error:'forbidden'}); const found=db.prepare(`SELECT id FROM ${table} WHERE id=?`).get(id); if(!found)return json(res,404,{error:'not_found'}); if(table==='customers') db.prepare('UPDATE customers SET deleted_at=?,updated_at=? WHERE id=?').run(now(),now(),id); else db.prepare(`DELETE FROM ${table} WHERE id=?`).run(id); audit(user,'delete',key,id,req); return json(res,200,{ok:true}); }
     }
 
     return json(res,404,{error:'not_found',path:p});
