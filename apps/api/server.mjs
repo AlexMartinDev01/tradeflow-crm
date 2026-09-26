@@ -436,6 +436,52 @@ const server = http.createServer(async (req,res)=>{
 
 
 
+
+    // ---- Finance: payment plans, receipts and customer credit ----
+    if(p==='/api/finance/summary' && req.method==='GET'){
+      const customerId=url.searchParams.get('customer_id');
+      const where=customerId?' WHERE customer_id=?':'',args=customerId?[customerId]:[];
+      const payments=db.prepare(`SELECT * FROM payments${where}`).all(...args);
+      const paid=payments.filter(x=>x.status==='paid').reduce((a,x)=>a+Number(x.amount||0),0);
+      const outstanding=payments.filter(x=>x.status!=='paid').reduce((a,x)=>a+Number(x.amount||0),0);
+      const overdue=payments.filter(x=>x.status!=='paid'&&x.due_at&&x.due_at<now()).reduce((a,x)=>a+Number(x.amount||0),0);
+      let credit=null;
+      if(customerId)credit=db.prepare('SELECT * FROM credit_profiles WHERE customer_id=?').get(customerId)||null;
+      const limit=Number(credit?.credit_limit||0),available=limit?Math.max(0,limit-outstanding):null;
+      return json(res,200,{paid,outstanding,overdue,credit_limit:limit||null,credit_available:available,payment_count:payments.length,credit});
+    }
+    {
+      const plan=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/payment-plan$/);
+      if(plan && req.method==='POST'){
+        const o=db.prepare('SELECT * FROM orders WHERE id=?').get(plan[1]);if(!o)return json(res,404,{error:'order_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,o.customer_id))return json(res,403,{error:'forbidden'});
+        if(!canWriteResource(user.role,'payments')&&!['admin','manager','sales'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const existing=db.prepare('SELECT COUNT(*) c FROM payments WHERE order_id=?').get(o.id).c;if(existing)return json(res,409,{error:'payment_plan_exists'});
+        const b=await body(req),depositPct=Math.min(100,Math.max(0,Number(b.deposit_percent??30))),deposit=Number((o.total*depositPct/100).toFixed(2)),balance=Number((o.total-deposit).toFixed(2));
+        const ins=db.prepare('INSERT INTO payments(id,customer_id,order_id,type,amount,currency,due_at,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)');
+        if(deposit>0)ins.run(randomUUID(),o.customer_id,o.id,'deposit',deposit,o.currency,b.deposit_due||now().slice(0,10),'pending',now(),now());
+        if(balance>0)ins.run(randomUUID(),o.customer_id,o.id,'balance',balance,o.currency,b.balance_due||o.requested_delivery||null,'pending',now(),now());
+        audit(user,'create_payment_plan','orders',o.id,req,{deposit_percent:depositPct});return json(res,201,db.prepare('SELECT * FROM payments WHERE order_id=? ORDER BY due_at').all(o.id));
+      }
+      const paidRoute=p.match(/^\/api\/workflows\/payments\/([0-9a-f-]+)\/mark-paid$/);
+      if(paidRoute && req.method==='POST'){
+        if(!['admin','manager','finance'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const pay=db.prepare('SELECT * FROM payments WHERE id=?').get(paidRoute[1]);if(!pay)return json(res,404,{error:'not_found'});
+        const b=await body(req);db.prepare("UPDATE payments SET status='paid',paid_at=?,bank_ref=?,updated_at=? WHERE id=?").run(b.paid_at||now(),b.bank_ref||pay.bank_ref||null,now(),pay.id);
+        audit(user,'mark_paid','payments',pay.id,req,{paid_at:b.paid_at||now(),bank_ref:b.bank_ref||null});return json(res,200,db.prepare('SELECT * FROM payments WHERE id=?').get(pay.id));
+      }
+      const creditRoute=p.match(/^\/api\/customers\/([0-9a-f-]+)\/credit-profile$/);
+      if(creditRoute && ['GET','PUT'].includes(req.method)){
+        const customerId=creditRoute[1];if(scopedRole(user)&&!customerOwnedBy(user,customerId))return json(res,403,{error:'forbidden'});
+        if(req.method==='GET'){return json(res,200,db.prepare('SELECT * FROM credit_profiles WHERE customer_id=?').get(customerId)||null);}
+        if(!['admin','manager','finance'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const b=await body(req),old=db.prepare('SELECT * FROM credit_profiles WHERE customer_id=?').get(customerId),id=old?.id||randomUUID();
+        if(old)db.prepare('UPDATE credit_profiles SET rating=?,credit_limit=?,currency=?,payment_days=?,insured_limit=?,notes=?,updated_at=? WHERE customer_id=?').run(b.rating||null,Number(b.credit_limit||0),b.currency||'USD',Number(b.payment_days||0),Number(b.insured_limit||0),b.notes||null,now(),customerId);
+        else db.prepare('INSERT INTO credit_profiles(id,customer_id,rating,credit_limit,currency,payment_days,insured_limit,notes,updated_at) VALUES(?,?,?,?,?,?,?,?,?)').run(id,customerId,b.rating||null,Number(b.credit_limit||0),b.currency||'USD',Number(b.payment_days||0),Number(b.insured_limit||0),b.notes||null,now());
+        audit(user,'upsert','credit_profile',id,req,{customer_id:customerId});return json(res,200,db.prepare('SELECT * FROM credit_profiles WHERE customer_id=?').get(customerId));
+      }
+    }
+
     // ---- Dedicated order execution workflow ----
     {
       const ofull=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/full$/);
