@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS order_items(id TEXT PRIMARY KEY, order_id TEXT NOT NU
 CREATE TABLE IF NOT EXISTS payments(id TEXT PRIMARY KEY, customer_id TEXT NOT NULL, order_id TEXT, type TEXT, amount REAL NOT NULL, currency TEXT DEFAULT 'USD', due_at TEXT, paid_at TEXT, status TEXT NOT NULL DEFAULT 'pending', bank_ref TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS credit_profiles(id TEXT PRIMARY KEY, customer_id TEXT UNIQUE NOT NULL, rating TEXT, credit_limit REAL, currency TEXT DEFAULT 'USD', payment_days INTEGER, insured_limit REAL, overdue_count INTEGER NOT NULL DEFAULT 0, max_overdue_days INTEGER NOT NULL DEFAULT 0, notes TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS shipments(id TEXT PRIMARY KEY, order_id TEXT NOT NULL, booking_no TEXT, carrier TEXT, forwarder TEXT, vessel_voyage TEXT, container_type TEXT, container_no TEXT, bl_no TEXT, port_of_loading TEXT, destination_port TEXT, etd TEXT, eta TEXT, status TEXT NOT NULL DEFAULT 'booking', tracking_url TEXT, notes TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS shipment_items(id TEXT PRIMARY KEY, shipment_id TEXT NOT NULL, order_item_id TEXT, product_name TEXT NOT NULL, quantity REAL NOT NULL, unit TEXT, created_at TEXT NOT NULL, FOREIGN KEY(shipment_id) REFERENCES shipments(id) ON DELETE CASCADE);
+CREATE TABLE IF NOT EXISTS shipment_containers(id TEXT PRIMARY KEY, shipment_id TEXT NOT NULL, container_type TEXT, container_no TEXT, seal_no TEXT, created_at TEXT NOT NULL, FOREIGN KEY(shipment_id) REFERENCES shipments(id) ON DELETE CASCADE);
 CREATE TABLE IF NOT EXISTS documents(id TEXT PRIMARY KEY, entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, category TEXT, name TEXT NOT NULL, version TEXT, url TEXT, content_base64 TEXT, mime_type TEXT, notes TEXT, uploaded_by TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS aftersales(id TEXT PRIMARY KEY, ticket_no TEXT UNIQUE NOT NULL, customer_id TEXT NOT NULL, order_id TEXT, category TEXT NOT NULL, severity TEXT NOT NULL DEFAULT 'normal', subject TEXT NOT NULL, description TEXT NOT NULL, responsible_team TEXT, solution TEXT, status TEXT NOT NULL DEFAULT 'open', satisfaction INTEGER, opened_at TEXT NOT NULL, closed_at TEXT, updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS campaigns(id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, segment_rule TEXT, status TEXT NOT NULL DEFAULT 'draft', scheduled_at TEXT, content TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
@@ -436,6 +438,57 @@ const server = http.createServer(async (req,res)=>{
 
 
 
+
+
+    // ---- Split shipments / containers / shipment quantities ----
+    function refreshOrderShipmentStatus(orderId){
+      const ordered=Number(db.prepare('SELECT COALESCE(SUM(quantity),0) q FROM order_items WHERE order_id=?').get(orderId).q||0);
+      const shipped=Number(db.prepare(`SELECT COALESCE(SUM(si.quantity),0) q FROM shipment_items si JOIN shipments s ON s.id=si.shipment_id WHERE s.order_id=? AND s.status IN ('departed','arrived','delivered')`).get(orderId).q||0);
+      const delivered=Number(db.prepare(`SELECT COALESCE(SUM(si.quantity),0) q FROM shipment_items si JOIN shipments s ON s.id=si.shipment_id WHERE s.order_id=? AND s.status='delivered'`).get(orderId).q||0);
+      let status=null;
+      if(ordered>0&&delivered>=ordered)status='completed';
+      else if(ordered>0&&shipped>=ordered)status='shipped';
+      else if(shipped>0)status='partial_shipped';
+      if(status)db.prepare('UPDATE orders SET status=?,updated_at=? WHERE id=?').run(status,now(),orderId);
+      return {ordered,shipped,delivered,status};
+    }
+    {
+      const listShip=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/shipments$/);
+      if(listShip && req.method==='GET'){
+        const order=db.prepare('SELECT * FROM orders WHERE id=?').get(listShip[1]);if(!order)return json(res,404,{error:'order_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,order.customer_id))return json(res,403,{error:'forbidden'});
+        const rows=db.prepare('SELECT * FROM shipments WHERE order_id=? ORDER BY created_at DESC').all(order.id).map(x=>({...x,items:db.prepare('SELECT * FROM shipment_items WHERE shipment_id=?').all(x.id),containers:db.prepare('SELECT * FROM shipment_containers WHERE shipment_id=?').all(x.id)}));
+        return json(res,200,{data:rows,summary:refreshOrderShipmentStatus(order.id)});
+      }
+      if(listShip && req.method==='POST'){
+        const order=db.prepare('SELECT * FROM orders WHERE id=?').get(listShip[1]);if(!order)return json(res,404,{error:'order_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,order.customer_id))return json(res,403,{error:'forbidden'});
+        if(!canWriteResource(user.role,'shipments'))return json(res,403,{error:'forbidden'});
+        const b=await body(req),id=randomUUID();
+        db.prepare('INSERT INTO shipments(id,order_id,booking_no,carrier,forwarder,vessel_voyage,bl_no,port_of_loading,destination_port,etd,eta,status,tracking_url,notes,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)')
+          .run(id,order.id,b.booking_no||null,b.carrier||null,b.forwarder||null,b.vessel_voyage||null,b.bl_no||null,b.port_of_loading||null,b.destination_port||null,b.etd||null,b.eta||null,b.status||'booking',b.tracking_url||null,b.notes||null,now(),now());
+        const insItem=db.prepare('INSERT INTO shipment_items(id,shipment_id,order_item_id,product_name,quantity,unit,created_at) VALUES(?,?,?,?,?,?,?)');
+        for(const x of (Array.isArray(b.items)?b.items:[]))if(Number(x.quantity||0)>0)insItem.run(randomUUID(),id,x.order_item_id||null,x.product_name||'',Number(x.quantity),x.unit||null,now());
+        const insC=db.prepare('INSERT INTO shipment_containers(id,shipment_id,container_type,container_no,seal_no,created_at) VALUES(?,?,?,?,?,?)');
+        for(const x of (Array.isArray(b.containers)?b.containers:[]))insC.run(randomUUID(),id,x.container_type||null,x.container_no||null,x.seal_no||null,now());
+        audit(user,'create','shipment',id,req,{order_id:order.id});return json(res,201,{...db.prepare('SELECT * FROM shipments WHERE id=?').get(id),items:db.prepare('SELECT * FROM shipment_items WHERE shipment_id=?').all(id),containers:db.prepare('SELECT * FROM shipment_containers WHERE shipment_id=?').all(id)});
+      }
+      const sfull=p.match(/^\/api\/workflows\/shipments\/([0-9a-f-]+)\/full$/);
+      if(sfull&&req.method==='GET'){
+        const sh=db.prepare('SELECT s.*,o.customer_id,o.order_no FROM shipments s JOIN orders o ON o.id=s.order_id WHERE s.id=?').get(sfull[1]);if(!sh)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,sh.customer_id))return json(res,403,{error:'forbidden'});
+        return json(res,200,{...sh,items:db.prepare('SELECT * FROM shipment_items WHERE shipment_id=?').all(sh.id),containers:db.prepare('SELECT * FROM shipment_containers WHERE shipment_id=?').all(sh.id)});
+      }
+      const sstatus=p.match(/^\/api\/workflows\/shipments\/([0-9a-f-]+)\/status$/);
+      if(sstatus&&req.method==='POST'){
+        const sh=db.prepare('SELECT s.*,o.customer_id FROM shipments s JOIN orders o ON o.id=s.order_id WHERE s.id=?').get(sstatus[1]);if(!sh)return json(res,404,{error:'not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,sh.customer_id))return json(res,403,{error:'forbidden'});
+        const b=await body(req),allowed=['booking','booked','stuffed','customs','departed','arrived','delivered'],next=String(b.status||'');
+        if(!allowed.includes(next))return json(res,400,{error:'invalid_status'});
+        db.prepare('UPDATE shipments SET status=?,updated_at=? WHERE id=?').run(next,now(),sh.id);
+        const summary=refreshOrderShipmentStatus(sh.order_id);audit(user,'change_status','shipment',sh.id,req,{from:sh.status,to:next});return json(res,200,{shipment:db.prepare('SELECT * FROM shipments WHERE id=?').get(sh.id),summary});
+      }
+    }
 
     // ---- Finance: payment plans, receipts and customer credit ----
     if(p==='/api/finance/summary' && req.method==='GET'){
