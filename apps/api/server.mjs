@@ -2737,6 +2737,7 @@ const server = http.createServer(async (req,res)=>{
       }
       const arate=p.match(/^\/api\/workflows\/aftersales\/([0-9a-f-]+)\/satisfaction$/);
       if(arate&&req.method==='POST'){
+        if(!canWriteResource(user.role,'aftersales'))return json(res,403,{error:'forbidden'});
         const a=db.prepare('SELECT * FROM aftersales WHERE id=?').get(arate[1]);if(!a)return json(res,404,{error:'not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,a.customer_id))return json(res,403,{error:'forbidden'});
         const b=await body(req),score=Math.min(5,Math.max(1,Number(b.satisfaction||0)));if(!score)return json(res,400,{error:'invalid_score'});
@@ -2896,6 +2897,7 @@ const server = http.createServer(async (req,res)=>{
 
       const cstatus=p.match(/^\/api\/workflows\/customs\/([0-9a-f-]+)\/status$/);
       if(cstatus&&req.method==='POST'){
+        if(!['admin','manager','sales'].includes(user.role))return json(res,403,{error:'forbidden'});
         const d=db.prepare('SELECT cd.*,o.customer_id FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id WHERE cd.id=?').get(cstatus[1]);if(!d)return json(res,404,{error:'not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,d.customer_id))return json(res,403,{error:'forbidden'});
         const b=await body(req),next=String(b.status||''),allowed=['draft','reviewed','ready','submitted','cleared','rejected'];
@@ -2907,6 +2909,7 @@ const server = http.createServer(async (req,res)=>{
 
       const cdoc=p.match(/^\/api\/workflows\/customs\/([0-9a-f-]+)\/generate-data-sheet$/);
       if(cdoc&&req.method==='POST'){
+        if(!['admin','manager','sales'].includes(user.role))return json(res,403,{error:'forbidden'});
         const d=db.prepare('SELECT cd.*,o.customer_id FROM customs_declarations cd JOIN orders o ON o.id=cd.order_id WHERE cd.id=?').get(cdoc[1]);if(!d)return json(res,404,{error:'not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,d.customer_id))return json(res,403,{error:'forbidden'});
         const order=db.prepare('SELECT * FROM orders WHERE id=?').get(d.order_id),customer=db.prepare('SELECT * FROM customers WHERE id=?').get(order.customer_id),items=db.prepare('SELECT * FROM customs_declaration_items WHERE declaration_id=?').all(d.id),shipment=d.shipment_id?db.prepare('SELECT * FROM shipments WHERE id=?').get(d.shipment_id):null;
@@ -2991,6 +2994,7 @@ const server = http.createServer(async (req,res)=>{
       }
       const sstatus=p.match(/^\/api\/workflows\/shipments\/([0-9a-f-]+)\/status$/);
       if(sstatus&&req.method==='POST'){
+        if(!canWriteResource(user.role,'shipments'))return json(res,403,{error:'forbidden'});
         const sh=db.prepare('SELECT s.*,o.customer_id FROM shipments s JOIN orders o ON o.id=s.order_id WHERE s.id=?').get(sstatus[1]);if(!sh)return json(res,404,{error:'not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,sh.customer_id))return json(res,403,{error:'forbidden'});
         const b=await body(req),allowed=['booking','booked','stuffed','customs','departed','arrived','delivered'],next=String(b.status||'');
@@ -3062,6 +3066,7 @@ const server = http.createServer(async (req,res)=>{
 
       const qcontract=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/to-contract$/);
       if(qcontract&&req.method==='POST'){
+        if(!canWriteResource(user.role,'contracts'))return json(res,403,{error:'forbidden'});
         const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qcontract[1]);if(!q)return json(res,404,{error:'quotation_not_found'});
         if(!['approved','sent','accepted'].includes(q.status))return json(res,409,{error:'quotation_not_approved'});
         if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
@@ -3102,6 +3107,7 @@ const server = http.createServer(async (req,res)=>{
 
       const cstatus=p.match(/^\/api\/workflows\/contracts\/([0-9a-f-]+)\/status$/);
       if(cstatus&&req.method==='POST'){
+        if(!canWriteResource(user.role,'contracts'))return json(res,403,{error:'forbidden'});
         const c=db.prepare('SELECT * FROM contracts WHERE id=?').get(cstatus[1]);if(!c)return json(res,404,{error:'contract_not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,c.customer_id))return json(res,403,{error:'forbidden'});
         const b=await body(req),next=String(b.status||''),allowed=['draft','pending_signature','signed','active','expired','terminated'];
@@ -3140,6 +3146,7 @@ const server = http.createServer(async (req,res)=>{
       }
       const orecalc=p.match(/^\/api\/workflows\/orders\/([0-9a-f-]+)\/recalculate$/);
       if(orecalc && req.method==='POST'){
+        if(!canWriteResource(user.role,'orders'))return json(res,403,{error:'forbidden'});
         const o=db.prepare('SELECT * FROM orders WHERE id=?').get(orecalc[1]);if(!o)return json(res,404,{error:'order_not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,o.customer_id))return json(res,403,{error:'forbidden'});
         const total=db.prepare('SELECT COALESCE(SUM(amount),0) total FROM order_items WHERE order_id=?').get(o.id).total;
@@ -3585,6 +3592,7 @@ const server = http.createServer(async (req,res)=>{
     {
       const respond=p.match(/^\/api\/workflows\/inquiries\/([0-9a-f-]+)\/respond$/);
       if(respond && req.method==='POST'){
+        if(!canWriteResource(user.role,'inquiries'))return json(res,403,{error:'forbidden'});
         const inquiry=db.prepare('SELECT * FROM inquiries WHERE id=?').get(respond[1]);if(!inquiry)return json(res,404,{error:'inquiry_not_found'});
         if(scopedRole(user)&&inquiry.owner_id!==user.user_id&&!customerOwnedBy(user,inquiry.customer_id))return json(res,403,{error:'forbidden'});
         const b=await body(req),responseAt=b.response_at||now();
@@ -3595,6 +3603,7 @@ const server = http.createServer(async (req,res)=>{
       }
       const stage=p.match(/^\/api\/workflows\/opportunities\/([0-9a-f-]+)\/stage$/);
       if(stage && req.method==='POST'){
+        if(!canWriteResource(user.role,'opportunities'))return json(res,403,{error:'forbidden'});
         const op=db.prepare('SELECT * FROM opportunities WHERE id=?').get(stage[1]);if(!op)return json(res,404,{error:'opportunity_not_found'});
         if(scopedRole(user)&&!customerOwnedBy(user,op.customer_id))return json(res,403,{error:'forbidden'});
         const b=await body(req),next=String(b.stage||''),allowed=['qualification','solution','quotation','sample','negotiation','won','lost'];
@@ -3645,8 +3654,10 @@ const server = http.createServer(async (req,res)=>{
     {
       const wm=p.match(/^\/api\/workflows\/inquiries\/([0-9a-f-]+)\/to-opportunity$/);
       if(wm && req.method==='POST'){
+        if(!canWriteResource(user.role,'opportunities'))return json(res,403,{error:'forbidden'});
         const inquiry=db.prepare('SELECT * FROM inquiries WHERE id=?').get(wm[1]);
         if(!inquiry) return json(res,404,{error:'inquiry_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,inquiry.customer_id))return json(res,403,{error:'forbidden'});
         const existing=db.prepare('SELECT * FROM opportunities WHERE inquiry_id=? ORDER BY created_at DESC LIMIT 1').get(inquiry.id);
         if(existing) return json(res,200,existing);
         const b=await body(req), id=randomUUID();
@@ -3659,8 +3670,10 @@ const server = http.createServer(async (req,res)=>{
 
       const wo=p.match(/^\/api\/workflows\/opportunities\/([0-9a-f-]+)\/to-quotation$/);
       if(wo && req.method==='POST'){
+        if(!canWriteResource(user.role,'quotations'))return json(res,403,{error:'forbidden'});
         const opp=db.prepare('SELECT * FROM opportunities WHERE id=?').get(wo[1]);
         if(!opp) return json(res,404,{error:'opportunity_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,opp.customer_id))return json(res,403,{error:'forbidden'});
         const b=await body(req), id=randomUUID(), quoteNo=makeNo('QT');
         db.prepare(`INSERT INTO quotations(id,quote_no,customer_id,contact_id,opportunity_id,version,currency,incoterm,payment_terms,moq,packaging,lead_time,valid_until,subtotal,discount,total,margin_rate,status,notes,created_at,updated_at)
           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
@@ -3673,14 +3686,17 @@ const server = http.createServer(async (req,res)=>{
       if(qfull && req.method==='GET'){
         const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qfull[1]);
         if(!q) return json(res,404,{error:'quotation_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
         const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=? ORDER BY rowid').all(q.id);
         const safeQ=protectRow('quotations',q,user); const safeItems=items.map(x=>protectRow('quotationItems',x,user)); return json(res,200,{...safeQ,items:safeItems});
       }
 
       const qrecalc=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/recalculate$/);
       if(qrecalc && req.method==='POST'){
+        if(!canWriteResource(user.role,'quotations'))return json(res,403,{error:'forbidden'});
         const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qrecalc[1]);
         if(!q) return json(res,404,{error:'quotation_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
         const items=db.prepare('SELECT * FROM quotation_items WHERE quotation_id=?').all(q.id);
         let subtotal=0,totalCost=0;
         const upd=db.prepare('UPDATE quotation_items SET amount=? WHERE id=?');
@@ -3693,8 +3709,10 @@ const server = http.createServer(async (req,res)=>{
 
       const qcopy=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/copy-version$/);
       if(qcopy && req.method==='POST'){
+        if(!canWriteResource(user.role,'quotations'))return json(res,403,{error:'forbidden'});
         const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qcopy[1]);
         if(!q) return json(res,404,{error:'quotation_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
         const maxv=db.prepare('SELECT COALESCE(MAX(version),0) v FROM quotations WHERE opportunity_id IS ? AND customer_id=?').get(q.opportunity_id,q.customer_id).v;
         const id=randomUUID(), quoteNo=makeNo('QT');
         db.prepare(`INSERT INTO quotations(id,quote_no,customer_id,contact_id,opportunity_id,version,currency,incoterm,payment_terms,moq,packaging,lead_time,valid_until,subtotal,discount,total,margin_rate,status,notes,created_at,updated_at)
@@ -3709,6 +3727,7 @@ const server = http.createServer(async (req,res)=>{
 
       const qsubmit=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/submit$/);
       if(qsubmit && req.method==='POST'){
+        if(!canWriteResource(user.role,'quotations'))return json(res,403,{error:'forbidden'});
         const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qsubmit[1]);
         if(!q)return json(res,404,{error:'quotation_not_found'});
         if(q.status!=='draft'&&q.status!=='rejected')return json(res,409,{error:'quotation_not_draft'});
@@ -3740,8 +3759,10 @@ const server = http.createServer(async (req,res)=>{
 
       const qorder=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/to-order$/);
       if(qorder && req.method==='POST'){
+        if(!canWriteResource(user.role,'orders'))return json(res,403,{error:'forbidden'});
         const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(qorder[1]);
         if(!q) return json(res,404,{error:'quotation_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,q.customer_id))return json(res,403,{error:'forbidden'});
         if(!['approved','sent','accepted'].includes(q.status)) return json(res,409,{error:'quotation_not_approved'});
         const existing=db.prepare('SELECT * FROM orders WHERE quotation_id=? ORDER BY created_at DESC LIMIT 1').get(q.id);
         if(existing) return json(res,200,existing);
@@ -3759,8 +3780,10 @@ const server = http.createServer(async (req,res)=>{
 
       const sdel=p.match(/^\/api\/workflows\/samples\/([0-9a-f-]+)\/mark-delivered$/);
       if(sdel && req.method==='POST'){
+        if(!canWriteResource(user.role,'samples'))return json(res,403,{error:'forbidden'});
         const s=db.prepare('SELECT * FROM samples WHERE id=?').get(sdel[1]);
         if(!s) return json(res,404,{error:'sample_not_found'});
+        if(scopedRole(user)&&!customerOwnedBy(user,s.customer_id))return json(res,403,{error:'forbidden'});
         const b=await body(req), deliveredAt=b.delivered_at||now();
         db.prepare("UPDATE samples SET status='delivered',delivered_at=?,updated_at=? WHERE id=?").run(deliveredAt,now(),s.id);
         const taskId=randomUUID(), due=new Date(new Date(deliveredAt).getTime()+3*24*3600_000).toISOString();

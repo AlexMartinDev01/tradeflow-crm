@@ -229,6 +229,42 @@ test.describe('TradeFlow role boundaries',()=>{
     expect(response.status()).toBe(403);
   });
 
+  test('readonly cannot mutate protected business workflows even by direct API calls',async({request})=>{
+    const {headers}=await loginApi(request,'demo.readonly');
+    const [inquiries,opportunities,quotations,orders,shipments,contracts,customs,tickets,samples]=await Promise.all([
+      getJson(request,'/api/inquiries?size=50',headers),
+      getJson(request,'/api/opportunities?size=50',headers),
+      getJson(request,'/api/quotations?size=50',headers),
+      getJson(request,'/api/orders?size=50',headers),
+      getJson(request,'/api/shipments?size=50',headers),
+      getJson(request,'/api/contracts?size=50',headers),
+      getJson(request,'/api/customs-declarations',headers),
+      getJson(request,'/api/aftersales?size=50',headers),
+      getJson(request,'/api/samples?size=50',headers)
+    ]);
+    const calls=[
+      ['/api/workflows/inquiries/'+inquiries.data[0].id+'/respond',{response_at:new Date().toISOString()}],
+      ['/api/workflows/inquiries/'+inquiries.data[0].id+'/to-opportunity',{name:'Unauthorized opportunity'}],
+      ['/api/workflows/opportunities/'+opportunities.data[0].id+'/stage',{stage:'negotiation'}],
+      ['/api/workflows/opportunities/'+opportunities.data[0].id+'/to-quotation',{currency:'USD'}],
+      ['/api/workflows/quotations/'+quotations.data[0].id+'/recalculate',{}],
+      ['/api/workflows/quotations/'+quotations.data[0].id+'/copy-version',{}],
+      ['/api/workflows/quotations/'+quotations.data[0].id+'/submit',{}],
+      ['/api/workflows/quotations/'+quotations.data.find(x=>['approved','sent','accepted'].includes(x.status)).id+'/to-order',{}],
+      ['/api/workflows/contracts/'+contracts.data[0].id+'/status',{status:'active'}],
+      ['/api/workflows/orders/'+orders.data[0].id+'/recalculate',{}],
+      ['/api/workflows/shipments/'+shipments.data[0].id+'/status',{status:'booked'}],
+      ['/api/workflows/customs/'+customs[0].id+'/status',{status:'reviewed'}],
+      ['/api/workflows/customs/'+customs[0].id+'/generate-data-sheet',{}],
+      ['/api/workflows/aftersales/'+tickets.data[0].id+'/satisfaction',{satisfaction:5,note:'unauthorized'}],
+      ['/api/workflows/samples/'+samples.data[0].id+'/mark-delivered',{delivered_at:new Date().toISOString()}]
+    ];
+    for(const [url,data] of calls){
+      const response=await request.post(url,{headers,data});
+      expect(response.status(),url).toBe(403);
+    }
+  });
+
   test('finance can read receivables but cannot create customer master data',async({request})=>{
     const {headers}=await loginApi(request,'demo.finance');
     const payments=await getJson(request,'/api/payments?size=500',headers);

@@ -91,7 +91,7 @@ onMounted(load);
 </el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" @click="createDeclaration">创建草稿</el-button></template></el-dialog>
 
 <el-drawer v-model="drawer" size="90%" title="报关资料工作台"><template v-if="detail">
-<div class="toolbar"><div><h3 style="margin:0">{{detail.declaration_no}}</h3><span class="muted">{{detail.order_no}} · {{detail.customer_name}} · {{detail.booking_no||'未关联出运批次'}}</span></div><div style="display:flex;gap:8px"><el-button @click="generateSheet">生成内部报关数据表</el-button><el-select v-if="canEdit" :model-value="detail.status" style="width:160px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-else :type="statusType(detail.status)">{{detail.status}}</el-tag></div></div>
+<div class="toolbar"><div><h3 style="margin:0">{{detail.declaration_no}}</h3><span class="muted">{{detail.order_no}} · {{detail.customer_name}} · {{detail.booking_no||'未关联出运批次'}}</span></div><div style="display:flex;gap:8px"><el-button v-if="canEdit" @click="generateSheet">生成内部报关数据表</el-button><el-select v-if="canEdit" :model-value="detail.status" style="width:160px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-else :type="statusType(detail.status)">{{detail.status}}</el-tag></div></div>
 
 <div class="card" style="margin-bottom:16px"><div class="grid" style="grid-template-columns:repeat(4,1fr)">
   <el-form-item label="出口国"><el-input v-model="detail.export_country" :disabled="!canEdit"/></el-form-item><el-form-item label="目的国"><el-input v-model="detail.destination_country" :disabled="!canEdit"/></el-form-item>
