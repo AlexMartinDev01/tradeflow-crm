@@ -328,7 +328,7 @@ function evaluateQuotationApproval(quotationId){
   const matched=(policy.special_payment_keywords||[]).filter(x=>terms.includes(String(x).toUpperCase()));
   if(matched.length)reasons.push({code:'special_payment_terms',label:`特殊付款条件：${matched.join(' / ')}`});
   for(const item of items){
-    const product=db.prepare('SELECT id,sku,name,floor_price FROM products WHERE (sku=? AND ?<>"") OR name=? LIMIT 1').get(item.product_code||'',item.product_code||'',item.product_name);
+    const product=db.prepare("SELECT id,sku,name,floor_price FROM products WHERE (sku=? AND ?<>'') OR name=? LIMIT 1").get(item.product_code||'',item.product_code||'',item.product_name);
     if(product?.floor_price!=null && Number(product.floor_price)>0 && Number(item.unit_price)<Number(product.floor_price)){
       belowFloor.push({item_id:item.id,product_id:product.id,product_name:item.product_name,unit_price:Number(item.unit_price),floor_price:Number(product.floor_price)});
     }

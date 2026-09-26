@@ -50,8 +50,8 @@ test.describe('TradeFlow manager UI smoke',()=>{
     await login(page);
 
     await page.goto('/#/customers');
-    await expect(page.getByText('Nordstern Technik GmbH',{exact:true})).toBeVisible();
-    await expect(page.getByText('MapleTech Controls Inc.',{exact:true})).toBeVisible();
+    await expect(page.getByRole('row',{name:/Nordstern Technik GmbH/})).toBeVisible();
+    await expect(page.getByRole('row',{name:/MapleTech Controls Inc\./})).toBeVisible();
 
     await page.goto('/#/orders');
     await expect(page.getByText('SO-DEMO-2026-001',{exact:true})).toBeVisible();
