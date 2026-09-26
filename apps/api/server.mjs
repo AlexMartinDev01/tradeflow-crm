@@ -73,6 +73,7 @@ CREATE TABLE IF NOT EXISTS api_tokens(id TEXT PRIMARY KEY, name TEXT NOT NULL, t
 
 CREATE TABLE IF NOT EXISTS audit_logs(id TEXT PRIMARY KEY, user_id TEXT, action TEXT NOT NULL, entity_type TEXT, entity_id TEXT, ip TEXT, request_id TEXT, detail TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS exchange_rates(id TEXT PRIMARY KEY, base_currency TEXT NOT NULL, quote_currency TEXT NOT NULL, rate REAL NOT NULL, rate_date TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'manual', notes TEXT, created_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(base_currency,quote_currency,rate_date,source));
 CREATE TABLE IF NOT EXISTS automation_rules(key TEXT PRIMARY KEY, name TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, config TEXT NOT NULL DEFAULT '{}', updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS automation_logs(id TEXT PRIMARY KEY, rule_key TEXT NOT NULL, message TEXT NOT NULL, entity_type TEXT, entity_id TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS saved_views(id TEXT PRIMARY KEY, user_id TEXT NOT NULL, entity_type TEXT NOT NULL, name TEXT NOT NULL, filters TEXT NOT NULL DEFAULT '{}', is_shared INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE);
@@ -261,6 +262,24 @@ function buildChannelTarget(config,value){
     return target;
   }
   return '';
+}
+
+
+function currencyCode(v=''){return String(v).trim().toUpperCase().replace(/[^A-Z]/g,'').slice(0,8);}
+function latestFxDirect(from,to,date){
+  return db.prepare(`SELECT * FROM exchange_rates WHERE base_currency=? AND quote_currency=? AND rate_date<=? ORDER BY rate_date DESC,updated_at DESC LIMIT 1`).get(from,to,date);
+}
+function resolveFxRate(fromCurrency,toCurrency,date=now().slice(0,10)){
+  const from=currencyCode(fromCurrency),to=currencyCode(toCurrency);if(!from||!to)return null;
+  if(from===to)return {from,to,rate:1,rate_date:date,source:'identity',path:[from]};
+  const direct=latestFxDirect(from,to,date);if(direct)return {from,to,rate:Number(direct.rate),rate_date:direct.rate_date,source:direct.source,path:[from,to],rate_ids:[direct.id]};
+  const inverse=latestFxDirect(to,from,date);if(inverse&&Number(inverse.rate)>0)return {from,to,rate:1/Number(inverse.rate),rate_date:inverse.rate_date,source:`inverse:${inverse.source}`,path:[from,to],rate_ids:[inverse.id]};
+  const pivot='USD';
+  if(from!==pivot&&to!==pivot){
+    const a=resolveFxRate(from,pivot,date),b=resolveFxRate(pivot,to,date);
+    if(a&&b)return {from,to,rate:a.rate*b.rate,rate_date:[a.rate_date,b.rate_date].sort()[0],source:'cross:USD',path:[from,pivot,to],rate_ids:[...(a.rate_ids||[]),...(b.rate_ids||[])]};
+  }
+  return null;
 }
 
 seed();
@@ -904,10 +923,14 @@ const server = http.createServer(async (req,res)=>{
           AND pli.min_qty<=? AND (pli.max_qty IS NULL OR pli.max_qty>=?)
         ORDER BY CASE WHEN pl.customer_id=? THEN 0 ELSE 1 END,pli.min_qty DESC,pl.updated_at DESC LIMIT 1`).get(productId,customerId,today,today,qty,qty,customerId);
       const unitPrice=list?Number(list.unit_price):Number(product.base_price||0),currency=list?.currency||product.currency||'USD';
+      const targetCurrency=currencyCode(url.searchParams.get('target_currency')||''),fx=targetCurrency&&targetCurrency!==currencyCode(currency)?resolveFxRate(currency,targetCurrency,today):null;
+      const finalCurrency=fx?targetCurrency:currency,finalUnit=fx?Number((unitPrice*fx.rate).toFixed(6)):unitPrice;
       return json(res,200,{
         customer:{id:customer.id,name:customer.name,country:customer.country},
         product:{id:product.id,sku:product.sku,name:product.name,base_price:product.base_price,currency:product.currency,certifications:parseJSON(product.certifications,[])},
-        quantity:qty,unit_price:unitPrice,currency,total:Number((unitPrice*qty).toFixed(2)),
+        quantity:qty,unit_price:finalUnit,currency:finalCurrency,total:Number((finalUnit*qty).toFixed(2)),
+        original_price:{unit_price:unitPrice,currency,total:Number((unitPrice*qty).toFixed(2))},
+        fx:fx||null,fx_missing:!!targetCurrency&&targetCurrency!==currencyCode(currency)&&!fx,
         price_source:list?{type:list.customer_id?'customer_price_list':'general_price_list',price_list_id:list.id,price_list_name:list.name,tier:{min_qty:list.min_qty,max_qty:list.max_qty,discount_percent:list.discount_percent}}:{type:'base_price'},
         allowed:!(prohibited||pref),block_reason:pref?`customer_${pref.preference_type}`:(prohibited?'market_prohibited':null),
         required_certifications:required,market_rules:rules
@@ -1229,6 +1252,39 @@ const server = http.createServer(async (req,res)=>{
     if(p==='/api/analytics/customers-by-type' && req.method==='GET'){
       const all=db.prepare('SELECT customer_types FROM customers WHERE deleted_at IS NULL').all(); const m={}; for(const r of all) for(const t of parseJSON(r.customer_types,[])) m[t]=(m[t]||0)+1; return json(res,200,Object.entries(m).map(([name,value])=>({name,value})).sort((a,b)=>b.value-a.value));
     }
+    // ---- Auditable exchange rates / currency conversion ----
+    if(p==='/api/settings/exchange-rates' && req.method==='GET'){
+      const base=currencyCode(url.searchParams.get('base')||''),quote=currencyCode(url.searchParams.get('quote')||'');
+      const filters=[],args=[];if(base){filters.push('base_currency=?');args.push(base);}if(quote){filters.push('quote_currency=?');args.push(quote);}
+      const where=filters.length?`WHERE ${filters.join(' AND ')}`:'';
+      return json(res,200,db.prepare(`SELECT er.*,u.display_name created_by_name FROM exchange_rates er LEFT JOIN users u ON u.id=er.created_by ${where} ORDER BY rate_date DESC,base_currency,quote_currency LIMIT 1000`).all(...args));
+    }
+    if(p==='/api/settings/exchange-rates' && req.method==='POST'){
+      if(!['admin','manager','finance'].includes(user.role))return json(res,403,{error:'forbidden'});
+      const b=await body(req),base=currencyCode(b.base_currency),quote=currencyCode(b.quote_currency),rate=Number(b.rate),date=String(b.rate_date||now().slice(0,10)),source=String(b.source||'manual').trim()||'manual';
+      if(!base||!quote||base===quote||!Number.isFinite(rate)||rate<=0)return json(res,400,{error:'invalid_rate'});
+      const id=randomUUID();
+      db.prepare(`INSERT INTO exchange_rates(id,base_currency,quote_currency,rate,rate_date,source,notes,created_by,created_at,updated_at)
+        VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(base_currency,quote_currency,rate_date,source) DO UPDATE SET rate=excluded.rate,notes=excluded.notes,created_by=excluded.created_by,updated_at=excluded.updated_at`)
+        .run(id,base,quote,rate,date,source,b.notes||null,user.user_id,now(),now());
+      const row=db.prepare('SELECT * FROM exchange_rates WHERE base_currency=? AND quote_currency=? AND rate_date=? AND source=?').get(base,quote,date,source);
+      audit(user,'upsert','exchange_rate',row.id,req,{base_currency:base,quote_currency:quote,rate,date,source});return json(res,201,row);
+    }
+    {
+      const fx=p.match(/^\/api\/settings\/exchange-rates\/([0-9a-f-]+)$/);
+      if(fx&&req.method==='DELETE'){
+        if(!['admin','manager','finance'].includes(user.role))return json(res,403,{error:'forbidden'});
+        const row=db.prepare('SELECT * FROM exchange_rates WHERE id=?').get(fx[1]);if(!row)return json(res,404,{error:'not_found'});
+        db.prepare('DELETE FROM exchange_rates WHERE id=?').run(row.id);audit(user,'delete','exchange_rate',row.id,req,row);return json(res,200,{ok:true});
+      }
+    }
+    if(p==='/api/fx/convert' && req.method==='GET'){
+      const amount=Number(url.searchParams.get('amount')||0),from=currencyCode(url.searchParams.get('from')||''),to=currencyCode(url.searchParams.get('to')||''),date=String(url.searchParams.get('date')||now().slice(0,10));
+      if(!Number.isFinite(amount)||!from||!to)return json(res,400,{error:'amount_from_to_required'});
+      const fx=resolveFxRate(from,to,date);if(!fx)return json(res,404,{error:'rate_not_found',from,to,date});
+      return json(res,200,{amount,converted:Number((amount*fx.rate).toFixed(6)),...fx});
+    }
+
     if(p==='/api/settings/channels' && req.method==='GET'){
       const all=url.searchParams.get('all')==='1'&&['admin','manager'].includes(user.role);
       const rows=db.prepare(`SELECT * FROM channel_configs ${all?'':'WHERE enabled=1'} ORDER BY sort_order,name`).all();
