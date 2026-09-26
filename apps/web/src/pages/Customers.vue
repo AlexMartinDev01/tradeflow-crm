@@ -48,7 +48,7 @@ onMounted(load);
 </div>
 
 <div class="card">
-  <el-table v-loading="loading" :data="visibleRows" @row-dblclick="r=>router.push(`/customers/${r.id}`)">
+  <el-table v-loading="loading" :data="visibleRows" @row-dblclick="openCustomer">
     <el-table-column prop="name" label="客户名称" min-width="220"><template #default="s"><b>{{s.row.name}}</b><div class="muted" style="font-size:12px">{{s.row.english_name||''}}</div></template></el-table-column>
     <el-table-column prop="country" label="国家" width="120"/><el-table-column prop="industry" label="行业" min-width="140"/>
     <el-table-column label="属性" min-width="180"><template #default="s"><el-tag v-for="x in s.row.customer_types" :key="x" size="small" style="margin:2px 4px 2px 0">{{x}}</el-tag></template></el-table-column>
