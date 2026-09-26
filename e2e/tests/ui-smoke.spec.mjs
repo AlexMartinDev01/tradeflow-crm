@@ -35,7 +35,7 @@ test.describe('TradeFlow manager UI smoke',()=>{
 
     await login(page);
     await expect(page.getByText('外贸客户管理系统')).toBeVisible();
-    await expect(page.getByText('Nordstern Technik GmbH')).toBeVisible();
+    await expect(page.getByText('Nordstern Technik GmbH').first()).toBeVisible();
 
     expect(serverErrors,'Dashboard must not trigger HTTP 5xx').toEqual([]);
     expect(pageErrors,'Dashboard must not trigger uncaught browser errors').toEqual([]);

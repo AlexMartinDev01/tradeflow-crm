@@ -111,7 +111,9 @@ test.describe('TradeFlow mobile layout',()=>{
 
   test('mobile customer dialog fits inside the viewport',async({page})=>{
     await login(page,'demo.manager');
-    await page.goto('/#/customers');
+    await page.goto('/#/customers',{waitUntil:'domcontentloaded'});
+    await expect(page.getByRole('heading',{name:'客户360°'})).toBeVisible({timeout:15000});
+    await expect(page.getByRole('button',{name:'新增客户'})).toBeVisible({timeout:15000});
     await page.getByRole('button',{name:'新增客户'}).click();
     const dialog=page.getByRole('dialog',{name:'新增客户'});
     await expect(dialog).toBeVisible();
