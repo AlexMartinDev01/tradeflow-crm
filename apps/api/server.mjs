@@ -3770,10 +3770,19 @@ const server = http.createServer(async (req,res)=>{
       const reject=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/reject$/);
       if(reject&&req.method==='POST'){
         if(!['admin','manager'].includes(user.role))return json(res,403,{error:'forbidden'});
-        const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(reject[1]);if(!q)return json(res,404,{error:'quotation_not_found'});
-        const b=await body(req);db.prepare("UPDATE quotations SET status='rejected',updated_at=? WHERE id=?").run(now(),q.id);
-        db.prepare("UPDATE quotation_approvals SET status='rejected',decided_by=?,comment=?,decided_at=? WHERE quotation_id=? AND status='pending'").run(user.user_id,b.comment||null,now(),q.id);
-        audit(user,'reject','quotations',q.id,req,{comment:b.comment||null});return json(res,200,db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id));
+        const b=await body(req);
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          const q=db.prepare('SELECT * FROM quotations WHERE id=?').get(reject[1]);if(!q){db.exec('ROLLBACK');return json(res,404,{error:'quotation_not_found'});}
+          if(q.status!=='pending_approval'){db.exec('ROLLBACK');return json(res,409,{error:'quotation_not_pending'});}
+          const approval=db.prepare("SELECT id FROM quotation_approvals WHERE quotation_id=? AND status='pending' ORDER BY submitted_at DESC LIMIT 1").get(q.id);
+          if(!approval)throw requestBodyError('approval_record_missing','报价处于待审批状态，但未找到待审批记录',409);
+          db.prepare("UPDATE quotations SET status='rejected',updated_at=? WHERE id=?").run(now(),q.id);
+          db.prepare("UPDATE quotation_approvals SET status='rejected',decided_by=?,comment=?,decided_at=? WHERE id=?").run(user.user_id,b.comment||null,now(),approval.id);
+          audit(user,'reject','quotations',q.id,req,{comment:b.comment||null});
+          db.exec('COMMIT');
+          return json(res,200,db.prepare('SELECT * FROM quotations WHERE id=?').get(q.id));
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
       }
     }
 
