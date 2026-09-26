@@ -279,3 +279,75 @@ test.describe('TradeFlow role boundaries',()=>{
     expect(response.status()).toBe(403);
   });
 });
+
+
+test.describe('TradeFlow files and recycle-bin lifecycle',()=>{
+  test('attachments are writable only for authorized roles and support real filesystem lifecycle',async({request})=>{
+    const manager=await loginApi(request,'demo.manager');
+    const customers=await getJson(request,'/api/customers?size=20',manager.headers);
+    const customer=customers.data[0];
+    expect(customer).toBeTruthy();
+
+    const content=Buffer.from('TradeFlow E2E attachment verification','utf8').toString('base64');
+    const uploaded=await postJson(request,'/api/files/upload',{
+      entity_type:'customer',
+      entity_id:customer.id,
+      file_name:'e2e-verification.txt',
+      mime_type:'text/plain',
+      content_base64:'data:text/plain;base64,'+content,
+      category:'attachment',
+      notes:'Playwright filesystem verification'
+    },manager.headers);
+    expect(uploaded.id).toBeTruthy();
+
+    const listed=await getJson(request,`/api/files?entity_type=customer&entity_id=${customer.id}`,manager.headers);
+    expect(listed.some(x=>x.id===uploaded.id)).toBeTruthy();
+
+    const preview=await request.get(`/api/documents/${uploaded.id}/preview`,{headers:manager.headers});
+    expect(preview.status()).toBe(200);
+    expect(await preview.text()).toContain('TradeFlow E2E attachment verification');
+
+    const blocked=await request.post('/api/files/upload',{headers:manager.headers,data:{
+      entity_type:'customer',entity_id:customer.id,file_name:'malware.exe',mime_type:'application/octet-stream',content_base64:'data:application/octet-stream;base64,SGVsbG8='
+    }});
+    expect(blocked.status()).toBe(400);
+
+    const readonly=await loginApi(request,'demo.readonly');
+    const forbidden=await request.post('/api/files/upload',{headers:readonly.headers,data:{
+      entity_type:'customer',entity_id:customer.id,file_name:'readonly.txt',mime_type:'text/plain',content_base64:'data:text/plain;base64,SGVsbG8='
+    }});
+    expect(forbidden.status()).toBe(403);
+
+    const removed=await request.delete(`/api/files/${uploaded.id}`,{headers:manager.headers});
+    expect(removed.status()).toBe(200);
+    const after=await getJson(request,`/api/files?entity_type=customer&entity_id=${customer.id}`,manager.headers);
+    expect(after.some(x=>x.id===uploaded.id)).toBeFalsy();
+  });
+
+  test('soft-deleted customer enters recycle bin and can be restored',async({request})=>{
+    const manager=await loginApi(request,'demo.manager');
+    const suffix=Date.now().toString().slice(-8);
+    const customer=await postJson(request,'/api/customers',{
+      name:'Recycle E2E '+suffix,
+      customer_types:['Importer'],
+      status:'potential',
+      grade:'C',
+      source:'E2E'
+    },manager.headers);
+
+    const deleted=await request.delete('/api/customers/'+customer.id,{headers:manager.headers});
+    expect(deleted.status()).toBe(200);
+
+    const bin=await getJson(request,'/api/recycle-bin/customers?q='+encodeURIComponent('Recycle E2E '+suffix),manager.headers);
+    expect(bin.some(x=>x.id===customer.id)).toBeTruthy();
+
+    const impact=await getJson(request,`/api/recycle-bin/customers/${customer.id}/impact`,manager.headers);
+    expect(impact.restorable).toBe(true);
+
+    const restored=await postJson(request,`/api/recycle-bin/customers/${customer.id}/restore`,{},manager.headers);
+    expect(restored.id).toBe(customer.id);
+
+    const visible=await getJson(request,`/api/customers/${customer.id}`,manager.headers);
+    expect(visible.id).toBe(customer.id);
+  });
+});

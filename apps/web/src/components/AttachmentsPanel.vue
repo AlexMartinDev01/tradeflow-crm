@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import {ref,watch,onMounted} from 'vue';
+import {ref,watch,onMounted,computed} from 'vue';
 import {ElMessage,ElMessageBox} from 'element-plus';
 import {api} from '../api/client';
+import {useAuth} from '../stores/auth';
 
 const props=defineProps<{entityType:string;entityId:string;title?:string}>();
+const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
+const canWrite=computed(()=>['admin','manager','sales','followup'].includes(auth.user?.role));
 const rows=ref<any[]>([]),loading=ref(false),uploading=ref(false),dialog=ref(false);
 const file=ref<File|null>(null),category=ref('attachment'),notes=ref('');
 const categories=['attachment','contract','authorization','certificate','invoice','packing','customs','quality','photo','other'];
@@ -54,7 +57,7 @@ defineExpose({reload:load});
 
 <template>
 <div>
-  <div class="toolbar"><div><b>{{title||'附件与文档'}}</b><span class="muted" style="margin-left:8px">{{rows.length}} 个文件</span></div><el-button size="small" type="primary" plain @click="dialog=true">上传附件</el-button></div>
+  <div class="toolbar"><div><b>{{title||'附件与文档'}}</b><span class="muted" style="margin-left:8px">{{rows.length}} 个文件</span></div><el-button v-if="canWrite" size="small" type="primary" plain @click="dialog=true">上传附件</el-button></div>
   <el-table v-loading="loading" :data="rows" empty-text="暂无附件">
     <el-table-column prop="category" label="分类" width="110"><template #default="s"><el-tag size="small">{{s.row.category||'attachment'}}</el-tag></template></el-table-column>
     <el-table-column label="文件名" min-width="240"><template #default="s"><b>{{s.row.original_name||s.row.name}}</b><div v-if="s.row.notes" class="muted" style="font-size:12px">{{s.row.notes}}</div></template></el-table-column>
@@ -62,7 +65,7 @@ defineExpose({reload:load});
     <el-table-column label="大小" width="100"><template #default="s">{{formatSize(s.row.size_bytes)}}</template></el-table-column>
     <el-table-column prop="mime_type" label="类型" min-width="150"/>
     <el-table-column prop="created_at" label="上传/生成时间" width="190"/>
-    <el-table-column label="操作" width="180"><template #default="s"><el-button link type="primary" @click="preview(s.row)">预览</el-button><el-button link @click="download(s.row)">下载</el-button><el-button v-if="s.row.stored" link type="danger" @click="remove(s.row)">删除</el-button></template></el-table-column>
+    <el-table-column label="操作" width="180"><template #default="s"><el-button link type="primary" @click="preview(s.row)">预览</el-button><el-button link @click="download(s.row)">下载</el-button><el-button v-if="canWrite&&s.row.stored" link type="danger" @click="remove(s.row)">删除</el-button></template></el-table-column>
   </el-table>
 
   <el-dialog v-model="dialog" title="上传附件" width="560">

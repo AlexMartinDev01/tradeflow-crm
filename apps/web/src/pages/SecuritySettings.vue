@@ -14,7 +14,7 @@ const disableForm=reactive({current_password:'',code:''});
 async function load(){status.value=(await api.get('/auth/security-status')).data}
 function validateNewPassword(){
   const p=passwordForm.new_password;
-  if(p.length<10||!/[a-z]/.test(p)||!/[A-Z]/.test(p)||!/\d/.test(p)||!/[^w]/.test(p))return '新密码必须至少 10 位，并同时包含大小写字母、数字和特殊字符';
+  if(p.length<10||!/[a-z]/.test(p)||!/[A-Z]/.test(p)||!/\d/.test(p)||!/[^A-Za-z0-9]/.test(p))return '新密码必须至少 10 位，并同时包含大小写字母、数字和特殊字符';
   if(p!==passwordForm.confirm_password)return '两次输入的新密码不一致';
   return '';
 }

@@ -1,8 +1,15 @@
 import {defineStore} from 'pinia';
 import {api} from '../api/client';
 
+function cachedUser(){
+  try{return JSON.parse(localStorage.getItem('auth_user')||'null')}catch{return null}
+}
+function persistUser(user:any){
+  if(user)localStorage.setItem('auth_user',JSON.stringify(user));else localStorage.removeItem('auth_user');
+}
+
 export const useAuth=defineStore('auth',{
-  state:()=>({user:null as any,loading:false,twoFactorChallenge:null as any}),
+  state:()=>({user:cachedUser() as any,loading:false,twoFactorChallenge:null as any}),
   actions:{
     async login(username:string,password:string){
       this.loading=true;
@@ -14,7 +21,7 @@ export const useAuth=defineStore('auth',{
         }
         localStorage.setItem('token',data.token);
         this.twoFactorChallenge=null;
-        this.user=data.user;
+        this.user=data.user;persistUser(data.user);
         return data;
       }finally{this.loading=false}
     },
@@ -25,18 +32,18 @@ export const useAuth=defineStore('auth',{
         const {data}=await api.post('/auth/2fa/verify',{challenge_token:this.twoFactorChallenge.challenge_token,code});
         localStorage.setItem('token',data.token);
         this.twoFactorChallenge=null;
-        this.user=data.user;
+        this.user=data.user;persistUser(data.user);
         return data;
       }finally{this.loading=false}
     },
     clearTwoFactor(){this.twoFactorChallenge=null},
     async me(){
       if(!localStorage.getItem('token'))return null;
-      const {data}=await api.get('/auth/me');this.user=data;return data;
+      const {data}=await api.get('/auth/me');this.user=data;persistUser(data);return data;
     },
     async logout(){
       try{await api.post('/auth/logout')}finally{
-        localStorage.removeItem('token');this.user=null;this.twoFactorChallenge=null;location.hash='#/login';
+        localStorage.removeItem('token');persistUser(null);this.user=null;this.twoFactorChallenge=null;location.hash='#/login';
       }
     }
   }
