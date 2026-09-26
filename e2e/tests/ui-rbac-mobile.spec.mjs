@@ -1,5 +1,5 @@
 import {test,expect} from '@playwright/test';
-import {DEMO_PASSWORD} from './helpers.mjs';
+import {DEMO_PASSWORD,loginApi} from './helpers.mjs';
 
 async function login(page,username){
   await page.goto('/#/login');
@@ -109,8 +109,9 @@ test.describe('TradeFlow mobile layout',()=>{
     await expect(page.getByText('售后知识库',{exact:true})).toBeVisible();
   });
 
-  test('mobile customer dialog fits inside the viewport',async({page})=>{
-    await login(page,'demo.manager');
+  test('mobile customer dialog fits inside the viewport',async({page,request})=>{
+    const session=await loginApi(request,'demo.manager');
+    await page.addInitScript(token=>localStorage.setItem('token',token),session.token);
     await page.goto('/#/customers',{waitUntil:'domcontentloaded'});
     await expect(page.getByRole('heading',{name:'客户360°'})).toBeVisible({timeout:15000});
     await expect(page.getByRole('button',{name:'新增客户'})).toBeVisible({timeout:15000});
