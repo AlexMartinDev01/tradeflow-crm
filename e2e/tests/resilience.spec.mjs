@@ -159,12 +159,13 @@ test.describe('TradeFlow resilience and failure-path safety',()=>{
 
   test('malformed JSON is rejected as an explicit 400 invalid_json error',async({request})=>{
     const manager=await loginApi(request,'demo.manager');
-    const response=await request.fetch('/api/customers',{
+    const base=process.env.E2E_BASE_URL||'http://127.0.0.1:18080';
+    const response=await fetch(base+'/api/customers',{
       method:'POST',
       headers:{...manager.headers,'content-type':'application/json'},
-      data:'{"name":"broken-json"'
+      body:'{"name":"broken-json"'
     });
-    expect(response.status()).toBe(400);
+    expect(response.status).toBe(400);
     const payload=await response.json();
     expect(payload.error).toBe('invalid_json');
     expect(payload.request_id).toBeTruthy();
