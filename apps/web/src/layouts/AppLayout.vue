@@ -137,7 +137,7 @@ onBeforeUnmount(()=>window.removeEventListener('keydown',shortcut));
     <header class="top">
       <div class="top-left">
         <el-button class="mobile-menu-button" circle aria-label="打开导航" @click.stop="mobileOpen=!mobileOpen"><el-icon><Menu/></el-icon></el-button>
-        <button class="desktop-menu-button" type="button" @click="toggleCollapsed"><el-icon><Menu/></el-icon></button>
+        <button class="desktop-menu-button" type="button" aria-label="展开或收起导航" @click="toggleCollapsed"><el-icon><Menu/></el-icon></button>
         <div class="breadcrumb"><span>工作台</span><i>/</i><span v-if="currentSection!=='工作台'">{{currentSection}}</span><i v-if="currentSection!=='工作台'">/</i><b>{{currentTitle}}</b></div>
       </div>
 
