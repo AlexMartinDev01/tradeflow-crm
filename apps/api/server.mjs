@@ -3837,15 +3837,30 @@ const server = http.createServer(async (req,res)=>{
       const wo=p.match(/^\/api\/workflows\/opportunities\/([0-9a-f-]+)\/to-quotation$/);
       if(wo && req.method==='POST'){
         if(!canWriteResource(user.role,'quotations'))return json(res,403,{error:'forbidden'});
-        const opp=db.prepare('SELECT * FROM opportunities WHERE id=?').get(wo[1]);
-        if(!opp) return json(res,404,{error:'opportunity_not_found'});
-        if(scopedRole(user)&&!customerOwnedBy(user,opp.customer_id))return json(res,403,{error:'forbidden'});
-        const b=await body(req), id=randomUUID(), quoteNo=makeNo('QT');
-        db.prepare(`INSERT INTO quotations(id,quote_no,customer_id,contact_id,opportunity_id,version,currency,incoterm,payment_terms,moq,packaging,lead_time,valid_until,subtotal,discount,total,margin_rate,status,notes,created_at,updated_at)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-          .run(id,quoteNo,opp.customer_id,b.contact_id||null,opp.id,1,b.currency||opp.currency||'USD',b.incoterm||null,b.payment_terms||null,b.moq||null,b.packaging||null,b.lead_time||null,b.valid_until||null,0,0,0,null,'draft',b.notes||opp.notes||null,now(),now());
-        audit(user,'create_quotation_from_opportunity','quotations',id,req,{opportunity_id:opp.id});
-        return json(res,201,db.prepare('SELECT * FROM quotations WHERE id=?').get(id));
+        const b=await body(req);
+        let opp=null,quotation=null,created=false;
+        db.exec('BEGIN IMMEDIATE');
+        try{
+          opp=db.prepare('SELECT * FROM opportunities WHERE id=?').get(wo[1]);
+          if(!opp){db.exec('ROLLBACK');return json(res,404,{error:'opportunity_not_found'});}
+          if(scopedRole(user)&&!customerOwnedBy(user,opp.customer_id)){db.exec('ROLLBACK');return json(res,403,{error:'forbidden'});}
+          if(['won','lost'].includes(String(opp.stage||''))){db.exec('ROLLBACK');return json(res,409,{error:'opportunity_closed'});}
+          quotation=db.prepare('SELECT * FROM quotations WHERE opportunity_id=? AND version=1 ORDER BY created_at ASC LIMIT 1').get(opp.id);
+          if(!quotation){
+            const id=randomUUID(),quoteNo=makeNo('QT');
+            db.prepare(`INSERT INTO quotations(id,quote_no,customer_id,contact_id,opportunity_id,version,currency,incoterm,payment_terms,moq,packaging,lead_time,valid_until,subtotal,discount,total,margin_rate,status,notes,created_at,updated_at)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+              .run(id,quoteNo,opp.customer_id,b.contact_id||null,opp.id,1,b.currency||opp.currency||'USD',b.incoterm||null,b.payment_terms||null,b.moq||null,b.packaging||null,b.lead_time||null,b.valid_until||null,0,0,0,null,'draft',b.notes||opp.notes||null,now(),now());
+            quotation=db.prepare('SELECT * FROM quotations WHERE id=?').get(id);created=true;
+            audit(user,'create_quotation_from_opportunity','quotations',id,req,{opportunity_id:opp.id});
+          }
+          if(opp.stage!=='quotation'){
+            db.prepare("UPDATE opportunities SET stage='quotation',updated_at=? WHERE id=?").run(now(),opp.id);
+            audit(user,'advance_opportunity_after_quotation','opportunities',opp.id,req,{quotation_id:quotation.id,from_stage:opp.stage,to_stage:'quotation'});
+          }
+          db.exec('COMMIT');
+        }catch(e){try{db.exec('ROLLBACK')}catch{}throw e;}
+        return json(res,created?201:200,quotation);
       }
 
       const qfull=p.match(/^\/api\/workflows\/quotations\/([0-9a-f-]+)\/full$/);
