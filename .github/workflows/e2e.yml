@@ -40,7 +40,7 @@ jobs:
           set -euo pipefail
           rm -rf /tmp/tradeflow-e2e
           mkdir -p /tmp/tradeflow-e2e/uploads /tmp/tradeflow-e2e/backups
-          env             NODE_ENV=development             HOST=127.0.0.1             PORT=18080             DB_FILE=/tmp/tradeflow-e2e/tradeflow.db             WEB_DIST="$GITHUB_WORKSPACE/apps/web/dist"             UPLOAD_DIR=/tmp/tradeflow-e2e/uploads             BACKUP_DIR=/tmp/tradeflow-e2e/backups             APP_SECRET=tradeflow-e2e-secret-2026             CORS_ORIGIN='*'             node apps/api/server.mjs > /tmp/tradeflow-e2e/bootstrap.log 2>&1 &
+          env             NODE_ENV=development             HOST=127.0.0.1             PORT=18080             DB_FILE=/tmp/tradeflow-e2e/tradeflow.db             WEB_DIST="$GITHUB_WORKSPACE/apps/web/dist"             UPLOAD_DIR=/tmp/tradeflow-e2e/uploads             BACKUP_DIR=/tmp/tradeflow-e2e/backups             APP_SECRET=tradeflow-e2e-secret-2026             CORS_ORIGIN='*'             API_RATE_LIMIT=10000             AUTH_RATE_LIMIT=1000             node apps/api/server.mjs > /tmp/tradeflow-e2e/bootstrap.log 2>&1 &
           pid=$!
           for i in {1..30}; do
             if curl -fsS http://127.0.0.1:18080/api/health >/dev/null; then break; fi
@@ -56,7 +56,7 @@ jobs:
       - name: Start TradeFlow for browser acceptance
         shell: bash
         run: |
-          env             NODE_ENV=development             HOST=127.0.0.1             PORT=18080             DB_FILE=/tmp/tradeflow-e2e/tradeflow.db             WEB_DIST="$GITHUB_WORKSPACE/apps/web/dist"             UPLOAD_DIR=/tmp/tradeflow-e2e/uploads             BACKUP_DIR=/tmp/tradeflow-e2e/backups             APP_SECRET=tradeflow-e2e-secret-2026             CORS_ORIGIN='*'             node apps/api/server.mjs > /tmp/tradeflow-e2e/server.log 2>&1 &
+          env             NODE_ENV=development             HOST=127.0.0.1             PORT=18080             DB_FILE=/tmp/tradeflow-e2e/tradeflow.db             WEB_DIST="$GITHUB_WORKSPACE/apps/web/dist"             UPLOAD_DIR=/tmp/tradeflow-e2e/uploads             BACKUP_DIR=/tmp/tradeflow-e2e/backups             APP_SECRET=tradeflow-e2e-secret-2026             CORS_ORIGIN='*'             API_RATE_LIMIT=10000             AUTH_RATE_LIMIT=1000             node apps/api/server.mjs > /tmp/tradeflow-e2e/server.log 2>&1 &
           echo $! > /tmp/tradeflow-e2e/server.pid
           for i in {1..45}; do
             if curl -fsS http://127.0.0.1:18080/api/ready >/dev/null; then exit 0; fi

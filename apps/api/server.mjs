@@ -1741,10 +1741,13 @@ function rateLimit(req,scope='api',limit=600,windowMs=60_000){
   bucket.count++;rate.set(key,bucket);
   return bucket.count<=limit;
 }
+const API_RATE_LIMIT=Math.max(60,Number(process.env.API_RATE_LIMIT||600));
+const AUTH_RATE_LIMIT=Math.max(10,Number(process.env.AUTH_RATE_LIMIT||60));
+const RATE_LIMIT_WINDOW_MS=Math.max(1_000,Number(process.env.RATE_LIMIT_WINDOW_MS||60_000));
 function apiRatePolicy(pathname){
   if(pathname==='/api/health'||pathname==='/api/ready')return null;
-  if(pathname==='/api/auth/login'||pathname==='/api/auth/2fa/verify')return {scope:'auth',limit:60,windowMs:60_000};
-  return {scope:'api',limit:600,windowMs:60_000};
+  if(pathname==='/api/auth/login'||pathname==='/api/auth/2fa/verify')return {scope:'auth',limit:AUTH_RATE_LIMIT,windowMs:RATE_LIMIT_WINDOW_MS};
+  return {scope:'api',limit:API_RATE_LIMIT,windowMs:RATE_LIMIT_WINDOW_MS};
 }
 
 const server = http.createServer(async (req,res)=>{

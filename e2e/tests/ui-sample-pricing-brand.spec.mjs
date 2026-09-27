@@ -48,9 +48,11 @@ test.describe('TradeFlow sample workbench browser and RBAC acceptance',()=>{
     await dialog.getByLabel('数量').fill('2 sets');
     await dialog.getByLabel('快递公司').fill('DHL');
     await dialog.getByLabel('运单号').fill(tracking);
+    const sampleRefresh=page.waitForResponse(r=>r.url().includes('/api/samples')&&r.request().method()==='GET'&&r.status()===200);
     await dialog.getByRole('button',{name:'保存',exact:true}).click();
 
     await expect(page.getByText('样品申请已创建')).toBeVisible();
+    await sampleRefresh;
     let row=page.getByRole('row',{name:new RegExp(tracking)});
     await expect(row).toBeVisible();
     await row.getByRole('button',{name:'标记寄出'}).click();
