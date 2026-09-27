@@ -7,7 +7,7 @@ import {api} from '../api/client';
 import {useAuth} from '../stores/auth';
 
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
-const rows=ref<any[]>([]),customers=ref<any[]>([]),detail=ref<any>(null),drawer=ref(false),dialog=ref(false),versionDialog=ref(false),loading=ref(false);
+const rows=ref<any[]>([]),customers=ref<any[]>([]),detail=ref<any>(null),drawer=ref(false),dialog=ref(false),versionDialog=ref(false),loading=ref(false),detailLoading=ref(false),creating=ref(false),actionBusy=ref('');
 const form=reactive<any>({customer_id:'',amount:0,currency:'USD',effective_from:'',effective_to:'',terms:''});
 const versionForm=reactive<any>({amount:0,currency:'USD',effective_from:'',effective_to:'',terms:''});
 const customerMap=computed(()=>Object.fromEntries(customers.value.map((x:any)=>[x.id,x.name])));
@@ -19,21 +19,33 @@ async function load(){
   try{
     const [c,cu]=await Promise.all([api.get('/contracts',{params:{size:300}}),api.get('/customers',{params:{size:300}})]);
     rows.value=c.data.data;customers.value=cu.data.data;
-  }finally{loading.value=false}
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'合同数据加载失败，请稍后重试')}
+  finally{loading.value=false}
 }
+async function runBusy(key:string,fn:()=>Promise<any>){if(actionBusy.value)return;actionBusy.value=key;try{return await fn()}finally{actionBusy.value=''}}
 async function createContract(){
   if(!form.customer_id)return ElMessage.warning('请选择客户');
-  const {data}=await api.post('/workflows/contracts',form);
-  dialog.value=false;Object.assign(form,{customer_id:'',amount:0,currency:'USD',effective_from:'',effective_to:'',terms:''});await load();await open(data);ElMessage.success('合同已创建')
+  if(creating.value)return;creating.value=true;
+  try{
+    const {data}=await api.post('/workflows/contracts',form);
+    dialog.value=false;Object.assign(form,{customer_id:'',amount:0,currency:'USD',effective_from:'',effective_to:'',terms:''});
+    await load();await open(data);ElMessage.success('合同已创建');
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'合同创建失败，请检查输入后重试')}
+  finally{creating.value=false}
 }
-async function open(r:any){detail.value=(await api.get(`/workflows/contracts/${r.id}/full`)).data;drawer.value=true}
+async function open(r:any){
+  drawer.value=true;detail.value=null;detailLoading.value=true;
+  try{detail.value=(await api.get(`/workflows/contracts/${r.id}/full`)).data}
+  catch(e:any){drawer.value=false;ElMessage.error(e.response?.data?.message||'合同详情加载失败')}
+  finally{detailLoading.value=false}
+}
 async function refresh(){if(detail.value)detail.value=(await api.get(`/workflows/contracts/${detail.value.id}/full`)).data;await load()}
-async function changeStatus(value:any){await api.post(`/workflows/contracts/${detail.value.id}/status`,{status:String(value)});await refresh();ElMessage.success('合同状态已更新')}
+async function changeStatus(value:any){await runBusy('status',async()=>{try{await api.post(`/workflows/contracts/${detail.value.id}/status`,{status:String(value)});await refresh();ElMessage.success('合同状态已更新')}catch(e:any){ElMessage.error(e.response?.data?.message||'合同状态更新失败')}})}
 function openVersion(){
   Object.assign(versionForm,{amount:Number(detail.value.amount||0),currency:detail.value.currency||'USD',effective_from:detail.value.effective_from||'',effective_to:detail.value.effective_to||'',terms:detail.value.terms||''});
   versionDialog.value=true;
 }
-async function newVersion(){await api.post(`/workflows/contracts/${detail.value.id}/new-version`,versionForm);versionDialog.value=false;await refresh();ElMessage.success('合同新版本已生成')}
+async function newVersion(){await runBusy('version',async()=>{try{await api.post(`/workflows/contracts/${detail.value.id}/new-version`,versionForm);versionDialog.value=false;await refresh();ElMessage.success('合同新版本已生成')}catch(e:any){ElMessage.error(e.response?.data?.message||'生成合同新版本失败')}})}
 onMounted(load);
 </script>
 
@@ -56,10 +68,10 @@ onMounted(load);
 <el-form-item label="币种"><el-select v-model="form.currency" style="width:100%"><el-option v-for="x in ['USD','EUR','GBP','CNY']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
 <el-form-item label="生效日期"><el-input v-model="form.effective_from" type="date"/></el-form-item><el-form-item label="到期日期"><el-input v-model="form.effective_to" type="date"/></el-form-item>
 </div><el-form-item label="合同条款"><el-input v-model="form.terms" type="textarea" :rows="8"/></el-form-item>
-</el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" @click="createContract">创建合同</el-button></template></el-dialog>
+</el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" :loading="creating" @click="createContract">创建合同</el-button></template></el-dialog>
 
-<el-drawer v-model="drawer" size="78%" title="合同工作台"><template v-if="detail">
-<div class="toolbar"><div><h3 style="margin:0">{{detail.contract_no}} · V{{detail.current_version||1}}</h3><span class="muted">{{detail.customer_name}} · {{detail.currency}} {{Number(detail.amount||0).toLocaleString()}}</span></div><div style="display:flex;gap:8px"><el-button v-if="canEdit" @click="openVersion">生成新版本</el-button><el-select v-if="canEdit" :model-value="detail.status" style="width:170px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-else>{{detail.status}}</el-tag></div></div>
+<el-drawer v-model="drawer" size="78%" title="合同工作台" v-loading="detailLoading"><template v-if="detail">
+<div class="toolbar"><div><h3 style="margin:0">{{detail.contract_no}} · V{{detail.current_version||1}}</h3><span class="muted">{{detail.customer_name}} · {{detail.currency}} {{Number(detail.amount||0).toLocaleString()}}</span></div><div style="display:flex;gap:8px"><el-button v-if="canEdit" :disabled="!!actionBusy" @click="openVersion">生成新版本</el-button><el-select v-if="canEdit" :model-value="detail.status" :disabled="!!actionBusy" :loading="actionBusy==='status'" style="width:170px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-else>{{detail.status}}</el-tag></div></div>
 
 <div class="grid" style="grid-template-columns:1.1fr 1fr;align-items:start">
 <div class="card"><h3 class="section-title">当前合同</h3><el-descriptions :column="2" border>
@@ -80,5 +92,5 @@ onMounted(load);
 <el-dialog v-model="versionDialog" title="生成合同新版本" width="720"><el-form label-position="top">
 <div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="金额"><el-input v-model.number="versionForm.amount" type="number"/></el-form-item><el-form-item label="币种"><el-select v-model="versionForm.currency" style="width:100%"><el-option v-for="x in ['USD','EUR','GBP','CNY']" :key="x" :label="x" :value="x"/></el-select></el-form-item><el-form-item label="生效日期"><el-input v-model="versionForm.effective_from" type="date"/></el-form-item><el-form-item label="到期日期"><el-input v-model="versionForm.effective_to" type="date"/></el-form-item></div>
 <el-form-item label="合同条款"><el-input v-model="versionForm.terms" type="textarea" :rows="8"/></el-form-item>
-</el-form><template #footer><el-button @click="versionDialog=false">取消</el-button><el-button type="primary" @click="newVersion">生成新版本</el-button></template></el-dialog>
+</el-form><template #footer><el-button :disabled="!!actionBusy" @click="versionDialog=false">取消</el-button><el-button type="primary" :loading="actionBusy==='version'" @click="newVersion">生成新版本</el-button></template></el-dialog>
 </AppLayout></template>

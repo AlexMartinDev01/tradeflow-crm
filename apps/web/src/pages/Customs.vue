@@ -8,11 +8,12 @@ import {useAuth} from '../stores/auth';
 
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
 const rows=ref<any[]>([]),orders=ref<any[]>([]),customers=ref<any[]>([]),detail=ref<any>(null),orderFull=ref<any>(null);
-const dialog=ref(false),drawer=ref(false),loading=ref(false),saving=ref(false),syncProductMaster=ref(true);
+const dialog=ref(false),drawer=ref(false),loading=ref(false),saving=ref(false),detailLoading=ref(false),creating=ref(false),orderLoading=ref(false),actionBusy=ref(''),syncProductMaster=ref(true);
 const form=reactive<any>({order_id:'',shipment_id:'',export_country:'China',destination_country:'',customs_office:'',declaration_date:new Date().toISOString().slice(0,10),trade_mode:'General Trade',incoterm:'',currency:'USD',notes:''});
 const statuses=['draft','reviewed','ready','submitted','cleared','rejected'];
 const orderMap=computed(()=>Object.fromEntries(orders.value.map((x:any)=>[x.id,x])));
 const customerMap=computed(()=>Object.fromEntries(customers.value.map((x:any)=>[x.id,x.name])));
+const customerCountryMap=computed(()=>Object.fromEntries(customers.value.map((x:any)=>[x.id,x.country||''])));
 const canEdit=computed(()=>['admin','manager','sales'].includes(auth.user?.role));
 
 async function load(){
@@ -20,23 +21,38 @@ async function load(){
   try{
     const [d,o,c]=await Promise.all([api.get('/customs-declarations'),api.get('/orders',{params:{size:300}}),api.get('/customers',{params:{size:300}})]);
     rows.value=d.data;orders.value=o.data.data;customers.value=c.data.data;
-  }finally{loading.value=false}
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'报关数据加载失败，请稍后重试')}
+  finally{loading.value=false}
 }
+async function runBusy(key:string,fn:()=>Promise<any>){if(actionBusy.value)return;actionBusy.value=key;try{return await fn()}finally{actionBusy.value=''}}
 async function chooseOrder(){
   if(!form.order_id){orderFull.value=null;return}
-  orderFull.value=(await api.get(`/workflows/orders/${form.order_id}/full`)).data;
-  const order=orderMap.value[form.order_id];
-  form.destination_country=customerMap.value[order?.customer_id]?'':form.destination_country;
-  form.incoterm=order?.incoterm||'';
-  form.currency=order?.currency||'USD';
-  form.shipment_id='';
+  orderLoading.value=true;
+  try{
+    orderFull.value=(await api.get(`/workflows/orders/${form.order_id}/full`)).data;
+    const order=orderMap.value[form.order_id];
+    form.destination_country=customerCountryMap.value[order?.customer_id]||form.destination_country;
+    form.incoterm=order?.incoterm||'';
+    form.currency=order?.currency||'USD';
+    form.shipment_id='';
+  }catch(e:any){orderFull.value=null;ElMessage.error(e.response?.data?.message||'订单资料加载失败')}
+  finally{orderLoading.value=false}
 }
 async function createDeclaration(){
   if(!form.order_id)return ElMessage.warning('请选择订单');
-  const {data}=await api.post(`/workflows/orders/${form.order_id}/customs-declaration`,form);
-  dialog.value=false;await load();await open(data);ElMessage.success('报关草稿已创建');
+  if(creating.value)return;creating.value=true;
+  try{
+    const {data}=await api.post(`/workflows/orders/${form.order_id}/customs-declaration`,form);
+    dialog.value=false;await load();await open(data);ElMessage.success('报关草稿已创建');
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'报关草稿创建失败，请检查输入后重试')}
+  finally{creating.value=false}
 }
-async function open(r:any){detail.value=(await api.get(`/workflows/customs/${r.id}/full`)).data;drawer.value=true}
+async function open(r:any){
+  drawer.value=true;detail.value=null;detailLoading.value=true;
+  try{detail.value=(await api.get(`/workflows/customs/${r.id}/full`)).data}
+  catch(e:any){drawer.value=false;ElMessage.error(e.response?.data?.message||'报关详情加载失败')}
+  finally{detailLoading.value=false}
+}
 async function refresh(){if(detail.value)detail.value=(await api.get(`/workflows/customs/${detail.value.id}/full`)).data;await load()}
 async function save(){
   saving.value=true;
@@ -47,18 +63,19 @@ async function save(){
       notes:detail.value.notes,items:detail.value.items,sync_product_master:syncProductMaster.value
     });
     await refresh();ElMessage.success('报关资料已保存');
-  }finally{saving.value=false}
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'报关资料保存失败')}
+  finally{saving.value=false}
 }
-async function changeStatus(value:any){
+async function changeStatus(value:any){await runBusy('status',async()=>{try{
   await api.post(`/workflows/customs/${detail.value.id}/status`,{status:String(value)});
   await refresh();ElMessage.success('状态已记录（仅系统内部状态，不代表海关实际回执）');
-}
-async function generateSheet(){
+}catch(e:any){ElMessage.error(e.response?.data?.message||'报关状态更新失败')}})}
+async function generateSheet(){await runBusy('sheet',async()=>{try{
   const {data}=await api.post(`/workflows/customs/${detail.value.id}/generate-data-sheet`,{});
   const r=await api.get(`/documents/${data.id}/preview`,{responseType:'blob'});
   const url=URL.createObjectURL(r.data);window.open(url,'_blank','noopener,noreferrer');setTimeout(()=>URL.revokeObjectURL(url),60000);
   await refresh();ElMessage.success('内部报关数据表已生成');
-}
+}catch(e:any){ElMessage.error(e.response?.data?.message||'内部报关数据表生成失败')}})}
 function statusType(v:string){return v==='cleared'?'success':v==='rejected'?'danger':v==='ready'||v==='submitted'?'warning':'info'}
 onMounted(load);
 </script>
@@ -81,17 +98,17 @@ onMounted(load);
 
 <el-dialog v-model="dialog" title="新建报关草稿" width="780"><el-form label-position="top">
 <div class="grid" style="grid-template-columns:1fr 1fr">
-  <el-form-item label="订单"><el-select v-model="form.order_id" filterable style="width:100%" @change="chooseOrder"><el-option v-for="o in orders" :key="o.id" :label="`${o.order_no} · ${customerMap[o.customer_id]||''}`" :value="o.id"/></el-select></el-form-item>
+  <el-form-item label="订单"><el-select v-model="form.order_id" filterable :loading="orderLoading" :disabled="creating" style="width:100%" @change="chooseOrder"><el-option v-for="o in orders" :key="o.id" :label="`${o.order_no} · ${customerMap[o.customer_id]||''}`" :value="o.id"/></el-select></el-form-item>
   <el-form-item label="关联出运批次"><el-select v-model="form.shipment_id" clearable filterable style="width:100%"><el-option v-for="s in (orderFull?.shipments||[])" :key="s.id" :label="`${s.booking_no||'Shipment'} · ${s.bl_no||''}`" :value="s.id"/></el-select></el-form-item>
   <el-form-item label="出口国"><el-input v-model="form.export_country"/></el-form-item><el-form-item label="目的国"><el-input v-model="form.destination_country"/></el-form-item>
   <el-form-item label="申报海关"><el-input v-model="form.customs_office"/></el-form-item><el-form-item label="申报日期"><el-input v-model="form.declaration_date" type="date"/></el-form-item>
   <el-form-item label="贸易方式"><el-select v-model="form.trade_mode" allow-create filterable style="width:100%"><el-option v-for="x in ['General Trade','Processing Trade','Cross-border E-commerce','Other']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
   <el-form-item label="Incoterm"><el-input v-model="form.incoterm"/></el-form-item>
 </div><el-form-item label="备注"><el-input v-model="form.notes" type="textarea"/></el-form-item>
-</el-form><template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" @click="createDeclaration">创建草稿</el-button></template></el-dialog>
+</el-form><template #footer><el-button :disabled="creating" @click="dialog=false">取消</el-button><el-button type="primary" :loading="creating" :disabled="orderLoading" @click="createDeclaration">创建草稿</el-button></template></el-dialog>
 
-<el-drawer v-model="drawer" size="90%" title="报关资料工作台"><template v-if="detail">
-<div class="toolbar"><div><h3 style="margin:0">{{detail.declaration_no}}</h3><span class="muted">{{detail.order_no}} · {{detail.customer_name}} · {{detail.booking_no||'未关联出运批次'}}</span></div><div style="display:flex;gap:8px"><el-button v-if="canEdit" @click="generateSheet">生成内部报关数据表</el-button><el-select v-if="canEdit" :model-value="detail.status" style="width:160px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-else :type="statusType(detail.status)">{{detail.status}}</el-tag></div></div>
+<el-drawer v-model="drawer" size="90%" title="报关资料工作台" v-loading="detailLoading"><template v-if="detail">
+<div class="toolbar"><div><h3 style="margin:0">{{detail.declaration_no}}</h3><span class="muted">{{detail.order_no}} · {{detail.customer_name}} · {{detail.booking_no||'未关联出运批次'}}</span></div><div style="display:flex;gap:8px"><el-button v-if="canEdit" :loading="actionBusy==='sheet'" :disabled="!!actionBusy&&actionBusy!=='sheet'" @click="generateSheet">生成内部报关数据表</el-button><el-select v-if="canEdit" :model-value="detail.status" :disabled="!!actionBusy" :loading="actionBusy==='status'" style="width:160px" @change="changeStatus"><el-option v-for="x in statuses" :key="x" :label="x" :value="x"/></el-select><el-tag v-else :type="statusType(detail.status)">{{detail.status}}</el-tag></div></div>
 
 <div class="card" style="margin-bottom:16px"><div class="grid" style="grid-template-columns:repeat(4,1fr)">
   <el-form-item label="出口国"><el-input v-model="detail.export_country" :disabled="!canEdit"/></el-form-item><el-form-item label="目的国"><el-input v-model="detail.destination_country" :disabled="!canEdit"/></el-form-item>
