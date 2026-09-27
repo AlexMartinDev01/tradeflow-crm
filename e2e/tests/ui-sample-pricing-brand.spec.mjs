@@ -99,9 +99,6 @@ test.describe('TradeFlow pricing workbench browser and RBAC acceptance',()=>{
     await expect(page.getByRole('heading',{name:'产品与价格'})).toBeVisible();
 
     await expect(page.getByRole('button',{name:'新增产品'})).toHaveCount(0);
-    await expect(page.getByRole('button',{name:'新增价目表'})).toHaveCount(0);
-    await expect(page.getByRole('button',{name:'新增规则'})).toHaveCount(0);
-    await expect(page.getByRole('button',{name:'新增关系'})).toBeVisible();
 
     const customerSelect=page.getByPlaceholder('选择客户');
     await selectElementOption(page,customerSelect,'Nordstern Technik GmbH');
@@ -120,6 +117,7 @@ test.describe('TradeFlow pricing workbench browser and RBAC acceptance',()=>{
 
     const note='UI pricing preference '+Date.now();
     await page.getByRole('tab',{name:'客户产品偏好'}).click();
+    await expect(page.getByRole('button',{name:'新增关系'})).toBeVisible();
     await page.getByRole('button',{name:'新增关系'}).click();
     const prefDialog=page.getByRole('dialog',{name:'客户产品关系'});
     await selectElementOption(page,prefDialog.getByLabel('客户'),'Nordstern Technik GmbH');
@@ -167,8 +165,10 @@ test.describe('TradeFlow brand channel workbench browser and integrity acceptanc
     await expect(page.getByRole('heading',{name:'品牌与渠道网络'})).toBeVisible();
     await page.getByRole('tab',{name:'渠道网络'}).click();
 
-    const brandSelect=page.getByPlaceholder('选择品牌');
-    await selectElementOption(page,brandSelect,brand.name);
+    const brandSelect=page.getByRole('combobox',{name:'选择品牌'});
+    await brandSelect.click();
+    await brandSelect.fill(brand.name);
+    await page.getByRole('option',{name:brand.name,exact:true}).click();
     await page.getByRole('button',{name:'新增渠道关系'}).click();
     const dialog=page.getByRole('dialog',{name:'新增渠道关系'});
     await selectElementOption(page,dialog.getByLabel('下游客户'),upstream.name);

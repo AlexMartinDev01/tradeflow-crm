@@ -79,7 +79,7 @@ onMounted(load);
 
 <el-tab-pane label="渠道网络">
   <div class="card" style="margin-bottom:16px"><div class="toolbar">
-    <el-select v-model="selectedBrand" filterable placeholder="选择品牌" style="width:280px" @change="loadNetwork"><el-option v-for="b in brands" :key="b.id" :label="b.name" :value="b.id"/></el-select>
+    <el-select v-model="selectedBrand" filterable placeholder="选择品牌" aria-label="选择品牌" style="width:280px" @change="loadNetwork"><el-option v-for="b in brands" :key="b.id" :label="b.name" :value="b.id"/></el-select>
     <el-button v-if="canManage" type="primary" @click="addEdge">新增渠道关系</el-button>
   </div></div>
 
