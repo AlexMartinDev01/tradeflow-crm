@@ -187,3 +187,39 @@ test.describe('TradeFlow transaction integrity and business invariants',()=>{
     expect(evaluation.history.filter(x=>x.status==='approved')).toHaveLength(1);
   });
 });
+
+
+test('opportunity to quotation conversion is atomic, advances stage and is idempotent',async({request})=>{
+  const manager=await loginApi(request,'demo.manager');
+  const customer=await createCustomer(request,manager.headers,'Opportunity Quote Atomic');
+  const opportunity=await postJson(request,'/api/opportunities',{
+    customer_id:customer.id,
+    name:'Atomic quote opportunity '+Date.now(),
+    stage:'solution',
+    expected_amount:32000,
+    currency:'USD',
+    expected_close_date:plusDays(30),
+    probability:55,
+    notes:'E2E idempotent opportunity conversion'
+  },manager.headers);
+
+  const payload={currency:'USD',incoterm:'FOB',payment_terms:'30/70',valid_until:plusDays(20)};
+  const [a,b]=await Promise.all([
+    request.post('/api/workflows/opportunities/'+opportunity.id+'/to-quotation',{headers:manager.headers,data:payload}),
+    request.post('/api/workflows/opportunities/'+opportunity.id+'/to-quotation',{headers:manager.headers,data:payload})
+  ]);
+  expect([a.status(),b.status()].sort((x,y)=>x-y)).toEqual([200,201]);
+  const qa=await a.json(),qb=await b.json();
+  expect(qa.id).toBe(qb.id);
+  expect(qa.version).toBe(1);
+
+  const opportunities=await getJson(request,'/api/opportunities?size=500',manager.headers);
+  const refreshed=opportunities.data.find(x=>x.id===opportunity.id);
+  expect(refreshed).toBeTruthy();
+  expect(refreshed.stage).toBe('quotation');
+
+  const quotations=await getJson(request,'/api/quotations?size=500',manager.headers);
+  const initial=quotations.data.filter(x=>x.opportunity_id===opportunity.id&&Number(x.version)===1);
+  expect(initial).toHaveLength(1);
+  expect(initial[0].id).toBe(qa.id);
+});
