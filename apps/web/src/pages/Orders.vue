@@ -240,7 +240,7 @@ onBeforeUnmount(()=>window.removeEventListener('keydown',handleEscape));
 </script>
 
 <template><AppLayout>
-  <TradeHero title="订单执行" subtitle="跟踪订单全流程进度，管理产品生产、交付计划、回款计划及相关单据，确保订单按时、按质、按量完成。" slogan="从订单到交付&#10;让全球贸易更简单">
+  <TradeHero variant="orders" title="订单执行" subtitle="跟踪订单全流程进度，管理产品生产、交付计划、回款计划及相关单据，确保订单按时、按质、按量完成。" slogan="从订单到交付&#10;让全球贸易更简单">
     <el-button v-if="canEdit" type="primary" @click="openCreate">＋ 新建订单</el-button>
     <el-button @click="exportOrders">导出订单</el-button>
   </TradeHero>
