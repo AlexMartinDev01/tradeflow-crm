@@ -30,7 +30,9 @@ test.describe('TradeFlow recycle and recovery browser workflow',()=>{
     const drawer=page.getByText('删除影响与恢复').locator('..');
     await expect(page.getByRole('button',{name:'恢复客户'})).toBeVisible();
     await page.getByRole('button',{name:'恢复客户'}).click();
-    await page.getByRole('button',{name:/确定|确认/}).last().click();
+    const confirmBox=page.locator('.el-message-box');
+    await expect(confirmBox).toBeVisible();
+    await confirmBox.locator('.el-button--primary').click();
     await expect(page.getByText('客户已恢复')).toBeVisible();
 
     const restored=await getJson(request,'/api/customers/'+customer.id,manager.headers);
@@ -44,7 +46,7 @@ test.describe('TradeFlow Excel import and export browser workflow',()=>{
     const manager=await loginApi(request,'demo.manager');
     const suffix=Date.now().toString().slice(-8);
     const name='Excel E2E Customer '+suffix;
-    const csv='客户名称,国家/地区,城市,官网,行业\n'+name+',Germany,Berlin,https://excel-'+suffix+'.example.com,Industrial Automation\n';
+    const csv='name,country,city,website,industry\n'+name+',Germany,Berlin,https://excel-'+suffix+'.example.com,Industrial Automation\n';
 
     await authenticatePage(page,request,'demo.manager');
     await page.goto('/#/data/excel');
@@ -56,8 +58,10 @@ test.describe('TradeFlow Excel import and export browser workflow',()=>{
       buffer:Buffer.from(csv,'utf8')
     });
     await expect(page.getByText(/已选择：e2e-import-/)).toBeVisible();
+    const previewResponse=page.waitForResponse(r=>r.url().includes('/api/customers/import/preview')&&r.request().method()==='POST'&&r.status()===200);
     await page.getByRole('button',{name:'预检数据'}).click();
-    await expect(page.getByText(name,{exact:true})).toBeVisible();
+    await previewResponse;
+    await expect(page.getByRole('row',{name:new RegExp(name)})).toBeVisible();
     await expect(page.getByText(/可新增 1/)).toBeVisible();
 
     await page.getByRole('button',{name:'执行正式导入'}).click();
