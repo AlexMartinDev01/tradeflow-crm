@@ -8,17 +8,19 @@ test.describe('TradeFlow global search coverage',()=>{
     const manager=await loginApi(request,'demo.manager');
 
     const cases=[
-      ['Nordstern Technik GmbH','Nordstern Technik GmbH'],
-      ['Anna Schmidt','Nordstern Technik GmbH'],
-      ['anna.schmidt@customer1.example.com','Nordstern Technik GmbH'],
-      ['重点客户（演示）','Nordstern Technik GmbH'],
-      ['Novaris Motion','Nordstern Technik GmbH'],
-      ['DE123456789','Nordstern Technik GmbH']
+      ['Nordstern Technik GmbH','Nordstern Technik GmbH','客户名称'],
+      ['Anna Schmidt','Nordstern Technik GmbH','联系人'],
+      ['anna.schmidt@customer1.example.com','Nordstern Technik GmbH','联系方式'],
+      ['重点客户（演示）','Nordstern Technik GmbH','标签'],
+      ['Novaris Motion','Nordstern Technik GmbH','品牌'],
+      ['DE123456789','Nordstern Technik GmbH','税号/VAT']
     ];
 
-    for(const [term,expected] of cases){
+    for(const [term,expected,reasonLabel] of cases){
       const rows=await getJson(request,'/api/search?q='+encodeURIComponent(term),manager.headers);
       expect(names(rows),`search term "${term}" should include ${expected}`).toContain(expected);
+      const row=rows.find(x=>x.name===expected);
+      expect(row.match_reasons?.some(x=>String(x.label).includes(reasonLabel)),`search term "${term}" should explain match as ${reasonLabel}`).toBe(true);
     }
   });
 
@@ -51,6 +53,7 @@ test.describe('TradeFlow global search coverage',()=>{
 
     const row=page.getByRole('row',{name:/Nordstern Technik GmbH/});
     await expect(row).toBeVisible();
+    await expect(row.getByText(/联系方式（email）/)).toBeVisible();
     await row.getByRole('button',{name:'打开客户'}).click();
 
     await expect(page).toHaveURL(/#\/customers\//);
