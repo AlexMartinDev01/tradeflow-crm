@@ -11,14 +11,14 @@ const d=ref<any>({});
 const loading=ref(false);
 
 const stats=computed(()=>[
-  {label:'客户',value:d.value.customers||0,hint:'客户资产总览',route:'/customers',icon:'kpi_customer'},
-  {label:'询盘',value:d.value.inquiries||0,hint:'查看最新询盘',route:'/sales/inquiries',icon:'kpi_inquiry'},
-  {label:'在跟商机',value:d.value.opportunities||0,hint:'推进销售机会',route:'/sales/opportunities',icon:'kpi_opportunity'},
-  {label:'订单',value:d.value.orders||0,hint:'订单执行进度',route:'/orders',icon:'kpi_order'},
-  {label:'联系人',value:d.value.contacts||0,hint:'客户联系人总量',route:'/customers',icon:'kpi_contact'},
-  {label:'待办',value:d.value.openTasks||0,hint:'优先处理到期事项',route:'/module/tasks',icon:'kpi_task'},
-  {label:'报价',value:d.value.quotations||0,hint:'报价与版本管理',route:'/sales/quotations',icon:'kpi_quote'},
-  {label:'逾期回款',value:d.value.overduePayments||0,hint:'关注资金风险',route:'/finance',icon:'kpi_overdue'}
+  {label:'客户',value:d.value.customers||0,hint:'客户资产总览',route:'/customers',icon:'kpi_customer',trend:'up'},
+  {label:'询盘',value:d.value.inquiries||0,hint:'查看最新询盘',route:'/sales/inquiries',icon:'kpi_inquiry',trend:'up'},
+  {label:'在跟商机',value:d.value.opportunities||0,hint:'推进销售机会',route:'/sales/opportunities',icon:'kpi_opportunity',trend:'up'},
+  {label:'订单',value:d.value.orders||0,hint:'订单执行进度',route:'/orders',icon:'kpi_order',trend:'up'},
+  {label:'联系人',value:d.value.contacts||0,hint:'客户联系人总量',route:'/customers',icon:'kpi_contact',trend:'up'},
+  {label:'待办',value:d.value.openTasks||0,hint:'优先处理到期事项',route:'/module/tasks',icon:'kpi_task',trend:'warn'},
+  {label:'报价',value:d.value.quotations||0,hint:'报价与版本管理',route:'/sales/quotations',icon:'kpi_quote',trend:'up'},
+  {label:'逾期回款',value:d.value.overduePayments||0,hint:'关注资金风险',route:'/finance',icon:'kpi_overdue',trend:'warn'}
 ]);
 
 async function load(){
@@ -32,17 +32,17 @@ onMounted(load);
 </script>
 
 <template><AppLayout>
-  <TradeHero title="经营工作台" subtitle="从线索到回款，打造高效、可持续增长的外贸业务闭环。" slogan="让中国好产品&#10;走向全球市场"/>
+  <TradeHero variant="dashboard" title="经营工作台" subtitle="从线索到回款，打造高效、可持续增长的外贸业务闭环。" slogan="让中国好产品&#10;走向全球市场"/>
 
   <div class="kpi-grid" v-loading="loading">
     <button v-for="item in stats" :key="item.label" class="kpi-card dashboard-kpi" type="button" @click="go(item.route)">
       <span class="kpi-icon ui-sprite" :class="'sprite-'+item.icon"></span>
       <span class="kpi-copy">
         <span class="kpi-label">{{item.label}}</span>
-        <span class="kpi-main"><b class="kpi-value">{{item.value}}</b></span>
+        <span class="kpi-main"><b class="kpi-value">{{item.value}}</b><i class="kpi-direction" :class="item.trend">{{item.trend==='warn'?'↓':'↑'}}</i></span>
         <span class="kpi-hint">{{item.hint}}</span>
       </span>
-      <span class="dashboard-kpi-arrow">›</span>
+      <span class="mini-bars" :class="item.trend" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
     </button>
   </div>
 
@@ -78,5 +78,13 @@ onMounted(load);
 </AppLayout></template>
 
 <style scoped>
-.dashboard-kpi{border:1px solid #e4ebf4;text-align:left;cursor:pointer;font:inherit}.dashboard-kpi:hover{border-color:#bfd4f6;box-shadow:0 7px 22px rgba(20,85,180,.08);transform:translateY(-1px)}.dashboard-kpi-arrow{position:absolute;right:13px;top:15px;color:#7288a6;font-size:20px}.dashboard-kpi .kpi-copy{display:flex;flex-direction:column}
+.dashboard-kpi{border:1px solid #e4ebf4;text-align:left;cursor:pointer;font:inherit}
+.dashboard-kpi:hover{border-color:#bfd4f6;box-shadow:0 5px 16px rgba(20,85,180,.07);transform:translateY(-1px)}
+.dashboard-kpi .kpi-copy{display:flex;flex-direction:column}
+.kpi-direction{font-style:normal;font-size:10px;font-weight:800;color:#23b26d;margin-left:2px}
+.kpi-direction.warn{color:#ff5a63}
+.mini-bars{position:absolute;right:12px;bottom:14px;height:26px;width:37px;display:flex;align-items:flex-end;gap:2px}
+.mini-bars i{display:block;width:5px;border-radius:1px;background:#ff9b45}
+.mini-bars i:nth-child(1){height:7px}.mini-bars i:nth-child(2){height:11px}.mini-bars i:nth-child(3){height:16px}.mini-bars i:nth-child(4){height:21px}.mini-bars i:nth-child(5){height:25px}
+.mini-bars.warn i{background:#ff6670}.mini-bars.warn i:nth-child(2){height:22px}.mini-bars.warn i:nth-child(3){height:17px}.mini-bars.warn i:nth-child(4){height:12px}.mini-bars.warn i:nth-child(5){height:7px}
 </style>
