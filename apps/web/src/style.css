@@ -25,3 +25,15 @@
 .el-tag.el-tag--primary.el-tag--light .el-tag__close{
   color:#1e40af!important;
 }
+
+
+/* Shared workbench ergonomics */
+.toolbar-control{width:280px;max-width:100%}
+.toolbar-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.table-card{overflow:hidden}
+.table-card .el-table{max-width:100%}
+@media(max-width:700px){
+  .toolbar-control{width:100%!important;max-width:100%!important}
+  .toolbar-actions{width:100%}
+  .toolbar-actions>.el-button{margin-left:0}
+}

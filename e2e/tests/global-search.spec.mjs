@@ -60,3 +60,17 @@ test.describe('TradeFlow global search coverage',()=>{
     await expect(page.getByText('Nordstern Technik GmbH').first()).toBeVisible();
   });
 });
+
+
+test('real browser distinguishes an empty result from an untouched search',async({page,request})=>{
+  await authenticatePage(page,request,'demo.manager');
+  await page.goto('/#/search');
+  await expect(page.getByText('输入关键词开始搜索')).toBeVisible();
+
+  const term='NoSuchCustomer-'+Date.now();
+  await page.getByPlaceholder('输入客户名、联系人、邮箱、电话、品牌、标签、税号等').fill(term);
+  await page.getByRole('button',{name:'搜索'}).click();
+
+  await expect(page.getByText('未找到匹配客户')).toBeVisible();
+  await expect(page.getByText('0 个结果',{exact:true})).toBeVisible();
+});

@@ -173,3 +173,34 @@ test.describe('TradeFlow complex mobile workbenches',()=>{
     await expectNoPageOverflow(page,'BI report result');
   });
 });
+
+
+test.describe('TradeFlow additional mobile workbenches',()=>{
+  test.use({viewport:{width:390,height:844}});
+
+  async function expectNoOverflow(page,label){
+    const overflow=await page.evaluate(()=>document.documentElement.scrollWidth-window.innerWidth);
+    expect(overflow,label+' must not create document-level horizontal overflow').toBeLessThanOrEqual(2);
+  }
+
+  test('search, finance and shipment workbenches stay within phone viewport',async({page,request})=>{
+    await authenticatePage(page,request,'demo.manager');
+
+    await page.goto('/#/search');
+    await expect(page.getByRole('heading',{name:'全局搜索'})).toBeVisible();
+    await page.getByPlaceholder('输入客户名、联系人、邮箱、电话、品牌、标签、税号等').fill('Anna Schmidt');
+    await page.getByRole('button',{name:'搜索'}).click();
+    await expect(page.getByRole('row',{name:/Nordstern Technik GmbH/})).toBeVisible();
+    await expectNoOverflow(page,'global search');
+
+    await page.goto('/#/finance');
+    await expect(page.getByRole('heading',{name:'回款与信用'})).toBeVisible();
+    await expect(page.getByText('应收 / 回款明细')).toBeVisible();
+    await expectNoOverflow(page,'finance');
+
+    await page.goto('/#/shipments');
+    await expect(page.getByRole('heading',{name:'出运执行'})).toBeVisible();
+    await expect(page.getByText(/共 \d+ 批/)).toBeVisible();
+    await expectNoOverflow(page,'shipments');
+  });
+});
