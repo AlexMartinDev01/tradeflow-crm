@@ -13,9 +13,10 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     const manager=await loginApi(request,'demo.manager');
     const suffix=Date.now().toString().slice(-7);
     const fixtureName='Marketing Fixture '+suffix;
-    const segmentName='Iceland B Segment '+suffix;
+    const uniqueSource='Marketing UI '+suffix;
+    const segmentName='Unique Source Segment '+suffix;
     const templateName='Q4 Demo Template '+suffix;
-    const campaignName='Iceland Q4 Campaign '+suffix;
+    const campaignName='Isolated Q4 Campaign '+suffix;
 
     const customer=await postJson(request,'/api/customers',{
       name:fixtureName,
@@ -26,7 +27,7 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
       customer_types:['Importer'],
       status:'following',
       grade:'B',
-      source:'Marketing UI '+suffix,
+      source:uniqueSource,
       language:'English',
       timezone:'Atlantic/Reykjavik'
     },manager.headers);
@@ -62,8 +63,7 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     await page.getByRole('button',{name:'新建分群'}).click();
     const segmentDialog=page.getByRole('dialog',{name:'新建动态客户分群'});
     await segmentDialog.getByLabel('分群名称').fill(segmentName);
-    await choose(page,segmentDialog.getByTestId('segment-country'),'Iceland');
-    await choose(page,segmentDialog.getByTestId('segment-grade'),'B');
+    await choose(page,segmentDialog.getByTestId('segment-source'),uniqueSource);
     await segmentDialog.getByRole('button',{name:'先预览匹配客户'}).click();
 
     const previewDialog=page.getByRole('dialog',{name:'分群预览'});
