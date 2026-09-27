@@ -74,7 +74,7 @@ const summary=computed(()=>{
   };
 });
 
-function statusLabel(v:string){return statusOptions.find(x=>x.value===v)?.label||v||'-'}
+function rowClassName({row}:any){return row.id===selectedId.value?'selected-row':''}\nfunction statusLabel(v:string){return statusOptions.find(x=>x.value===v)?.label||v||'-'}
 function statusType(v:string){
   if(v==='delivered')return 'success';
   if(v==='customs'||v==='booking')return 'warning';
@@ -206,7 +206,7 @@ onMounted(async()=>{await load();if(shipments.value[0])await open(shipments.valu
         </div>
       </div>
 
-      <el-table v-loading="loading" :data="filteredShipments" empty-text="当前范围暂无出运批次" :row-class-name="({row}:any)=>row.id===selectedId?'selected-row':''" @row-click="open">
+      <el-table v-loading="loading" :data="filteredShipments" empty-text="当前范围暂无出运批次" :row-class-name="rowClassName" @row-click="open">
         <el-table-column label="订单号" min-width="145"><template #default="s"><button class="shipment-link" type="button" @click.stop="open(s.row)">{{orderMap[s.row.order_id]||s.row.order_id}}</button></template></el-table-column>
         <el-table-column prop="booking_no" label="订舱号" min-width="120"/>
         <el-table-column prop="carrier" label="船公司" width="100"/>
