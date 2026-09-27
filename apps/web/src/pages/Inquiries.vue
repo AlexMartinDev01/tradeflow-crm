@@ -9,7 +9,7 @@ const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
 const canWrite=computed(()=>['admin','manager','sales','followup'].includes(auth.user?.role));
 const canConvert=computed(()=>['admin','manager','sales'].includes(auth.user?.role));
 const rows=ref<any[]>([]),customers=ref<any[]>([]),contacts=ref<any[]>([]),summary=ref<any>({}),slaHours=ref(4);
-const dialog=ref(false),convertDialog=ref(false),selected=ref<any>(null),loading=ref(false);
+const dialog=ref(false),convertDialog=ref(false),selected=ref<any>(null),loading=ref(false),creating=ref(false),converting=ref(false),respondingId=ref('');
 const form=reactive<any>({customer_id:'',contact_id:'',source:'Website',status:'new',products:[],quantity:'',target_price:'',incoterm:'FOB',destination_port:'',requested_delivery:'',received_at:new Date().toISOString().slice(0,16),notes:''});
 const conv=reactive<any>({name:'',expected_amount:0,currency:'USD',expected_close_date:'',probability:20,competitor:'',notes:''});
 const customerMap=computed(()=>Object.fromEntries(customers.value.map((x:any)=>[x.id,x.name])));
@@ -25,12 +25,17 @@ async function load(){
     ]);
     rows.value=dash.data.rows;summary.value=dash.data.summary;slaHours.value=dash.data.sla_hours;
     customers.value=c.data.data;contacts.value=ct.data.data;
-  }finally{loading.value=false}
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'询盘数据加载失败，请稍后重试')}
+  finally{loading.value=false}
 }
 async function save(){
   if(!form.customer_id)return ElMessage.warning('请选择客户');
-  await api.post('/inquiries',{...form,received_at:new Date(form.received_at).toISOString()});
-  dialog.value=false;await load();ElMessage.success('询盘已创建并自动分配负责人');
+  if(creating.value)return;creating.value=true;
+  try{
+    await api.post('/inquiries',{...form,received_at:new Date(form.received_at).toISOString()});
+    dialog.value=false;await load();ElMessage.success('询盘已创建并自动分配负责人');
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'询盘创建失败，请检查输入后重试')}
+  finally{creating.value=false}
 }
 function openConvert(r:any){
   selected.value=r;
@@ -38,13 +43,23 @@ function openConvert(r:any){
   convertDialog.value=true;
 }
 async function convert(){
-  await api.post(`/workflows/inquiries/${selected.value.id}/to-opportunity`,conv);
-  convertDialog.value=false;await load();ElMessage.success('已转为商机');
+  if(!selected.value||converting.value)return;
+  if(!conv.name.trim())return ElMessage.warning('请输入商机名称');
+  converting.value=true;
+  try{
+    await api.post(`/workflows/inquiries/${selected.value.id}/to-opportunity`,conv);
+    convertDialog.value=false;await load();ElMessage.success('已转为商机');
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'询盘转商机失败，请稍后重试')}
+  finally{converting.value=false}
 }
 async function markResponded(r:any){
-  const {data}=await api.post(`/workflows/inquiries/${r.id}/respond`,{response_at:new Date().toISOString()});
-  await load();
-  ElMessage.success(data.sla_status==='within_sla'?'已记录首次响应，SLA达标':'已记录首次响应');
+  if(respondingId.value)return;respondingId.value=r.id;
+  try{
+    const {data}=await api.post(`/workflows/inquiries/${r.id}/respond`,{response_at:new Date().toISOString()});
+    await load();
+    ElMessage.success(data.sla_status==='within_sla'?'已记录首次响应，SLA达标':'已记录首次响应');
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'记录首次响应失败')}
+  finally{respondingId.value=''}
 }
 function slaType(r:any){return r.sla_status==='within_sla'?'success':r.sla_status==='breached'||r.sla_status==='overdue'?'danger':'warning'}
 function slaText(r:any){
@@ -75,8 +90,8 @@ onMounted(load);
   <el-table-column label="首次响应 SLA" width="160"><template #default="s"><el-tag :type="slaType(s.row)">{{slaText(s.row)}}</el-tag></template></el-table-column>
   <el-table-column prop="status" label="状态" width="105"><template #default="s"><el-tag :type="s.row.status==='converted'?'success':'info'">{{s.row.status}}</el-tag></template></el-table-column>
   <el-table-column label="操作" width="190" fixed="right"><template #default="s">
-    <el-button v-if="canWrite&&!s.row.first_response_at&&s.row.status!=='converted'" link type="success" @click="markResponded(s.row)">记录响应</el-button>
-    <el-button v-if="canConvert&&s.row.status!=='converted'" link type="primary" @click="openConvert(s.row)">转商机</el-button>
+    <el-button v-if="canWrite&&!s.row.first_response_at&&s.row.status!=='converted'" link type="success" :loading="respondingId===s.row.id" :disabled="!!respondingId&&respondingId!==s.row.id" @click="markResponded(s.row)">记录响应</el-button>
+    <el-button v-if="canConvert&&s.row.status!=='converted'" link type="primary" :disabled="!!respondingId" @click="openConvert(s.row)">转商机</el-button>
   </template></el-table-column>
 </el-table></div>
 
@@ -88,7 +103,7 @@ onMounted(load);
 <el-form-item label="目标价"><el-input v-model="form.target_price"/></el-form-item><el-form-item label="Incoterm"><el-select v-model="form.incoterm" style="width:100%"><el-option v-for="x in ['EXW','FOB','CFR','CIF','DAP','DDP']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
 <el-form-item label="目的港"><el-input v-model="form.destination_port"/></el-form-item><el-form-item label="期望交期"><el-input v-model="form.requested_delivery" type="date"/></el-form-item>
 </div><el-form-item label="备注"><el-input v-model="form.notes" type="textarea"/></el-form-item></el-form>
-<template #footer><el-button @click="dialog=false">取消</el-button><el-button type="primary" @click="save">保存询盘</el-button></template></el-dialog>
+<template #footer><el-button :disabled="creating" @click="dialog=false">取消</el-button><el-button type="primary" :loading="creating" @click="save">保存询盘</el-button></template></el-dialog>
 
 <el-dialog v-model="convertDialog" title="询盘转商机" width="620"><el-form label-position="top">
 <el-form-item label="商机名称"><el-input v-model="conv.name"/></el-form-item><div class="grid" style="grid-template-columns:1fr 1fr">
@@ -97,5 +112,5 @@ onMounted(load);
 <el-form-item label="预计成交日"><el-input v-model="conv.expected_close_date" type="date"/></el-form-item>
 <el-form-item label="成交概率 %"><el-input v-model.number="conv.probability" type="number"/></el-form-item></div>
 <el-form-item label="竞争对手"><el-input v-model="conv.competitor"/></el-form-item><el-form-item label="备注"><el-input v-model="conv.notes" type="textarea"/></el-form-item>
-</el-form><template #footer><el-button @click="convertDialog=false">取消</el-button><el-button type="primary" @click="convert">确认转商机</el-button></template></el-dialog>
+</el-form><template #footer><el-button :disabled="converting" @click="convertDialog=false">取消</el-button><el-button type="primary" :loading="converting" @click="convert">确认转商机</el-button></template></el-dialog>
 </AppLayout></template>
