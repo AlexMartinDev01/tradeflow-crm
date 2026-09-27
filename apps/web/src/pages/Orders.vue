@@ -75,7 +75,8 @@ const summary=computed(()=>{
   return {active,waitingProduction,waitingShipment,waitingPayment,completed};
 });
 
-function rowClassName({row}:any){return row.id===selectedId.value?'selected-row':''}\nfunction statusLabel(v:string){return statusOptions.find(x=>x.value===v)?.label||v||'-'}
+function rowClassName({row}:any){return row.id===selectedId.value?'selected-row':''}
+function statusLabel(v:string){return statusOptions.find(x=>x.value===v)?.label||v||'-'}
 function statusType(v:string){
   if(v==='completed')return 'success';
   if(v==='cancelled')return 'danger';
