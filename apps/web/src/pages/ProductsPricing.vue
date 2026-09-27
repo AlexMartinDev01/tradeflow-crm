@@ -6,10 +6,11 @@ import {api} from '../api/client';
 import {useAuth} from '../stores/auth';
 
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
-const products=ref<any[]>([]),customers=ref<any[]>([]),preferences=ref<any[]>([]),priceLists=ref<any[]>([]),rules=ref<any[]>([]);
+const products=ref<any[]>([]),customers=ref<any[]>([]),preferences=ref<any[]>([]),priceLists=ref<any[]>([]),rules=ref<any[]>([]),loading=ref(false),actionBusy=ref('');
 const productDialog=ref(false),editingProduct=ref<any>(null),prefDialog=ref(false),listDialog=ref(false),listDrawer=ref(false),ruleDialog=ref(false),resolveDialog=ref(false),historyDialog=ref(false);
 const selectedList=ref<any>(null),resolved=ref<any>(null),history=ref<any[]>([]);
 const canManage=computed(()=>['admin','manager'].includes(auth.user?.role));
+const canEditPreference=computed(()=>['admin','manager','sales'].includes(auth.user?.role));
 const productMap=computed(()=>Object.fromEntries(products.value.map(x=>[x.id,x])));
 const customerMap=computed(()=>Object.fromEntries(customers.value.map(x=>[x.id,x])));
 
@@ -21,13 +22,18 @@ const rule=reactive<any>({product_id:'',country:'',rule_type:'prohibited',requir
 const resolver=reactive<any>({customer_id:'',product_id:'',quantity:1,target_currency:'USD'});
 const histFilter=reactive<any>({customer_id:'',product_id:''});
 
+async function runBusy(key:string,fn:()=>Promise<any>){if(actionBusy.value)return;actionBusy.value=key;try{return await fn()}finally{actionBusy.value=''}}
 async function load(){
-  const [p,c,pr,pl,r]=await Promise.all([
-    api.get('/products',{params:{size:300}}),api.get('/customers',{params:{size:300}}),
-    api.get('/customerProductPreferences',{params:{size:500}}),api.get('/pricing/price-lists'),
-    api.get('/productMarketRules',{params:{size:500}})
-  ]);
-  products.value=p.data.data;customers.value=c.data.data;preferences.value=pr.data.data;priceLists.value=pl.data;rules.value=r.data.data;
+  loading.value=true;
+  try{
+    const [p,c,pr,pl,r]=await Promise.all([
+      api.get('/products',{params:{size:300}}),api.get('/customers',{params:{size:300}}),
+      api.get('/customerProductPreferences',{params:{size:500}}),api.get('/pricing/price-lists'),
+      api.get('/productMarketRules',{params:{size:500}})
+    ]);
+    products.value=p.data.data;customers.value=c.data.data;preferences.value=pr.data.data;priceLists.value=pl.data;rules.value=r.data.data;
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'产品与价格数据加载失败，请稍后重试')}
+  finally{loading.value=false}
 }
 function resetProduct(){editingProduct.value=null;Object.assign(product,{sku:'',name:'',category:'',description:'',certifications:[],base_price:0,floor_price:0,currency:'USD',active:1,hs_code:'',customs_name:'',origin_country:'',declaration_elements:{brand:'',model:'',material:'',usage:''}})}
 function newProduct(){resetProduct();productDialog.value=true}
@@ -40,9 +46,16 @@ async function saveProduct(){
 }
 async function savePref(){
   if(!pref.customer_id||!pref.product_id)return ElMessage.warning('客户和产品必填');
-  await api.post('/customerProductPreferences',pref);prefDialog.value=false;Object.assign(pref,{customer_id:'',product_id:'',preference_type:'interested',interest_level:'medium',notes:''});await load()
+  await runBusy('pref-save',async()=>{try{
+    await api.post('/customerProductPreferences',pref);
+    prefDialog.value=false;
+    Object.assign(pref,{customer_id:'',product_id:'',preference_type:'interested',interest_level:'medium',notes:''});
+    await load();ElMessage.success('客户产品关系已保存');
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'客户产品关系保存失败')}})
 }
-async function deletePref(r:any){await api.delete(`/customerProductPreferences/${r.id}`);await load()}
+async function deletePref(r:any){await runBusy('pref-delete-'+r.id,async()=>{try{
+  await api.delete(`/customerProductPreferences/${r.id}`);await load();ElMessage.success('客户产品关系已删除');
+}catch(e:any){ElMessage.error(e.response?.data?.message||'删除失败')}})}
 async function saveList(){
   if(!listForm.name.trim())return ElMessage.warning('价目表名称必填');
   await api.post('/pricing/price-lists',listForm);listDialog.value=false;Object.assign(listForm,{name:'',customer_id:'',currency:'USD',valid_from:'',valid_to:'',status:'active',notes:''});await load()
@@ -61,44 +74,49 @@ async function saveRule(){
 async function deleteRule(r:any){await api.delete(`/productMarketRules/${r.id}`);await load()}
 async function resolvePrice(){
   if(!resolver.customer_id||!resolver.product_id)return ElMessage.warning('请选择客户和产品');
-  resolved.value=(await api.get('/pricing/resolve',{params:{customer_id:resolver.customer_id,product_id:resolver.product_id,quantity:resolver.quantity,target_currency:resolver.target_currency||undefined}})).data;resolveDialog.value=true
+  await runBusy('resolve',async()=>{try{
+    resolved.value=(await api.get('/pricing/resolve',{params:{customer_id:resolver.customer_id,product_id:resolver.product_id,quantity:resolver.quantity,target_currency:resolver.target_currency||undefined}})).data;
+    resolveDialog.value=true;
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'价格解析失败，请检查价目表、市场规则与汇率配置')}})
 }
 async function showHistory(){
   if(!histFilter.customer_id||!histFilter.product_id)return ElMessage.warning('请选择客户和产品');
-  history.value=(await api.get('/pricing/history',{params:histFilter})).data;historyDialog.value=true
+  await runBusy('history',async()=>{try{
+    history.value=(await api.get('/pricing/history',{params:histFilter})).data;historyDialog.value=true;
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'历史价格查询失败')}})
 }
 function money(v:any){return Number(v||0).toLocaleString(undefined,{maximumFractionDigits:4})}
 onMounted(load);
 </script>
 
 <template><AppLayout>
-<div class="toolbar"><div><h2 style="margin:0">产品与价格</h2><span class="muted">产品、客户偏好、专属价目表、阶梯价、历史价与市场限制</span></div><div style="display:flex;gap:8px"><el-button @click="showHistory">查询历史价</el-button><el-button type="primary" @click="resolvePrice">价格解析</el-button></div></div>
+<div class="toolbar"><div><h2 style="margin:0">产品与价格</h2><span class="muted">产品、客户偏好、专属价目表、阶梯价、历史价与市场限制</span></div><div style="display:flex;gap:8px"><el-button :loading="actionBusy==='history'" :disabled="!!actionBusy&&actionBusy!=='history'" @click="showHistory">查询历史价</el-button><el-button type="primary" :loading="actionBusy==='resolve'" :disabled="!!actionBusy&&actionBusy!=='resolve'" @click="resolvePrice">价格解析</el-button></div></div>
 
 <div class="card" style="margin-bottom:16px"><div class="grid" style="grid-template-columns:1fr 1fr 140px 140px auto">
 <el-select v-model="resolver.customer_id" filterable placeholder="选择客户"><el-option v-for="c in customers" :key="c.id" :label="c.name" :value="c.id"/></el-select>
 <el-select v-model="resolver.product_id" filterable placeholder="选择产品"><el-option v-for="p in products" :key="p.id" :label="`${p.sku||'-'} · ${p.name}`" :value="p.id"/></el-select>
-<el-input-number v-model="resolver.quantity" :min="1"/><el-select v-model="resolver.target_currency" clearable placeholder="目标币种"><el-option v-for="x in ['USD','EUR','GBP','CNY','JPY','CAD','AUD']" :key="x" :label="x" :value="x"/></el-select><el-button type="primary" plain @click="resolvePrice">解析当前价格</el-button>
+<el-input-number v-model="resolver.quantity" :min="1"/><el-select v-model="resolver.target_currency" clearable placeholder="目标币种"><el-option v-for="x in ['USD','EUR','GBP','CNY','JPY','CAD','AUD']" :key="x" :label="x" :value="x"/></el-select><el-button type="primary" plain :loading="actionBusy==='resolve'" :disabled="!!actionBusy&&actionBusy!=='resolve'" @click="resolvePrice">解析当前价格</el-button>
 </div></div>
 
 <el-tabs>
 <el-tab-pane label="产品主数据">
 <div class="toolbar"><span class="muted">{{products.length}} 个产品</span><el-button v-if="canManage" type="primary" @click="newProduct">新增产品</el-button></div>
-<div class="card"><el-table :data="products"><el-table-column prop="sku" label="SKU" width="130"/><el-table-column prop="name" label="产品" min-width="170"/><el-table-column prop="category" label="分类"/><el-table-column prop="hs_code" label="HS Code" width="130"/><el-table-column prop="customs_name" label="报关品名" min-width="150"/><el-table-column prop="origin_country" label="原产国" width="100"/><el-table-column label="认证" min-width="150"><template #default="s"><el-tag v-for="x in (s.row.certifications||[])" :key="x" size="small" style="margin:2px">{{x}}</el-tag></template></el-table-column><el-table-column label="基础价" width="130"><template #default="s">{{s.row.currency}} {{money(s.row.base_price)}}</template></el-table-column><el-table-column v-if="canManage" label="底价" width="130"><template #default="s">{{s.row.floor_price?`${s.row.currency} ${money(s.row.floor_price)}`:'-'}}</template></el-table-column><el-table-column label="启用" width="75"><template #default="s">{{s.row.active?'是':'否'}}</template></el-table-column><el-table-column v-if="canManage" label="操作" width="80" fixed="right"><template #default="s"><el-button link type="primary" @click="editProduct(s.row)">编辑</el-button></template></el-table-column></el-table></div>
+<div class="card"><el-table v-loading="loading" :data="products"><el-table-column prop="sku" label="SKU" width="130"/><el-table-column prop="name" label="产品" min-width="170"/><el-table-column prop="category" label="分类"/><el-table-column prop="hs_code" label="HS Code" width="130"/><el-table-column prop="customs_name" label="报关品名" min-width="150"/><el-table-column prop="origin_country" label="原产国" width="100"/><el-table-column label="认证" min-width="150"><template #default="s"><el-tag v-for="x in (s.row.certifications||[])" :key="x" size="small" style="margin:2px">{{x}}</el-tag></template></el-table-column><el-table-column label="基础价" width="130"><template #default="s">{{s.row.currency}} {{money(s.row.base_price)}}</template></el-table-column><el-table-column v-if="canManage" label="底价" width="130"><template #default="s">{{s.row.floor_price?`${s.row.currency} ${money(s.row.floor_price)}`:'-'}}</template></el-table-column><el-table-column label="启用" width="75"><template #default="s">{{s.row.active?'是':'否'}}</template></el-table-column><el-table-column v-if="canManage" label="操作" width="80" fixed="right"><template #default="s"><el-button link type="primary" @click="editProduct(s.row)">编辑</el-button></template></el-table-column></el-table></div>
 </el-tab-pane>
 
 <el-tab-pane label="客户产品偏好">
-<div class="toolbar"><span class="muted">兴趣、已报价、已采购、禁售或不适配。</span><el-button type="primary" @click="prefDialog=true">新增关系</el-button></div>
-<div class="card"><el-table :data="preferences"><el-table-column label="客户" min-width="170"><template #default="s">{{customerMap[s.row.customer_id]?.name||s.row.customer_id}}</template></el-table-column><el-table-column label="产品" min-width="170"><template #default="s">{{productMap[s.row.product_id]?.name||s.row.product_id}}</template></el-table-column><el-table-column prop="preference_type" label="关系"/><el-table-column prop="interest_level" label="兴趣等级"/><el-table-column prop="notes" label="备注"/><el-table-column label="操作" width="80"><template #default="s"><el-button link type="danger" @click="deletePref(s.row)">删除</el-button></template></el-table-column></el-table></div>
+<div class="toolbar"><span class="muted">兴趣、已报价、已采购、禁售或不适配。</span><el-button v-if="canEditPreference" type="primary" @click="prefDialog=true">新增关系</el-button></div>
+<div class="card"><el-table v-loading="loading" :data="preferences"><el-table-column label="客户" min-width="170"><template #default="s">{{customerMap[s.row.customer_id]?.name||s.row.customer_id}}</template></el-table-column><el-table-column label="产品" min-width="170"><template #default="s">{{productMap[s.row.product_id]?.name||s.row.product_id}}</template></el-table-column><el-table-column prop="preference_type" label="关系"/><el-table-column prop="interest_level" label="兴趣等级"/><el-table-column prop="notes" label="备注"/><el-table-column v-if="canEditPreference" label="操作" width="80"><template #default="s"><el-button link type="danger" :loading="actionBusy==='pref-delete-'+s.row.id" :disabled="!!actionBusy&&actionBusy!==('pref-delete-'+s.row.id)" @click="deletePref(s.row)">删除</el-button></template></el-table-column></el-table></div>
 </el-tab-pane>
 
 <el-tab-pane label="价目表 / 阶梯价">
 <div class="toolbar"><span class="muted">支持全局价目表和客户专属价目表。</span><el-button v-if="canManage" type="primary" @click="listDialog=true">新增价目表</el-button></div>
-<div class="card"><el-table :data="priceLists" @row-dblclick="openList"><el-table-column prop="name" label="价目表" min-width="180"/><el-table-column label="客户" min-width="160"><template #default="s">{{s.row.customer_id?(customerMap[s.row.customer_id]?.name||s.row.customer_id):'通用'}}</template></el-table-column><el-table-column prop="currency" label="币种"/><el-table-column prop="valid_from" label="生效"/><el-table-column prop="valid_to" label="失效"/><el-table-column prop="status" label="状态"/><el-table-column label="操作" width="140"><template #default="s"><el-button link @click="openList(s.row)">阶梯价</el-button><el-button v-if="canManage" link type="danger" @click="deleteList(s.row)">删除</el-button></template></el-table-column></el-table></div>
+<div class="card"><el-table v-loading="loading" :data="priceLists" @row-dblclick="openList"><el-table-column prop="name" label="价目表" min-width="180"/><el-table-column label="客户" min-width="160"><template #default="s">{{s.row.customer_id?(customerMap[s.row.customer_id]?.name||s.row.customer_id):'通用'}}</template></el-table-column><el-table-column prop="currency" label="币种"/><el-table-column prop="valid_from" label="生效"/><el-table-column prop="valid_to" label="失效"/><el-table-column prop="status" label="状态"/><el-table-column label="操作" width="140"><template #default="s"><el-button link @click="openList(s.row)">阶梯价</el-button><el-button v-if="canManage" link type="danger" @click="deleteList(s.row)">删除</el-button></template></el-table-column></el-table></div>
 </el-tab-pane>
 
 <el-tab-pane label="市场规则">
 <div class="toolbar"><span class="muted">按国家配置禁售或所需认证。</span><el-button v-if="canManage" type="primary" @click="ruleDialog=true">新增规则</el-button></div>
-<div class="card"><el-table :data="rules"><el-table-column label="产品" min-width="170"><template #default="s">{{productMap[s.row.product_id]?.name||s.row.product_id}}</template></el-table-column><el-table-column prop="country" label="国家（空=全球）"/><el-table-column prop="rule_type" label="规则"/><el-table-column label="要求认证" min-width="170"><template #default="s">{{(s.row.required_certifications||[]).join('、')||'-'}}</template></el-table-column><el-table-column prop="notes" label="备注"/><el-table-column v-if="canManage" label="操作" width="80"><template #default="s"><el-button link type="danger" @click="deleteRule(s.row)">删除</el-button></template></el-table-column></el-table></div>
+<div class="card"><el-table v-loading="loading" :data="rules"><el-table-column label="产品" min-width="170"><template #default="s">{{productMap[s.row.product_id]?.name||s.row.product_id}}</template></el-table-column><el-table-column prop="country" label="国家（空=全球）"/><el-table-column prop="rule_type" label="规则"/><el-table-column label="要求认证" min-width="170"><template #default="s">{{(s.row.required_certifications||[]).join('、')||'-'}}</template></el-table-column><el-table-column prop="notes" label="备注"/><el-table-column v-if="canManage" label="操作" width="80"><template #default="s"><el-button link type="danger" @click="deleteRule(s.row)">删除</el-button></template></el-table-column></el-table></div>
 </el-tab-pane>
 </el-tabs>
 
