@@ -1,8 +1,13 @@
 <script setup lang="ts">
-defineProps<{title:string;subtitle:string;slogan?:string}>();
+withDefaults(defineProps<{
+  title:string;
+  subtitle:string;
+  slogan?:string;
+  variant?:'dashboard'|'orders'|'shipments';
+}>(),{variant:'dashboard'});
 </script>
 <template>
-  <section class="trade-hero">
+  <section class="trade-hero" :class="'trade-hero-'+variant">
     <div class="trade-hero-copy">
       <h1>{{title}}</h1>
       <p>{{subtitle}}</p>
