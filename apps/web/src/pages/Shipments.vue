@@ -187,11 +187,11 @@ onMounted(async()=>{await load();if(shipments.value[0])await open(shipments.valu
   </TradeHero>
 
   <div class="kpi-grid five">
-    <div class="kpi-card"><span class="kpi-icon blue">♨</span><span class="kpi-copy"><span class="kpi-label">本周出运批次</span><span class="kpi-main"><b class="kpi-value">{{summary.week}}</b></span><span class="kpi-hint">近 7 天创建批次</span></span></div>
-    <div class="kpi-card"><span class="kpi-icon orange">▣</span><span class="kpi-copy"><span class="kpi-label">待订舱</span><span class="kpi-main"><b class="kpi-value">{{summary.booking}}</b></span><span class="kpi-hint">等待安排订舱</span></span></div>
-    <div class="kpi-card"><span class="kpi-icon purple">⚓</span><span class="kpi-copy"><span class="kpi-label">待报关</span><span class="kpi-main"><b class="kpi-value">{{summary.customs}}</b></span><span class="kpi-hint">报关流程处理中</span></span></div>
-    <div class="kpi-card"><span class="kpi-icon blue">▰</span><span class="kpi-copy"><span class="kpi-label">在途批次</span><span class="kpi-main"><b class="kpi-value">{{summary.transit}}</b></span><span class="kpi-hint">离港或已到港</span></span></div>
-    <div class="kpi-card"><span class="kpi-icon green">✓</span><span class="kpi-copy"><span class="kpi-label">已交付</span><span class="kpi-main"><b class="kpi-value">{{summary.delivered}}</b></span><span class="kpi-hint">完成签收批次</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-ship_week"></span><span class="kpi-copy"><span class="kpi-label">本周出运批次</span><span class="kpi-main"><b class="kpi-value">{{summary.week}}</b></span><span class="kpi-hint">近 7 天创建批次</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-ship_booking"></span><span class="kpi-copy"><span class="kpi-label">待订舱</span><span class="kpi-main"><b class="kpi-value">{{summary.booking}}</b></span><span class="kpi-hint">等待安排订舱</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-ship_customs"></span><span class="kpi-copy"><span class="kpi-label">待报关</span><span class="kpi-main"><b class="kpi-value">{{summary.customs}}</b></span><span class="kpi-hint">报关流程处理中</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-ship_transit"></span><span class="kpi-copy"><span class="kpi-label">在途批次</span><span class="kpi-main"><b class="kpi-value">{{summary.transit}}</b></span><span class="kpi-hint">离港或已到港</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-ship_delivered"></span><span class="kpi-copy"><span class="kpi-label">已交付</span><span class="kpi-main"><b class="kpi-value">{{summary.delivered}}</b></span><span class="kpi-hint">完成签收批次</span></span></div>
   </div>
 
   <div class="shipment-workbench">
