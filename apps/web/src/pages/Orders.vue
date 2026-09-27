@@ -246,11 +246,11 @@ onBeforeUnmount(()=>window.removeEventListener('keydown',handleEscape));
   </TradeHero>
 
   <div class="kpi-grid five">
-    <div class="kpi-card"><span class="kpi-icon blue">▱</span><span class="kpi-copy"><span class="kpi-label">进行中订单</span><span class="kpi-main"><b class="kpi-value">{{summary.active}}</b></span><span class="kpi-hint">总订单 {{rows.length}} 单</span></span></div>
-    <div class="kpi-card"><span class="kpi-icon orange">♜</span><span class="kpi-copy"><span class="kpi-label">待生产</span><span class="kpi-main"><b class="kpi-value">{{summary.waitingProduction}}</b></span><span class="kpi-hint">待确认与已确认订单</span></span></div>
-    <div class="kpi-card"><span class="kpi-icon purple">♨</span><span class="kpi-copy"><span class="kpi-label">待出运</span><span class="kpi-main"><b class="kpi-value">{{summary.waitingShipment}}</b></span><span class="kpi-hint">生产完成等待安排</span></span></div>
-    <div class="kpi-card"><span class="kpi-icon yellow">¥</span><span class="kpi-copy"><span class="kpi-label">待收款</span><span class="kpi-main"><b class="kpi-value">{{summary.waitingPayment}}</b></span><span class="kpi-hint">按现有回款计划统计</span></span></div>
-    <div class="kpi-card"><span class="kpi-icon green">✓</span><span class="kpi-copy"><span class="kpi-label">已完成</span><span class="kpi-main"><b class="kpi-value">{{summary.completed}}</b></span><span class="kpi-hint">已完成订单</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-order_active"></span><span class="kpi-copy"><span class="kpi-label">进行中订单</span><span class="kpi-main"><b class="kpi-value">{{summary.active}}</b></span><span class="kpi-hint">总订单 {{rows.length}} 单</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-order_production"></span><span class="kpi-copy"><span class="kpi-label">待生产</span><span class="kpi-main"><b class="kpi-value">{{summary.waitingProduction}}</b></span><span class="kpi-hint">待确认与已确认订单</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-order_shipment"></span><span class="kpi-copy"><span class="kpi-label">待出运</span><span class="kpi-main"><b class="kpi-value">{{summary.waitingShipment}}</b></span><span class="kpi-hint">生产完成等待安排</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-order_payment"></span><span class="kpi-copy"><span class="kpi-label">待收款</span><span class="kpi-main"><b class="kpi-value">{{summary.waitingPayment}}</b></span><span class="kpi-hint">按现有回款计划统计</span></span></div>
+    <div class="kpi-card"><span class="kpi-icon ui-sprite sprite-order_complete"></span><span class="kpi-copy"><span class="kpi-label">已完成</span><span class="kpi-main"><b class="kpi-value">{{summary.completed}}</b></span><span class="kpi-hint">已完成订单</span></span></div>
   </div>
 
   <section class="order-filter-bar">
