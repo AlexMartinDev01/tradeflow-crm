@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed,onMounted,reactive,ref} from 'vue';
+import {computed,onBeforeUnmount,onMounted,reactive,ref} from 'vue';
 import {useRouter} from 'vue-router';
 import {ElMessage,ElMessageBox} from 'element-plus';
 import AppLayout from '../layouts/AppLayout.vue';
@@ -232,7 +232,11 @@ function exportOrders(){
   const u=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8'}));
   const a=document.createElement('a');a.href=u;a.download='orders.csv';a.click();URL.revokeObjectURL(u);
 }
-onMounted(async()=>{await load();if(rows.value[0])await open(rows.value[0])});
+function handleEscape(e:KeyboardEvent){
+  if(e.key==='Escape'&&detail.value){detail.value=null;selectedId.value=''}
+}
+onMounted(async()=>{window.addEventListener('keydown',handleEscape);await load();if(rows.value[0])await open(rows.value[0])});
+onBeforeUnmount(()=>window.removeEventListener('keydown',handleEscape));
 </script>
 
 <template><AppLayout>
@@ -272,12 +276,12 @@ onMounted(async()=>{await load();if(rows.value[0])await open(rows.value[0])});
         <el-table-column label="交期" width="120"><template #default="s"><div>{{s.row.requested_delivery||'-'}}</div><small v-if="daysLeft(s.row.requested_delivery)!=null" :class="{urgent:(daysLeft(s.row.requested_delivery)||0)<=14}">剩余 {{daysLeft(s.row.requested_delivery)}} 天</small></template></el-table-column>
         <el-table-column label="回款进度" width="145"><template #default="s"><div class="progress-cell"><el-progress :percentage="paymentPercent(s.row)" :stroke-width="7" :show-text="false"/><span>{{paymentPercent(s.row)}}%</span></div></template></el-table-column>
         <el-table-column label="负责人" width="105"><template #default="s">{{ownerName(s.row)}}</template></el-table-column>
-        <el-table-column label="操作" width="62" fixed="right"><template #default="s"><el-button link type="primary" @click.stop="open(s.row)">•••</el-button></template></el-table-column>
+        <el-table-column label="操作" width="62" fixed="right"><template #default="s"><el-button link type="primary" @click.stop="open(s.row)">详情</el-button></template></el-table-column>
       </el-table>
       <div class="list-footer">共 {{filteredRows.length}} 条记录</div>
     </section>
 
-    <aside v-if="detail||detailLoading" class="order-detail-panel">
+    <aside v-if="detail||detailLoading" class="order-detail-panel" role="dialog" aria-label="订单执行详情">
       <div v-loading="detailLoading" class="detail-panel-inner">
         <template v-if="detail">
           <div class="detail-top">
