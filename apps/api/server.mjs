@@ -2544,7 +2544,31 @@ const server = http.createServer(async (req,res)=>{
       const searchableDefs=customFieldDefs('customer').filter(d=>d.searchable&&customFieldVisible(d,user.role)),lower=term.toLowerCase();
       const customCandidates=db.prepare(`SELECT c.*,u.display_name owner_name FROM customers c LEFT JOIN users u ON u.id=c.owner_id WHERE c.deleted_at IS NULL${scope} ORDER BY c.updated_at DESC LIMIT 2000`).all(...scopeArgs)
         .filter(r=>{const cf=parseJSON(r.custom_fields,{})||{};return searchableDefs.some(d=>String(cf[d.field_key]??'').toLowerCase().includes(lower));});
-      const map=new Map();for(const r of [...base,...customCandidates])if(!map.has(r.id))map.set(r.id,protectRow('customers',decodeRow(r,resourceMap.customers),user));
+      const contactHit=db.prepare(`SELECT ct.name,ct.title,ct.department FROM contacts ct WHERE ct.customer_id=? AND (ct.name LIKE ? OR ct.title LIKE ? OR ct.department LIKE ?) LIMIT 1`);
+      const channelHit=db.prepare(`SELECT cc.channel FROM contacts ct JOIN contact_channels cc ON cc.contact_id=ct.id WHERE ct.customer_id=? AND cc.value LIKE ? LIMIT 1`);
+      const tagHit=db.prepare(`SELECT t.name FROM customer_tags x JOIN tags t ON t.id=x.tag_id WHERE x.customer_id=? AND t.name LIKE ? LIMIT 1`);
+      const brandHit=db.prepare(`SELECT b.name FROM customer_brands cb JOIN brands b ON b.id=cb.brand_id WHERE cb.customer_id=? AND b.name LIKE ? LIMIT 1`);
+      function searchReasons(r){
+        const reasons=[],push=(type,label,value)=>{if(!reasons.some(x=>x.type===type&&x.value===value))reasons.push({type,label,value});};
+        const direct=[
+          ['name','客户名称',r.name],['english_name','英文名称',r.english_name],['local_name','本地名称',r.local_name],['website','官网',r.website],
+          ['tax_no','税号/VAT',r.tax_no],['registration_no','注册号',r.registration_no],['business_scope','主营业务',r.business_scope]
+        ];
+        for(const [type,label,value] of direct)if(String(value||'').toLowerCase().includes(lower))push(type,label,String(value));
+        const ct=contactHit.get(r.id,like,like,like);if(ct)push('contact','联系人',String(ct.name||ct.title||ct.department||term));
+        const ch=channelHit.get(r.id,like);if(ch)push('channel',`联系方式（${String(ch.channel||'contact')}）`,term);
+        const tg=tagHit.get(r.id,like);if(tg)push('tag','标签',String(tg.name));
+        const br=brandHit.get(r.id,like);if(br)push('brand','品牌',String(br.name));
+        const cf=parseJSON(r.custom_fields,{})||{};
+        for(const def of searchableDefs){const value=cf[def.field_key];if(String(value??'').toLowerCase().includes(lower))push('custom_field',`自定义字段：${def.label||def.field_key}`,term);}
+        return reasons.slice(0,5);
+      }
+      const map=new Map();
+      for(const r of [...base,...customCandidates]){
+        if(map.has(r.id))continue;
+        const safe=protectRow('customers',decodeRow(r,resourceMap.customers),user);
+        map.set(r.id,{...safe,match_reasons:searchReasons(r)});
+      }
       return json(res,200,[...map.values()].slice(0,100));
     }
 
