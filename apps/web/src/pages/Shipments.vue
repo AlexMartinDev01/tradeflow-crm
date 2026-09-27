@@ -180,7 +180,7 @@ onMounted(async()=>{await load();if(shipments.value[0])await open(shipments.valu
 </script>
 
 <template><AppLayout>
-  <TradeHero title="出运执行" subtitle="管理订舱、货柜、报关、ETD、ETA、提单及物流进度，确保订单按时安全交付。" slogan="让中国好产品&#10;走向全球市场">
+  <TradeHero variant="shipments" title="出运执行" subtitle="管理订舱、货柜、报关、ETD、ETA、提单及物流进度，确保订单按时安全交付。" slogan="让中国好产品&#10;走向全球市场">
     <el-button v-if="canEdit" type="primary" @click="createDialog=true">＋ 新建出运批次</el-button>
     <el-button @click="exportCsv">导出</el-button>
     <el-button @click="openTracking">物流跟踪</el-button>
