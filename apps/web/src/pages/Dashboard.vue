@@ -11,14 +11,14 @@ const d=ref<any>({});
 const loading=ref(false);
 
 const stats=computed(()=>[
-  {label:'客户',value:d.value.customers||0,hint:'客户资产总览',route:'/customers',icon:'♙',tone:'blue'},
-  {label:'询盘',value:d.value.inquiries||0,hint:'查看最新询盘',route:'/sales/inquiries',icon:'✉',tone:'orange'},
-  {label:'在跟商机',value:d.value.opportunities||0,hint:'推进销售机会',route:'/sales/opportunities',icon:'◎',tone:'purple'},
-  {label:'订单',value:d.value.orders||0,hint:'订单执行进度',route:'/orders',icon:'▱',tone:'green'},
-  {label:'联系人',value:d.value.contacts||0,hint:'客户联系人总量',route:'/customers',icon:'▣',tone:'red'},
-  {label:'待办',value:d.value.openTasks||0,hint:'优先处理到期事项',route:'/module/tasks',icon:'□',tone:'blue'},
-  {label:'报价',value:d.value.quotations||0,hint:'报价与版本管理',route:'/sales/quotations',icon:'◇',tone:'yellow'},
-  {label:'逾期回款',value:d.value.overduePayments||0,hint:'关注资金风险',route:'/finance',icon:'¥',tone:'red'}
+  {label:'客户',value:d.value.customers||0,hint:'客户资产总览',route:'/customers',icon:'kpi_customer'},
+  {label:'询盘',value:d.value.inquiries||0,hint:'查看最新询盘',route:'/sales/inquiries',icon:'kpi_inquiry'},
+  {label:'在跟商机',value:d.value.opportunities||0,hint:'推进销售机会',route:'/sales/opportunities',icon:'kpi_opportunity'},
+  {label:'订单',value:d.value.orders||0,hint:'订单执行进度',route:'/orders',icon:'kpi_order'},
+  {label:'联系人',value:d.value.contacts||0,hint:'客户联系人总量',route:'/customers',icon:'kpi_contact'},
+  {label:'待办',value:d.value.openTasks||0,hint:'优先处理到期事项',route:'/module/tasks',icon:'kpi_task'},
+  {label:'报价',value:d.value.quotations||0,hint:'报价与版本管理',route:'/sales/quotations',icon:'kpi_quote'},
+  {label:'逾期回款',value:d.value.overduePayments||0,hint:'关注资金风险',route:'/finance',icon:'kpi_overdue'}
 ]);
 
 async function load(){
@@ -36,7 +36,7 @@ onMounted(load);
 
   <div class="kpi-grid" v-loading="loading">
     <button v-for="item in stats" :key="item.label" class="kpi-card dashboard-kpi" type="button" @click="go(item.route)">
-      <span class="kpi-icon" :class="item.tone">{{item.icon}}</span>
+      <span class="kpi-icon ui-sprite" :class="'sprite-'+item.icon"></span>
       <span class="kpi-copy">
         <span class="kpi-label">{{item.label}}</span>
         <span class="kpi-main"><b class="kpi-value">{{item.value}}</b></span>
@@ -49,10 +49,10 @@ onMounted(load);
   <section class="quick-entry-panel">
     <div class="quick-entry-title">快捷入口</div>
     <div class="quick-entry-grid">
-      <button class="quick-entry" type="button" @click="go('/customers')"><span class="entry-icon">♙</span><span><b>客户360°</b><small>查看客户全景画像与跟进记录</small></span><span class="entry-arrow">›</span></button>
-      <button class="quick-entry" type="button" @click="go('/sales/opportunities')"><span class="entry-icon">▥</span><span><b>销售商机</b><small>管理商机阶段，推动成交</small></span><span class="entry-arrow">›</span></button>
-      <button class="quick-entry" type="button" @click="go('/orders')"><span class="entry-icon">▱</span><span><b>订单执行</b><small>跟踪订单进度，确保按期交付</small></span><span class="entry-arrow">›</span></button>
-      <button class="quick-entry" type="button" @click="go('/shipments')"><span class="entry-icon">♨</span><span><b>出运执行</b><small>管理出运计划与物流动态</small></span><span class="entry-arrow">›</span></button>
+      <button class="quick-entry" type="button" @click="go('/customers')"><span class="entry-icon ui-sprite sprite-quick_customer"></span><span><b>客户360°</b><small>查看客户全景画像与跟进记录</small></span><span class="entry-arrow">›</span></button>
+      <button class="quick-entry" type="button" @click="go('/sales/opportunities')"><span class="entry-icon ui-sprite sprite-quick_opportunity"></span><span><b>销售商机</b><small>管理商机阶段，推动成交</small></span><span class="entry-arrow">›</span></button>
+      <button class="quick-entry" type="button" @click="go('/orders')"><span class="entry-icon ui-sprite sprite-quick_order"></span><span><b>订单执行</b><small>跟踪订单进度，确保按期交付</small></span><span class="entry-arrow">›</span></button>
+      <button class="quick-entry" type="button" @click="go('/shipments')"><span class="entry-icon ui-sprite sprite-quick_shipment"></span><span><b>出运执行</b><small>管理出运计划与物流动态</small></span><span class="entry-arrow">›</span></button>
     </div>
   </section>
 
