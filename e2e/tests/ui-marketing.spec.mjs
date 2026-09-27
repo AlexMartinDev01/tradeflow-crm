@@ -1,9 +1,10 @@
 import {test,expect} from '@playwright/test';
 import {authenticatePage,loginApi,getJson,postJson} from './helpers.mjs';
 
-async function choose(page,control,label){
-  await control.click();
-  await control.fill(label);
+async function choose(page,select,label){
+  await select.locator('.el-select__wrapper').click();
+  const input=select.getByRole('combobox');
+  if(await input.isEditable())await input.fill(label);
   await page.getByRole('option',{name:label,exact:true}).click();
 }
 
@@ -23,8 +24,8 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     await page.getByRole('button',{name:'新建分群'}).click();
     const segmentDialog=page.getByRole('dialog',{name:'新建动态客户分群'});
     await segmentDialog.getByLabel('分群名称').fill(segmentName);
-    await choose(page,segmentDialog.getByLabel('国家'),'Germany');
-    await choose(page,segmentDialog.getByLabel('等级'),'A');
+    await choose(page,segmentDialog.getByTestId('segment-country'),'Germany');
+    await choose(page,segmentDialog.getByTestId('segment-grade'),'A');
     await segmentDialog.getByRole('button',{name:'先预览匹配客户'}).click();
 
     const previewDialog=page.getByRole('dialog',{name:'分群预览'});
@@ -56,8 +57,8 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     await page.getByRole('button',{name:'新建活动'}).click();
     const campaignDialog=page.getByRole('dialog',{name:'新建营销活动'});
     await campaignDialog.getByLabel('活动名称').fill(campaignName);
-    await choose(page,campaignDialog.getByLabel('分群'),segmentName);
-    await choose(page,campaignDialog.getByLabel('模板'),templateName);
+    await choose(page,campaignDialog.getByTestId('campaign-segment'),segmentName);
+    await choose(page,campaignDialog.getByTestId('campaign-template'),templateName);
     await campaignDialog.getByLabel('邮件主题').fill('E2E Q4 update');
     await campaignDialog.getByRole('button',{name:'保存活动'}).click();
     await expect(page.getByText('营销活动已创建')).toBeVisible();

@@ -159,16 +159,16 @@ onMounted(load);
 
 <el-dialog v-model="campaignDialog" title="新建营销活动" width="760"><el-form label-position="top">
 <div class="grid" style="grid-template-columns:1fr 1fr"><el-form-item label="活动名称"><el-input v-model="campaign.name"/></el-form-item><el-form-item label="类型"><el-select v-model="campaign.type" style="width:100%"><el-option label="Email" value="email"/><el-option label="展会邀约" value="exhibition"/><el-option label="节日营销" value="holiday"/></el-select></el-form-item>
-<el-form-item label="分群"><el-select v-model="campaign.segment_id" clearable style="width:100%"><el-option v-for="s in segments" :key="s.id" :label="s.name" :value="s.id"/></el-select></el-form-item><el-form-item label="模板"><el-select v-model="campaign.template_id" clearable style="width:100%"><el-option v-for="t in templates" :key="t.id" :label="t.name" :value="t.id"/></el-select></el-form-item>
+<el-form-item label="分群"><el-select v-model="campaign.segment_id" data-testid="campaign-segment" clearable style="width:100%"><el-option v-for="s in segments" :key="s.id" :label="s.name" :value="s.id"/></el-select></el-form-item><el-form-item label="模板"><el-select v-model="campaign.template_id" data-testid="campaign-template" clearable style="width:100%"><el-option v-for="t in templates" :key="t.id" :label="t.name" :value="t.id"/></el-select></el-form-item>
 <el-form-item label="邮件主题"><el-input v-model="campaign.subject"/></el-form-item><el-form-item label="计划时间"><el-input v-model="campaign.scheduled_at" type="datetime-local"/></el-form-item></div>
 <el-form-item label="正文（留空则使用模板正文）"><el-input v-model="campaign.content" type="textarea" :rows="6"/></el-form-item>
 </el-form><template #footer><el-button :disabled="campaignSaving" @click="campaignDialog=false">取消</el-button><el-button type="primary" :loading="campaignSaving" @click="saveCampaign">保存活动</el-button></template></el-dialog>
 
 <el-dialog v-model="segmentDialog" title="新建动态客户分群" width="760"><el-form label-position="top">
 <el-form-item label="分群名称"><el-input v-model="segment.name"/></el-form-item><div class="grid" style="grid-template-columns:1fr 1fr">
-<el-form-item label="国家"><el-select v-model="segment.rules.country" clearable filterable style="width:100%"><el-option v-for="x in countries" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+<el-form-item label="国家"><el-select v-model="segment.rules.country" data-testid="segment-country" clearable filterable style="width:100%"><el-option v-for="x in countries" :key="x" :label="x" :value="x"/></el-select></el-form-item>
 <el-form-item label="状态"><el-select v-model="segment.rules.status" clearable style="width:100%"><el-option v-for="x in ['potential','contacted','following','quoted','sample','negotiating','won','dormant','lost']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
-<el-form-item label="等级"><el-select v-model="segment.rules.grade" clearable style="width:100%"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
+<el-form-item label="等级"><el-select v-model="segment.rules.grade" data-testid="segment-grade" clearable style="width:100%"><el-option v-for="x in ['A','B','C','D']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
 <el-form-item label="来源"><el-select v-model="segment.rules.source" clearable filterable style="width:100%"><el-option v-for="x in sources" :key="x" :label="x" :value="x"/></el-select></el-form-item>
 <el-form-item label="行业"><el-select v-model="segment.rules.industry" clearable filterable style="width:100%"><el-option v-for="x in industries" :key="x" :label="x" :value="x"/></el-select></el-form-item>
 <el-form-item label="客户类型"><el-select v-model="segment.rules.customer_type" clearable style="width:100%"><el-option v-for="x in ['Importer','Distributor','Wholesaler','Retailer','Brand','Agent','Manufacturer','End User','E-commerce']" :key="x" :label="x" :value="x"/></el-select></el-form-item>
