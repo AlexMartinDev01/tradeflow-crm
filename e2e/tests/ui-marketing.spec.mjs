@@ -12,9 +12,47 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
   test('manager builds segment, template and campaign, prepares recipients and records external send',async({page,request})=>{
     const manager=await loginApi(request,'demo.manager');
     const suffix=Date.now().toString().slice(-7);
-    const segmentName='Germany A Segment '+suffix;
+    const fixtureName='Marketing Fixture '+suffix;
+    const segmentName='Iceland B Segment '+suffix;
     const templateName='Q4 Demo Template '+suffix;
-    const campaignName='Germany Q4 Campaign '+suffix;
+    const campaignName='Iceland Q4 Campaign '+suffix;
+
+    const customer=await postJson(request,'/api/customers',{
+      name:fixtureName,
+      english_name:fixtureName,
+      country:'Iceland',
+      city:'Reykjavik',
+      industry:'Industrial Automation',
+      customer_types:['Importer'],
+      status:'following',
+      grade:'B',
+      source:'Marketing UI '+suffix,
+      language:'English',
+      timezone:'Atlantic/Reykjavik'
+    },manager.headers);
+    const contact=await postJson(request,'/api/contacts',{
+      customer_id:customer.id,
+      name:'Marketing Buyer '+suffix,
+      title:'Procurement Manager',
+      department:'Procurement',
+      role:'Decision Maker',
+      is_primary:1,
+      is_departed:0
+    },manager.headers);
+    await postJson(request,'/api/channels',{
+      contact_id:contact.id,
+      channel:'email',
+      value:'marketing-'+suffix+'@example.com',
+      label:'E2E marketing email',
+      is_primary:1
+    },manager.headers);
+    await postJson(request,'/api/marketing/consent',{
+      customer_id:customer.id,
+      contact_id:contact.id,
+      channel:'email',
+      status:'opt_in',
+      source:'e2e-marketing-fixture'
+    },manager.headers,[200]);
 
     await authenticatePage(page,request,'demo.manager');
     await page.goto('/#/marketing');
@@ -24,13 +62,13 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     await page.getByRole('button',{name:'新建分群'}).click();
     const segmentDialog=page.getByRole('dialog',{name:'新建动态客户分群'});
     await segmentDialog.getByLabel('分群名称').fill(segmentName);
-    await choose(page,segmentDialog.getByTestId('segment-country'),'Germany');
-    await choose(page,segmentDialog.getByTestId('segment-grade'),'A');
+    await choose(page,segmentDialog.getByTestId('segment-country'),'Iceland');
+    await choose(page,segmentDialog.getByTestId('segment-grade'),'B');
     await segmentDialog.getByRole('button',{name:'先预览匹配客户'}).click();
 
     const previewDialog=page.getByRole('dialog',{name:'分群预览'});
     await expect(previewDialog).toBeVisible();
-    await expect(previewDialog.getByRole('row',{name:/Nordstern Technik GmbH/})).toBeVisible();
+    await expect(previewDialog.getByRole('row',{name:new RegExp(fixtureName)})).toBeVisible();
     await page.keyboard.press('Escape');
     await expect(previewDialog).toBeHidden();
     await segmentDialog.getByRole('button',{name:'保存分群'}).click();
@@ -66,19 +104,19 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     let campaignRow=page.getByRole('row',{name:new RegExp(campaignName)});
     await expect(campaignRow).toBeVisible();
     await campaignRow.getByRole('button',{name:'准备名单'}).click();
-    await expect(page.getByText(/名单已生成：可触达/)).toBeVisible();
+    await expect(page.getByText('名单已生成：可触达 1，跳过 0')).toBeVisible();
 
     campaignRow=page.getByRole('row',{name:new RegExp(campaignName)});
     await campaignRow.getByRole('button',{name:'收件人'}).click();
     const recipientsDialog=page.getByRole('dialog',{name:'营销收件人'});
     await expect(recipientsDialog).toBeVisible();
-    const nordsternRow=recipientsDialog.getByRole('row',{name:/Nordstern Technik GmbH/});
-    await expect(nordsternRow).toBeVisible();
-    await expect(nordsternRow.getByText('prepared',{exact:true})).toBeVisible();
+    const fixtureRow=recipientsDialog.getByRole('row',{name:new RegExp(fixtureName)});
+    await expect(fixtureRow).toBeVisible();
+    await expect(fixtureRow.getByText('prepared',{exact:true})).toBeVisible();
 
-    await nordsternRow.getByRole('button',{name:'标记外部已发送'}).click();
+    await fixtureRow.getByRole('button',{name:'标记外部已发送'}).click();
     await expect(page.getByText('已记录外部发送')).toBeVisible();
-    await expect(recipientsDialog.getByRole('row',{name:/Nordstern Technik GmbH/}).getByText('sent',{exact:true})).toBeVisible();
+    await expect(recipientsDialog.getByRole('row',{name:new RegExp(fixtureName)}).getByText('sent',{exact:true})).toBeVisible();
 
     const campaigns=await getJson(request,'/api/campaigns?size=500',manager.headers);
     const savedCampaign=campaigns.data.find(x=>x.name===campaignName);
@@ -88,12 +126,13 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     expect(stats.sent).toBeGreaterThanOrEqual(1);
 
     const recipientList=await getJson(request,'/api/marketing/campaigns/'+savedCampaign.id+'/recipients',manager.headers);
-    const nordstern=recipientList.find(x=>x.customer_name==='Nordstern Technik GmbH');
-    expect(nordstern).toBeTruthy();
+    expect(recipientList).toHaveLength(1);
+    const fixtureRecipient=recipientList[0];
+    expect(fixtureRecipient.customer_id).toBe(customer.id);
 
     await postJson(request,'/api/marketing/consent',{
-      customer_id:nordstern.customer_id,
-      contact_id:nordstern.contact_id,
+      customer_id:fixtureRecipient.customer_id,
+      contact_id:fixtureRecipient.contact_id,
       channel:'email',
       status:'opt_out',
       source:'e2e-consent'
@@ -110,7 +149,8 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     },manager.headers);
     const secondPrep=await postJson(request,'/api/marketing/campaigns/'+second.id+'/prepare',{},manager.headers,[200]);
     expect(secondPrep.prepared).toBe(0);
-    expect(secondPrep.skipped).toBeGreaterThanOrEqual(1);
+    expect(secondPrep.skipped).toBe(1);
+    expect(secondPrep.total).toBe(1);
   });
 
   test('sales cannot enter management-only marketing workbench',async({page,request})=>{
