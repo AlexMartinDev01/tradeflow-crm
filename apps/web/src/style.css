@@ -30,7 +30,7 @@ button,input,textarea,select{font:inherit}a{text-decoration:none;color:inherit}.
 
 
 /* === Approved reference raster pass: derived directly from the accepted UI mockups === */
-.ui-sprite{display:inline-block;background-image:url('./assets/ui-sprite.webp');background-repeat:no-repeat;background-size:512px 464px;flex:none}
+.ui-sprite{display:inline-block;background-image:url('./assets/ui-sprite.png');background-repeat:no-repeat;background-size:512px 464px;flex:none}
 .brand-sprite{width:160px;height:48px;background-position:-10px -396px}
 .avatar-sprite{width:51px;height:47px;background-position:-200px -396px;transform:scale(.72);transform-origin:center;margin:-7px -5px}
 .sprite-nav_aftersales{width:26px;height:26px;background-position:-19px -83px}
@@ -149,3 +149,35 @@ button,input,textarea,select{font:inherit}a{text-decoration:none;color:inherit}.
   .main,.sidebar-is-collapsed .main{margin-left:0;width:100%}
   .brand-sprite{transform:none!important}
 }
+
+
+/* Browser-safe PNG navigation sprite. These coordinates are packed from the approved reference icons. */
+.sprite-nav_aftersales,.sprite-nav_analytics,.sprite-nav_brand,.sprite-nav_contracts,.sprite-nav_customers,
+.sprite-nav_customs,.sprite-nav_dashboard,.sprite-nav_finance,.sprite-nav_inquiries,.sprite-nav_opportunities,
+.sprite-nav_orders,.sprite-nav_products,.sprite-nav_quality,.sprite-nav_quick,.sprite-nav_quotes,.sprite-nav_reports,
+.sprite-nav_search,.sprite-nav_security,.sprite-nav_shipments,.sprite-top_bell,.sprite-top_menu,.sprite-top_search_top{
+  background-image:url('./assets/nav-icons.png')!important;
+  background-size:150px 150px!important;
+}
+.sprite-nav_aftersales{background-position:-2px -2px!important}
+.sprite-nav_analytics{background-position:-32px -2px!important}
+.sprite-nav_brand{background-position:-62px -2px!important}
+.sprite-nav_contracts{background-position:-92px -2px!important}
+.sprite-nav_customers{background-position:-122px -2px!important}
+.sprite-nav_customs{background-position:-2px -32px!important}
+.sprite-nav_dashboard{background-position:-32px -32px!important}
+.sprite-nav_finance{background-position:-62px -32px!important}
+.sprite-nav_inquiries{background-position:-92px -32px!important}
+.sprite-nav_opportunities{background-position:-122px -32px!important}
+.sprite-nav_orders{background-position:-2px -62px!important}
+.sprite-nav_products{background-position:-32px -62px!important}
+.sprite-nav_quality{background-position:-62px -62px!important}
+.sprite-nav_quick{background-position:-92px -62px!important}
+.sprite-nav_quotes{background-position:-122px -62px!important}
+.sprite-nav_reports{background-position:-2px -92px!important}
+.sprite-nav_search{background-position:-32px -92px!important}
+.sprite-nav_security{background-position:-62px -92px!important}
+.sprite-nav_shipments{background-position:-92px -92px!important}
+.sprite-top_bell{background-position:-122px -92px!important}
+.sprite-top_menu{background-position:-2px -122px!important}
+.sprite-top_search_top{background-position:-32px -122px!important}
