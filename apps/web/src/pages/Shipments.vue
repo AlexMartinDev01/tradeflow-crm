@@ -74,7 +74,8 @@ const summary=computed(()=>{
   };
 });
 
-function rowClassName({row}:any){return row.id===selectedId.value?'selected-row':''}\nfunction statusLabel(v:string){return statusOptions.find(x=>x.value===v)?.label||v||'-'}
+function rowClassName({row}:any){return row.id===selectedId.value?'selected-row':''}
+function statusLabel(v:string){return statusOptions.find(x=>x.value===v)?.label||v||'-'}
 function statusType(v:string){
   if(v==='delivered')return 'success';
   if(v==='customs'||v==='booking')return 'warning';
