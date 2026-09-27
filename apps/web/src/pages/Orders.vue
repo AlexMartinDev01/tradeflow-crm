@@ -75,7 +75,7 @@ const summary=computed(()=>{
   return {active,waitingProduction,waitingShipment,waitingPayment,completed};
 });
 
-function statusLabel(v:string){return statusOptions.find(x=>x.value===v)?.label||v||'-'}
+function rowClassName({row}:any){return row.id===selectedId.value?'selected-row':''}\nfunction statusLabel(v:string){return statusOptions.find(x=>x.value===v)?.label||v||'-'}
 function statusType(v:string){
   if(v==='completed')return 'success';
   if(v==='cancelled')return 'danger';
@@ -262,7 +262,7 @@ onMounted(async()=>{await load();if(rows.value[0])await open(rows.value[0])});
 
   <div class="order-workbench" :class="{withDetail:detail||detailLoading}">
     <section class="card table-card order-list-panel">
-      <el-table v-loading="loading" :data="filteredRows" empty-text="当前范围暂无订单" highlight-current-row :row-class-name="({row}:any)=>row.id===selectedId?'selected-row':''" @row-click="open">
+      <el-table v-loading="loading" :data="filteredRows" empty-text="当前范围暂无订单" highlight-current-row :row-class-name="rowClassName" @row-click="open">
         <el-table-column prop="order_no" label="订单号" min-width="150"><template #default="s"><button class="order-link" type="button" @click.stop="open(s.row)">{{s.row.order_no}}</button></template></el-table-column>
         <el-table-column label="客户" min-width="170"><template #default="s"><b>{{customerMap[s.row.customer_id]||s.row.customer_id}}</b></template></el-table-column>
         <el-table-column label="订单金额" width="130"><template #default="s">{{s.row.currency}} {{Number(s.row.total||0).toLocaleString()}}</template></el-table-column>
