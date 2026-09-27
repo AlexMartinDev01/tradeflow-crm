@@ -125,17 +125,17 @@ onMounted(load);
 
 <div class="toolbar"><h3 class="section-title">条件（全部满足）</h3><el-button size="small" @click="addCondition">+ 条件</el-button></div>
 <div v-for="(c,i) in form.conditions" :key="i" class="grid" style="grid-template-columns:1.4fr 1fr 1.4fr auto;margin-bottom:8px">
-  <el-select v-model="c.field" @change="fieldChanged(c)"><el-option v-for="(v,k) in entityCfg.fields" :key="String(k)" :label="v.label" :value="String(k)"/></el-select>
-  <el-select v-model="c.operator" @change="preview=null"><el-option v-for="op in fieldDef(c).operators" :key="op" :label="operatorLabels[op]||op" :value="op"/></el-select>
-  <el-input-number v-if="fieldDef(c).kind==='number'" v-model="c.value" style="width:100%" @change="preview=null"/>
-  <el-input v-else v-model="c.value" @input="preview=null"/>
+  <el-select v-model="c.field" aria-label="自动化条件字段" @change="fieldChanged(c)"><el-option v-for="(v,k) in entityCfg.fields" :key="String(k)" :label="v.label" :value="String(k)"/></el-select>
+  <el-select v-model="c.operator" aria-label="自动化条件运算符" @change="preview=null"><el-option v-for="op in fieldDef(c).operators" :key="op" :label="operatorLabels[op]||op" :value="op"/></el-select>
+  <el-input-number v-if="fieldDef(c).kind==='number'" v-model="c.value" aria-label="自动化条件值" style="width:100%" @change="preview=null"/>
+  <el-input v-else v-model="c.value" aria-label="自动化条件值" @input="preview=null"/>
   <el-button :disabled="form.conditions.length<=1" @click="form.conditions.splice(i,1);preview=null">删除</el-button>
 </div>
 
 <div class="toolbar" style="margin-top:18px"><h3 class="section-title">满足条件后执行</h3><el-button size="small" @click="addAction">+ 动作</el-button></div>
 <div v-for="(a,i) in form.actions" :key="i" class="card" style="margin-bottom:10px">
-  <div class="grid" style="grid-template-columns:1fr auto"><el-select v-model="a.type" @change="actionChanged(a)"><el-option v-for="x in actionOptions()" :key="x.value" :label="x.label" :value="x.value"/></el-select><el-button :disabled="form.actions.length<=1" @click="form.actions.splice(i,1);preview=null">删除动作</el-button></div>
-  <template v-if="a.type==='create_task'"><div class="grid" style="grid-template-columns:2fr 1fr 1fr;margin-top:10px"><el-input v-model="a.title" placeholder="任务标题，可用 {name} / {id}" @input="preview=null"/><el-select v-model="a.priority" @change="preview=null"><el-option v-for="x in ['low','normal','high','urgent']" :key="x" :label="x" :value="x"/></el-select><el-input-number v-model="a.due_days" :min="0" :max="365" style="width:100%" @change="preview=null"/></div><el-input v-model="a.description" type="textarea" :rows="2" placeholder="任务说明，可用 {name} / {id}" style="margin-top:8px" @input="preview=null"/></template>
+  <div class="grid" style="grid-template-columns:1fr auto"><el-select v-model="a.type" aria-label="自动化动作类型" @change="actionChanged(a)"><el-option v-for="x in actionOptions()" :key="x.value" :label="x.label" :value="x.value"/></el-select><el-button :disabled="form.actions.length<=1" @click="form.actions.splice(i,1);preview=null">删除动作</el-button></div>
+  <template v-if="a.type==='create_task'"><div class="grid" style="grid-template-columns:2fr 1fr 1fr;margin-top:10px"><el-input v-model="a.title" aria-label="自动化任务标题" placeholder="任务标题，可用 {name} / {id}" @input="preview=null"/><el-select v-model="a.priority" aria-label="自动化任务优先级" @change="preview=null"><el-option v-for="x in ['low','normal','high','urgent']" :key="x" :label="x" :value="x"/></el-select><el-input-number v-model="a.due_days" aria-label="自动化任务到期天数" :min="0" :max="365" style="width:100%" @change="preview=null"/></div><el-input v-model="a.description" aria-label="自动化任务说明" type="textarea" :rows="2" placeholder="任务说明，可用 {name} / {id}" style="margin-top:8px" @input="preview=null"/></template>
   <template v-else-if="a.type==='add_tag'"><el-select v-model="a.tag_id" filterable placeholder="选择标签" style="width:100%;margin-top:10px" @change="preview=null"><el-option v-for="t in tags" :key="t.id" :label="t.name" :value="t.id"/></el-select></template>
   <template v-else><el-select v-model="a.value" placeholder="选择目标值" style="width:100%;margin-top:10px" @change="preview=null"><el-option v-for="x in valueOptions(a.type)" :key="x" :label="x" :value="x"/></el-select></template>
 </div>
