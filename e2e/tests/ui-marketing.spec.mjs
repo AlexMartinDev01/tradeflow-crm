@@ -104,9 +104,18 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     let campaignRow=page.getByRole('row',{name:new RegExp(campaignName)});
     await expect(campaignRow).toBeVisible();
     await campaignRow.getByRole('button',{name:'准备名单'}).click();
-    await expect(page.getByText('名单已生成：可触达 1，跳过 0')).toBeVisible();
 
     campaignRow=page.getByRole('row',{name:new RegExp(campaignName)});
+    await expect(campaignRow.getByText('prepared',{exact:true})).toBeVisible();
+
+    const campaigns=await getJson(request,'/api/campaigns?size=500',manager.headers);
+    const savedCampaign=campaigns.data.find(x=>x.name===campaignName);
+    expect(savedCampaign).toBeTruthy();
+    const preparedRecipients=await getJson(request,'/api/marketing/campaigns/'+savedCampaign.id+'/recipients',manager.headers);
+    expect(preparedRecipients).toHaveLength(1);
+    expect(preparedRecipients[0].customer_id).toBe(customer.id);
+    expect(preparedRecipients[0].status).toBe('prepared');
+
     await campaignRow.getByRole('button',{name:'收件人'}).click();
     const recipientsDialog=page.getByRole('dialog',{name:'营销收件人'});
     await expect(recipientsDialog).toBeVisible();
@@ -118,9 +127,6 @@ test.describe('TradeFlow marketing local workflow acceptance',()=>{
     await expect(page.getByText('已记录外部发送')).toBeVisible();
     await expect(recipientsDialog.getByRole('row',{name:new RegExp(fixtureName)}).getByText('sent',{exact:true})).toBeVisible();
 
-    const campaigns=await getJson(request,'/api/campaigns?size=500',manager.headers);
-    const savedCampaign=campaigns.data.find(x=>x.name===campaignName);
-    expect(savedCampaign).toBeTruthy();
     const stats=await getJson(request,'/api/marketing/campaigns/'+savedCampaign.id+'/stats',manager.headers);
     expect(stats.total).toBeGreaterThanOrEqual(1);
     expect(stats.sent).toBeGreaterThanOrEqual(1);
