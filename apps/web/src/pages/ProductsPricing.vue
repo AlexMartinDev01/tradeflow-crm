@@ -93,8 +93,8 @@ onMounted(load);
 <div class="toolbar"><div><h2 style="margin:0">产品与价格</h2><span class="muted">产品、客户偏好、专属价目表、阶梯价、历史价与市场限制</span></div><div style="display:flex;gap:8px"><el-button :loading="actionBusy==='history'" :disabled="!!actionBusy&&actionBusy!=='history'" @click="showHistory">查询历史价</el-button><el-button type="primary" :loading="actionBusy==='resolve'" :disabled="!!actionBusy&&actionBusy!=='resolve'" @click="resolvePrice">价格解析</el-button></div></div>
 
 <div class="card" style="margin-bottom:16px"><div class="grid" style="grid-template-columns:1fr 1fr 140px 140px auto">
-<el-select v-model="resolver.customer_id" filterable placeholder="选择客户"><el-option v-for="c in customers" :key="c.id" :label="c.name" :value="c.id"/></el-select>
-<el-select v-model="resolver.product_id" filterable placeholder="选择产品"><el-option v-for="p in products" :key="p.id" :label="`${p.sku||'-'} · ${p.name}`" :value="p.id"/></el-select>
+<el-select v-model="resolver.customer_id" filterable placeholder="选择客户" aria-label="价格解析客户"><el-option v-for="c in customers" :key="c.id" :label="c.name" :value="c.id"/></el-select>
+<el-select v-model="resolver.product_id" filterable placeholder="选择产品" aria-label="价格解析产品"><el-option v-for="p in products" :key="p.id" :label="`${p.sku||'-'} · ${p.name}`" :value="p.id"/></el-select>
 <el-input-number v-model="resolver.quantity" :min="1"/><el-select v-model="resolver.target_currency" clearable placeholder="目标币种"><el-option v-for="x in ['USD','EUR','GBP','CNY','JPY','CAD','AUD']" :key="x" :label="x" :value="x"/></el-select><el-button type="primary" plain :loading="actionBusy==='resolve'" :disabled="!!actionBusy&&actionBusy!=='resolve'" @click="resolvePrice">解析当前价格</el-button>
 </div></div>
 

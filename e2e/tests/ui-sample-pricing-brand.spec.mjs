@@ -100,9 +100,9 @@ test.describe('TradeFlow pricing workbench browser and RBAC acceptance',()=>{
 
     await expect(page.getByRole('button',{name:'新增产品'})).toHaveCount(0);
 
-    const customerSelect=page.getByPlaceholder('选择客户');
+    const customerSelect=page.getByRole('combobox',{name:'价格解析客户'});
     await selectElementOption(page,customerSelect,'Nordstern Technik GmbH');
-    const productSelect=page.getByPlaceholder('选择产品');
+    const productSelect=page.getByRole('combobox',{name:'价格解析产品'});
     await productSelect.click();
     await productSelect.fill('SD500 Servo Drive');
     await page.getByRole('option',{name:/SD500 Servo Drive/}).click();
