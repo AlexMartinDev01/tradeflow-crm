@@ -174,13 +174,65 @@ test.describe('TradeFlow high-risk data safety workflows',()=>{
 
   test('signed marketing open click and one-click unsubscribe endpoints are functional and tamper-resistant',async({request})=>{
     const manager=await loginApi(request,'demo.manager');
-    const campaigns=await getJson(request,'/api/campaigns?size=100',manager.headers);
-    const campaign=campaigns.data.find(x=>String(x.name).includes('2026 Q4 Europe Distributor Update'));
-    expect(campaign).toBeTruthy();
+    const suffix=Date.now().toString().slice(-8);
+    const source='Tracking Safety '+suffix;
+
+    // Use a dedicated fixture so unsubscribe verification never mutates the shared seed customers
+    // that later browser tests rely on.
+    const customer=await postJson(request,'/api/customers',{
+      name:'Tracking Safety Customer '+suffix,
+      english_name:'Tracking Safety Customer '+suffix,
+      country:'Iceland',
+      city:'Reykjavik',
+      industry:'Industrial Automation',
+      customer_types:['Importer'],
+      status:'following',
+      grade:'B',
+      source,
+      language:'English',
+      timezone:'Atlantic/Reykjavik'
+    },manager.headers);
+    const contact=await postJson(request,'/api/contacts',{
+      customer_id:customer.id,
+      name:'Tracking Safety Buyer '+suffix,
+      title:'Procurement Manager',
+      department:'Procurement',
+      role:'Decision Maker',
+      is_primary:1,
+      is_departed:0
+    },manager.headers);
+    await postJson(request,'/api/channels',{
+      contact_id:contact.id,
+      channel:'email',
+      value:`tracking-${suffix}@example.com`,
+      label:'E2E tracking email',
+      is_primary:1
+    },manager.headers);
+    await postJson(request,'/api/marketing/consent',{
+      customer_id:customer.id,
+      contact_id:contact.id,
+      channel:'email',
+      status:'opt_in',
+      source:'e2e-tracking-fixture'
+    },manager.headers,[200]);
+
+    const campaign=await postJson(request,'/api/campaigns',{
+      name:'Tracking Safety Campaign '+suffix,
+      type:'email',
+      segment_rule:{source},
+      subject:'Tracking safety verification',
+      content:'Open https://example.com/tradeflow-e2e to verify click tracking.',
+      status:'draft'
+    },manager.headers);
+    const prepared=await postJson(request,`/api/marketing/campaigns/${campaign.id}/prepare`,{},manager.headers,[200]);
+    expect(prepared.prepared).toBe(1);
+    expect(prepared.skipped).toBe(0);
 
     let recipients=await getJson(request,`/api/marketing/campaigns/${campaign.id}/recipients`,manager.headers);
-    const recipient=recipients.find(x=>!x.unsubscribed_at);
-    expect(recipient).toBeTruthy();
+    expect(recipients).toHaveLength(1);
+    const recipient=recipients[0];
+    expect(recipient.customer_id).toBe(customer.id);
+    expect(recipient.status).toBe('prepared');
 
     const beforeOpen=Number(recipient.open_count||0),beforeClick=Number(recipient.click_count||0);
     const openSig=trackingSig('open',recipient.id);
