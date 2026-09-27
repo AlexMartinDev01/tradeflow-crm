@@ -56,7 +56,7 @@ test.describe('TradeFlow customer governance UI',()=>{
     await dialog.getByLabel('修改来源').fill(updatedSource);
     await dialog.getByRole('button',{name:'重新预览'}).click();
 
-    await expect(dialog.getByText('预览确认')).toBeVisible();
+    await expect(dialog.getByText('预览确认',{exact:true})).toBeVisible();
     await expect(dialog.getByText(/将影响 2 个客户/)).toBeVisible();
     await dialog.getByRole('button',{name:'确认执行'}).click();
 
