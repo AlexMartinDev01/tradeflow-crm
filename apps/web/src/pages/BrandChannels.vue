@@ -6,37 +6,48 @@ import {api} from '../api/client';
 import {useAuth} from '../stores/auth';
 
 const auth=useAuth();if(!auth.user)auth.me().catch(()=>{});
-const brands=ref<any[]>([]),customers=ref<any[]>([]),edges=ref<any[]>([]),tree=ref<any[]>([]),selectedBrand=ref(''),brandDialog=ref(false),edgeDialog=ref(false),editingBrand=ref<any>(null),editingEdge=ref<any>(null);
+const brands=ref<any[]>([]),customers=ref<any[]>([]),edges=ref<any[]>([]),tree=ref<any[]>([]),selectedBrand=ref(''),brandDialog=ref(false),edgeDialog=ref(false),editingBrand=ref<any>(null),editingEdge=ref<any>(null),loading=ref(false),networkLoading=ref(false),actionBusy=ref('');
 const canManage=computed(()=>['admin','manager'].includes(auth.user?.role));
 const brandForm=reactive<any>({name:'',website:'',country:'',group_name:'',main_products:'',positioning:''});
 const edgeForm=reactive<any>({upstream_customer_id:'',downstream_customer_id:'',relationship_type:'distributor',channel_level:1,territory:'',exclusive:0,start_date:'',end_date:'',status:'active',notes:''});
 const customerMap=computed(()=>Object.fromEntries(customers.value.map((x:any)=>[x.id,x.name])));
 
+async function runBusy(key:string,fn:()=>Promise<any>){if(actionBusy.value)return;actionBusy.value=key;try{return await fn()}finally{actionBusy.value=''}}
 async function load(){
-  const [b,c]=await Promise.all([api.get('/brands',{params:{size:300}}),api.get('/customers',{params:{size:500}})]);
-  brands.value=b.data.data;customers.value=c.data.data;
-  if(!selectedBrand.value&&brands.value.length)selectedBrand.value=brands.value[0].id;
-  await loadNetwork();
+  loading.value=true;
+  try{
+    const [b,c]=await Promise.all([api.get('/brands',{params:{size:300}}),api.get('/customers',{params:{size:500}})]);
+    brands.value=b.data.data;customers.value=c.data.data;
+    if(!selectedBrand.value&&brands.value.length)selectedBrand.value=brands.value[0].id;
+    await loadNetwork();
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'品牌与渠道数据加载失败，请稍后重试')}
+  finally{loading.value=false}
 }
 async function loadNetwork(){
   if(!selectedBrand.value){edges.value=[];tree.value=[];return}
-  const [e,t]=await Promise.all([api.get('/channel-network',{params:{brand_id:selectedBrand.value}}),api.get('/channel-network/tree',{params:{brand_id:selectedBrand.value}})]);
-  edges.value=e.data;tree.value=t.data.tree||[];
+  networkLoading.value=true;
+  try{
+    const [e,t]=await Promise.all([api.get('/channel-network',{params:{brand_id:selectedBrand.value}}),api.get('/channel-network/tree',{params:{brand_id:selectedBrand.value}})]);
+    edges.value=e.data;tree.value=t.data.tree||[];
+  }catch(e:any){edges.value=[];tree.value=[];ElMessage.error(e.response?.data?.message||'渠道网络加载失败')}
+  finally{networkLoading.value=false}
 }
 function resetBrand(){editingBrand.value=null;Object.assign(brandForm,{name:'',website:'',country:'',group_name:'',main_products:'',positioning:''})}
 function addBrand(){resetBrand();brandDialog.value=true}
 function editBrand(r:any){editingBrand.value=r;Object.assign(brandForm,{...r});brandDialog.value=true}
 async function saveBrand(){
   if(!brandForm.name.trim())return ElMessage.warning('品牌名称必填');
-  if(editingBrand.value)await api.patch(`/brands/${editingBrand.value.id}`,brandForm);else await api.post('/brands',brandForm);
-  brandDialog.value=false;await load();ElMessage.success('品牌已保存');
+  await runBusy('brand-save',async()=>{try{
+    if(editingBrand.value)await api.patch(`/brands/${editingBrand.value.id}`,brandForm);else await api.post('/brands',brandForm);
+    brandDialog.value=false;await load();ElMessage.success('品牌已保存');
+  }catch(e:any){ElMessage.error(e.response?.data?.message||'品牌保存失败')}})
 }
 function resetEdge(){editingEdge.value=null;Object.assign(edgeForm,{upstream_customer_id:'',downstream_customer_id:'',relationship_type:'distributor',channel_level:1,territory:'',exclusive:0,start_date:'',end_date:'',status:'active',notes:''})}
 function addEdge(){if(!selectedBrand.value)return ElMessage.warning('请先选择品牌');resetEdge();edgeDialog.value=true}
 function editEdge(r:any){editingEdge.value=r;Object.assign(edgeForm,{...r,upstream_customer_id:r.upstream_customer_id||''});edgeDialog.value=true}
 async function saveEdge(){
   if(!edgeForm.downstream_customer_id)return ElMessage.warning('请选择下游客户');
-  try{
+  await runBusy('edge-save',async()=>{try{
     if(editingEdge.value){
       await api.patch(`/channel-network/${editingEdge.value.id}`,edgeForm);
     }else{
@@ -44,10 +55,11 @@ async function saveEdge(){
     }
     edgeDialog.value=false;await loadNetwork();ElMessage.success('渠道关系已保存');
   }catch(e:any){
-    if(e.response?.data?.error==='channel_cycle')ElMessage.error('该关系会形成渠道循环，系统已阻止保存');else throw e;
-  }
+    if(e.response?.data?.error==='channel_cycle')ElMessage.error('该关系会形成渠道循环，系统已阻止保存');
+    else ElMessage.error(e.response?.data?.message||'渠道关系保存失败');
+  }})
 }
-async function removeEdge(r:any){await ElMessageBox.confirm(`确认删除 ${r.upstream_name||'品牌直属'} → ${r.downstream_name} 的渠道关系？`,'确认');await api.delete(`/channel-network/${r.id}`);await loadNetwork()}
+async function removeEdge(r:any){await ElMessageBox.confirm(`确认删除 ${r.upstream_name||'品牌直属'} → ${r.downstream_name} 的渠道关系？`,'确认');await runBusy('edge-delete-'+r.id,async()=>{try{await api.delete(`/channel-network/${r.id}`);await loadNetwork();ElMessage.success('渠道关系已删除')}catch(e:any){ElMessage.error(e.response?.data?.message||'删除失败')}})}
 function treeLabel(data:any){const e=data.edge;return `${data.label} · L${e.channel_level||'-'} · ${e.relationship_type}${e.territory?' · '+e.territory:''}${e.exclusive?' · 独家':''}`}
 onMounted(load);
 </script>
@@ -58,7 +70,7 @@ onMounted(load);
 <el-tabs>
 <el-tab-pane label="品牌主数据">
   <div class="toolbar"><span class="muted">{{brands.length}} 个品牌</span><el-button v-if="canManage" type="primary" @click="addBrand">新增品牌</el-button></div>
-  <div class="card"><el-table :data="brands">
+  <div class="card"><el-table v-loading="loading" :data="brands">
     <el-table-column prop="name" label="品牌" min-width="170"/><el-table-column prop="country" label="国家" width="120"/><el-table-column prop="group_name" label="所属集团" min-width="150"/>
     <el-table-column prop="main_products" label="主营产品" min-width="180"/><el-table-column prop="positioning" label="市场定位" min-width="180"/><el-table-column prop="website" label="官网" min-width="180"/>
     <el-table-column v-if="canManage" label="操作" width="90"><template #default="s"><el-button link type="primary" @click="editBrand(s.row)">编辑</el-button></template></el-table-column>
@@ -79,12 +91,12 @@ onMounted(load);
       <el-empty v-else description="当前品牌暂无渠道网络"/>
     </div>
 
-    <div class="card"><h3 class="section-title">渠道关系明细</h3><el-table :data="edges">
+    <div class="card"><h3 class="section-title">渠道关系明细</h3><el-table v-loading="networkLoading" :data="edges">
       <el-table-column label="上游" min-width="150"><template #default="s">{{s.row.upstream_name||'品牌直属'}}</template></el-table-column>
       <el-table-column prop="downstream_name" label="下游客户" min-width="160"/><el-table-column prop="relationship_type" label="关系" width="120"/><el-table-column prop="channel_level" label="层级" width="70"/>
       <el-table-column prop="territory" label="区域" min-width="120"/><el-table-column label="独家" width="70"><template #default="s">{{s.row.exclusive?'是':'否'}}</template></el-table-column>
       <el-table-column prop="end_date" label="到期" width="110"/><el-table-column prop="status" label="状态" width="90"/>
-      <el-table-column v-if="canManage" label="操作" width="120"><template #default="s"><el-button link @click="editEdge(s.row)">编辑</el-button><el-button link type="danger" @click="removeEdge(s.row)">删除</el-button></template></el-table-column>
+      <el-table-column v-if="canManage" label="操作" width="120"><template #default="s"><el-button link @click="editEdge(s.row)">编辑</el-button><el-button link type="danger" :loading="actionBusy==='edge-delete-'+s.row.id" :disabled="!!actionBusy&&actionBusy!==('edge-delete-'+s.row.id)" @click="removeEdge(s.row)">删除</el-button></template></el-table-column>
     </el-table></div>
   </div>
 </el-tab-pane>
@@ -94,7 +106,7 @@ onMounted(load);
 <el-form-item label="品牌名称"><el-input v-model="brandForm.name"/></el-form-item><el-form-item label="国家"><el-input v-model="brandForm.country"/></el-form-item>
 <el-form-item label="所属集团"><el-input v-model="brandForm.group_name"/></el-form-item><el-form-item label="官网"><el-input v-model="brandForm.website"/></el-form-item>
 <el-form-item label="主营产品"><el-input v-model="brandForm.main_products"/></el-form-item><el-form-item label="市场定位"><el-input v-model="brandForm.positioning"/></el-form-item>
-</div></el-form><template #footer><el-button @click="brandDialog=false">取消</el-button><el-button type="primary" @click="saveBrand">保存</el-button></template></el-dialog>
+</div></el-form><template #footer><el-button @click="brandDialog=false">取消</el-button><el-button type="primary" :loading="actionBusy==='brand-save'" @click="saveBrand">保存</el-button></template></el-dialog>
 
 <el-dialog v-model="edgeDialog" :title="editingEdge?'编辑渠道关系':'新增渠道关系'" width="720"><el-form label-position="top">
 <div class="grid" style="grid-template-columns:1fr 1fr">
@@ -105,5 +117,5 @@ onMounted(load);
 <el-form-item label="授权/销售区域"><el-input v-model="edgeForm.territory"/></el-form-item><el-form-item label="状态"><el-select v-model="edgeForm.status" style="width:100%"><el-option label="active" value="active"/><el-option label="inactive" value="inactive"/><el-option label="expired" value="expired"/></el-select></el-form-item>
 <el-form-item label="开始日期"><el-input v-model="edgeForm.start_date" type="date"/></el-form-item><el-form-item label="结束日期"><el-input v-model="edgeForm.end_date" type="date"/></el-form-item>
 </div><el-form-item><el-checkbox v-model="edgeForm.exclusive" :true-value="1" :false-value="0">独家渠道</el-checkbox></el-form-item><el-form-item label="备注"><el-input v-model="edgeForm.notes" type="textarea"/></el-form-item>
-</el-form><template #footer><el-button @click="edgeDialog=false">取消</el-button><el-button type="primary" @click="saveEdge">保存</el-button></template></el-dialog>
+</el-form><template #footer><el-button @click="edgeDialog=false">取消</el-button><el-button type="primary" :loading="actionBusy==='edge-save'" @click="saveEdge">保存</el-button></template></el-dialog>
 </AppLayout></template>
